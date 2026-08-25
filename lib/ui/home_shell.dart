@@ -879,24 +879,27 @@ class DeveloperSettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('开发者调试')),
-      body: ListView(
-        children: [
-          SwitchListTile(
-            title: const Text('接收测试版更新'),
-            subtitle: const Text('在版本与更新中显示 GitHub 的 Beta/预发布版本。'),
-            value: controller.betaUpdatesEnabled,
-            onChanged: (value) {
-              unawaited(controller.setBetaUpdatesEnabled(value));
-            },
-          ),
-          const Divider(height: 1),
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Text('测试版只用于验证新功能，可能存在问题。关闭后不会影响已安装版本，也不会删除任何数据。'),
-          ),
-        ],
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) => Scaffold(
+        appBar: AppBar(title: const Text('开发者调试')),
+        body: ListView(
+          children: [
+            SwitchListTile(
+              title: const Text('接收测试版更新'),
+              subtitle: const Text('在版本与更新中显示 GitHub 的 Beta/预发布版本。'),
+              value: controller.betaUpdatesEnabled,
+              onChanged: (value) {
+                unawaited(controller.setBetaUpdatesEnabled(value));
+              },
+            ),
+            const Divider(height: 1),
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('测试版只用于验证新功能，可能存在问题。关闭后不会影响已安装版本，也不会删除任何数据。'),
+            ),
+          ],
+        ),
       ),
     );
   }
