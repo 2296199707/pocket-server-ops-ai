@@ -54,6 +54,9 @@ class _ChatPageState extends State<ChatPage> {
   String _mode = 'chat';
   String _executionMode = 'confirm';
   String? _workingDirectory;
+  String? _modelOverride;
+  String? _reasoningEffortOverride;
+  bool _loadingModels = false;
   bool _sending = false;
   bool _toolsExpanded = false;
   List<AiAttachment> _pendingAttachments = const [];
@@ -74,6 +77,8 @@ class _ChatPageState extends State<ChatPage> {
     if (widget.taskId != oldWidget.taskId && widget.taskId != _taskId) {
       setState(() {
         _taskId = widget.taskId;
+        _modelOverride = null;
+        _reasoningEffortOverride = null;
         _visiblePresentationCount = _historyPageSize;
       });
     }
@@ -114,6 +119,7 @@ class _ChatPageState extends State<ChatPage> {
     final streamingText = task == null
         ? ''
         : widget.controller.streamingAssistantText(task.id);
+    final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
     if (_lastEventCount != events.length) {
       _lastEventCount = events.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -122,12 +128,18 @@ class _ChatPageState extends State<ChatPage> {
     return Column(
       children: [
         _ContextBar(
-          task: task,
-          provider: _providerFor(task?.providerId ?? _effectiveProviderId),
           server: _serverFor(task?.serverId ?? _serverId),
           mode: task?.mode ?? _mode,
           executionMode: task?.executionMode ?? _executionMode,
+          model: task?.modelOverride ?? _modelOverride ?? provider?.model,
+          reasoningEffort:
+              task?.reasoningEffortOverride ??
+              _reasoningEffortOverride ??
+              provider?.reasoningEffort ??
+              'default',
           onTap: running ? null : _editContext,
+          onModelTap: running || _loadingModels ? null : _selectModel,
+          onReasoningTap: running ? null : _selectReasoningEffort,
           onShowContext: () => _showContextStatus(events),
         ),
         if (task != null && task.status != 'queued')
@@ -462,6 +474,7 @@ class _ChatPageState extends State<ChatPage> {
     if (result == null || !mounted) return;
 
     if (task != null) {
+      final providerChanged = result.providerId != task.providerId;
       try {
         final updated = await widget.controller.updateTaskConfiguration(
           taskId: task.id,
@@ -470,6 +483,8 @@ class _ChatPageState extends State<ChatPage> {
           providerId: result.providerId,
           workingDirectory: result.workingDirectory,
           executionMode: result.executionMode,
+          modelOverride: providerChanged ? '' : null,
+          reasoningEffortOverride: providerChanged ? '' : null,
         );
         if (!mounted) return;
         setState(() {
@@ -478,6 +493,8 @@ class _ChatPageState extends State<ChatPage> {
           _mode = updated.mode;
           _executionMode = updated.executionMode;
           _workingDirectory = updated.workingDirectory;
+          _modelOverride = null;
+          _reasoningEffortOverride = null;
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -499,13 +516,168 @@ class _ChatPageState extends State<ChatPage> {
       return;
     }
 
+    final providerChanged = result.providerId != _providerId;
     setState(() {
       _providerId = result.providerId;
       _serverId = result.serverId;
       _mode = result.mode;
       _executionMode = result.executionMode;
       _workingDirectory = result.workingDirectory;
+      if (providerChanged) {
+        _modelOverride = null;
+        _reasoningEffortOverride = null;
+      }
     });
+  }
+
+  Future<void> _selectModel() async {
+    final task = _currentTask;
+    final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
+    if (provider == null) {
+      widget.onOpenSettings();
+      return;
+    }
+    setState(() => _loadingModels = true);
+    try {
+      final loaded = await widget.controller.loadProviderModels(provider);
+      if (!mounted) return;
+      final models = <String>[
+        provider.model,
+        for (final model in loaded)
+          if (model != provider.model) model,
+      ];
+      final current = task?.modelOverride ?? _modelOverride ?? provider.model;
+      final selected = await showModalBottomSheet<String>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                title: const Text('切换 AI 模型'),
+                subtitle: Text('${provider.name} · ${models.length} 个模型'),
+              ),
+              for (final model in models)
+                ListTile(
+                  leading: Icon(
+                    model == current
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_unchecked,
+                  ),
+                  title: Text(model),
+                  subtitle: model == provider.model
+                      ? const Text('供应商默认模型')
+                      : null,
+                  onTap: () => Navigator.pop(context, model),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (selected == null || !mounted) return;
+      await _saveModelSelection(provider, selected);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('读取模型失败：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _loadingModels = false);
+    }
+  }
+
+  Future<void> _saveModelSelection(
+    ProviderProfile provider,
+    String selected,
+  ) async {
+    final task = _currentTask;
+    final override = selected == provider.model ? '' : selected;
+    if (task == null) {
+      setState(() => _modelOverride = override.isEmpty ? null : override);
+      return;
+    }
+    try {
+      await widget.controller.updateTaskConfiguration(
+        taskId: task.id,
+        mode: task.mode,
+        serverId: task.serverId,
+        providerId: task.providerId,
+        workingDirectory: task.workingDirectory,
+        executionMode: task.executionMode,
+        modelOverride: override,
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换模型失败：$error')));
+      }
+    }
+  }
+
+  Future<void> _selectReasoningEffort() async {
+    final task = _currentTask;
+    final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
+    if (provider == null) {
+      widget.onOpenSettings();
+      return;
+    }
+    final current =
+        task?.reasoningEffortOverride ??
+        _reasoningEffortOverride ??
+        provider.reasoningEffort;
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('切换推理强度'),
+              subtitle: Text('当前对话的设置会覆盖供应商默认值'),
+            ),
+            for (final effort in reasoningEffortOptions)
+              ListTile(
+                leading: Icon(
+                  effort == current
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text('${reasoningEffortLabel(effort)}（$effort）'),
+                subtitle: effort == provider.reasoningEffort
+                    ? const Text('供应商默认设置')
+                    : null,
+                onTap: () => Navigator.pop(context, effort),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final override = selected == provider.reasoningEffort ? '' : selected;
+    if (task == null) {
+      setState(
+        () => _reasoningEffortOverride = override.isEmpty ? null : override,
+      );
+      return;
+    }
+    try {
+      await widget.controller.updateTaskConfiguration(
+        taskId: task.id,
+        mode: task.mode,
+        serverId: task.serverId,
+        providerId: task.providerId,
+        workingDirectory: task.workingDirectory,
+        executionMode: task.executionMode,
+        reasoningEffortOverride: override,
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换推理强度失败：$error')));
+      }
+    }
   }
 
   Future<void> _send() async {
@@ -741,21 +913,25 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
 
 class _ContextBar extends StatelessWidget {
   const _ContextBar({
-    required this.task,
-    required this.provider,
     required this.server,
     required this.mode,
     required this.executionMode,
+    required this.model,
+    required this.reasoningEffort,
     required this.onTap,
+    required this.onModelTap,
+    required this.onReasoningTap,
     required this.onShowContext,
   });
 
-  final Task? task;
-  final ProviderProfile? provider;
   final ServerProfile? server;
   final String mode;
   final String executionMode;
+  final String? model;
+  final String reasoningEffort;
   final VoidCallback? onTap;
+  final VoidCallback? onModelTap;
+  final VoidCallback? onReasoningTap;
   final VoidCallback onShowContext;
 
   @override
@@ -784,7 +960,14 @@ class _ContextBar extends StatelessWidget {
                   const SizedBox(width: 6),
                   _ContextPill(
                     icon: Icons.auto_awesome_outlined,
-                    label: provider?.model ?? '未配置供应商',
+                    label: model ?? '未配置模型',
+                    onTap: onModelTap,
+                  ),
+                  const SizedBox(width: 6),
+                  _ContextPill(
+                    icon: Icons.psychology_outlined,
+                    label: '推理${reasoningEffortLabel(reasoningEffort)}',
+                    onTap: onReasoningTap,
                   ),
                 ],
               ),
@@ -817,16 +1000,18 @@ class _ContextPill extends StatelessWidget {
     required this.icon,
     required this.label,
     this.emphasized = false,
+    this.onTap,
   });
 
   final IconData icon;
   final String label;
   final bool emphasized;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    return Container(
+    final content = Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
         color: emphasized
@@ -845,7 +1030,20 @@ class _ContextPill extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.labelMedium,
           ),
+          if (onTap != null) ...[
+            const SizedBox(width: 2),
+            const Icon(Icons.keyboard_arrow_down_rounded, size: 16),
+          ],
         ],
+      ),
+    );
+    if (onTap == null) return content;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: content,
       ),
     );
   }

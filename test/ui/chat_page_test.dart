@@ -26,8 +26,8 @@ void main() {
 
     await tester.tap(find.text('demo-model'));
     await tester.pumpAndSettle();
-    expect(find.text('对话设置'), findsOneWidget);
-    expect(find.text('AI 供应商'), findsOneWidget);
+    expect(find.text('切换 AI 模型'), findsOneWidget);
+    expect(find.text('demo-coder'), findsOneWidget);
 
     controller.dispose();
   });

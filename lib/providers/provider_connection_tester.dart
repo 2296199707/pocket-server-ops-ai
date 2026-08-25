@@ -12,6 +12,7 @@ class ProviderConnectionTester {
       baseUrl: profile.baseUrl,
       apiKey: secret,
       model: profile.model,
+      reasoningEffort: profile.reasoningEffort,
     );
     try {
       // Test the same strict Responses path used by an actual task. A models

@@ -171,6 +171,8 @@ class AppController extends ChangeNotifier {
     required String title,
     String? workingDirectory,
     String? executionMode,
+    String? modelOverride,
+    String? reasoningEffortOverride,
   }) async {
     if (mode != 'chat' && mode != 'agent') {
       throw ArgumentError('不支持的任务模式：$mode');
@@ -190,6 +192,8 @@ class AppController extends ChangeNotifier {
       mode: mode,
       serverId: mode == 'agent' ? serverId : null,
       providerId: providerId,
+      modelOverride: _normalizeOptionalValue(modelOverride),
+      reasoningEffortOverride: _normalizeOptionalValue(reasoningEffortOverride),
       title: title,
       workingDirectory: workingDirectory,
       executionMode: normalizedExecutionMode,
@@ -208,6 +212,8 @@ class AppController extends ChangeNotifier {
       mode: source.mode,
       serverId: source.serverId,
       providerId: source.providerId,
+      modelOverride: source.modelOverride,
+      reasoningEffortOverride: source.reasoningEffortOverride,
       title: '${source.title}（继续）',
       workingDirectory: source.workingDirectory,
       executionMode: source.executionMode,
@@ -251,6 +257,8 @@ class AppController extends ChangeNotifier {
     required String? providerId,
     required String? workingDirectory,
     required String executionMode,
+    String? modelOverride,
+    String? reasoningEffortOverride,
   }) async {
     if (mode != 'chat' && mode != 'agent') {
       throw ArgumentError('不支持的任务模式：$mode');
@@ -270,6 +278,12 @@ class AppController extends ChangeNotifier {
     final normalizedWorkingDirectory = mode == 'agent'
         ? workingDirectory
         : null;
+    final normalizedModelOverride = modelOverride == null
+        ? current.modelOverride
+        : _normalizeOptionalValue(modelOverride);
+    final normalizedReasoningEffortOverride = reasoningEffortOverride == null
+        ? current.reasoningEffortOverride
+        : _normalizeOptionalValue(reasoningEffortOverride);
     final contextChanged =
         current.mode != mode ||
         current.serverId != normalizedServerId ||
@@ -280,6 +294,8 @@ class AppController extends ChangeNotifier {
       mode: mode,
       serverId: normalizedServerId,
       providerId: providerId,
+      modelOverride: normalizedModelOverride,
+      reasoningEffortOverride: normalizedReasoningEffortOverride,
       title: current.title,
       workingDirectory: normalizedWorkingDirectory,
       executionMode: normalizedExecutionMode,
@@ -552,7 +568,9 @@ class AppController extends ChangeNotifier {
       client = OpenAiCompatibleClient(
         baseUrl: provider.baseUrl,
         apiKey: apiKey,
-        model: provider.model,
+        model: task.modelOverride ?? provider.model,
+        reasoningEffort:
+            task.reasoningEffortOverride ?? provider.reasoningEffort,
       );
       final loop = AgentLoop(client: client, tools: tools);
       final history = _taskHistories[task.id];
@@ -1078,6 +1096,7 @@ class AppController extends ChangeNotifier {
     required String name,
     required String baseUrl,
     required String model,
+    String reasoningEffort = 'default',
     required String secret,
     required bool isDefault,
   }) async {
@@ -1094,6 +1113,7 @@ class AppController extends ChangeNotifier {
       name: name,
       baseUrl: baseUrl,
       model: model,
+      reasoningEffort: reasoningEffort,
       apiKeyRef: apiKeyRef,
       isDefault: isDefault,
     );
@@ -1107,6 +1127,7 @@ class AppController extends ChangeNotifier {
                   name: provider.name,
                   baseUrl: provider.baseUrl,
                   model: provider.model,
+                  reasoningEffort: provider.reasoningEffort,
                   apiKeyRef: provider.apiKeyRef,
                   isDefault: false,
                 )
@@ -1683,6 +1704,11 @@ String _normalizeRemotePath(String value) {
   final path = value.trim();
   if (path.length <= 1) return path;
   return path.replaceFirst(RegExp(r'/+$'), '');
+}
+
+String? _normalizeOptionalValue(String? value) {
+  final normalized = value?.trim();
+  return normalized == null || normalized.isEmpty ? null : normalized;
 }
 
 String? _statusForTerminalEvent(String type) {

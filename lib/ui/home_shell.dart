@@ -11,6 +11,7 @@ import '../ssh/ssh_connection.dart';
 import 'chat_page.dart';
 import 'file_manager_page.dart';
 import 'profile_sheets.dart';
+import 'providers_page.dart';
 import 'server_dashboard_page.dart';
 import 'terminal_page.dart';
 import 'updates_page.dart';
@@ -86,7 +87,7 @@ class _HomeShellState extends State<HomeShell> {
           controller: widget.controller,
           taskId: _activeTaskId,
           onTaskActivated: (taskId) => setState(() => _activeTaskId = taskId),
-          onOpenSettings: () => setState(() => _selectedIndex = 2),
+          onOpenSettings: _openProviderSettings,
           onConfirmTool: _confirmAgentTool,
           onConfirmHostKey: _confirmAgentHostKey,
           onUserInfoRequest: _requestAgentUserInfo,
@@ -119,7 +120,7 @@ class _HomeShellState extends State<HomeShell> {
             ),
             const Divider(height: 1),
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
               child: Row(
                 children: [
                   Expanded(
@@ -135,6 +136,14 @@ class _HomeShellState extends State<HomeShell> {
                       icon: Icons.dashboard_outlined,
                       label: '服务器仪表盘',
                       onPressed: _openDashboardFromDrawer,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: _DrawerActionButton(
+                      icon: Icons.smart_toy_outlined,
+                      label: '供应商设置',
+                      onPressed: _openProviderSettingsFromDrawer,
                     ),
                   ),
                 ],
@@ -226,6 +235,21 @@ class _HomeShellState extends State<HomeShell> {
   void _openServerManagerFromDrawer() {
     Navigator.pop(context);
     setState(() => _selectedIndex = 1);
+  }
+
+  void _openProviderSettingsFromDrawer() {
+    Navigator.pop(context);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _openProviderSettings();
+    });
+  }
+
+  void _openProviderSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ProvidersPage(controller: widget.controller),
+      ),
+    );
   }
 
   void _openDashboardFromDrawer() {
@@ -536,15 +560,20 @@ class _DrawerActionButton extends StatelessWidget {
     return OutlinedButton(
       onPressed: onPressed,
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size.fromHeight(76),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        minimumSize: const Size.fromHeight(52),
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
       ),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, size: 25),
-          const SizedBox(height: 4),
-          Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+          Icon(icon, size: 20),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
         ],
       ),
     );
@@ -700,9 +729,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: controller.providers.isEmpty
-                  ? 4
-                  : controller.providers.length + 3,
+              itemCount: 3,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -716,110 +743,13 @@ class SettingsPage extends StatelessWidget {
                     },
                   );
                 }
-                if (controller.providers.isEmpty) {
-                  if (index == 1) {
-                    return _VersionSettingsTile(controller: controller);
-                  }
-                  if (index == 2) {
-                    return _DeveloperSettingsTile(controller: controller);
-                  }
-                  return const SizedBox(
-                    height: 260,
-                    child: _EmptyState(
-                      icon: Icons.smart_toy_outlined,
-                      label: '还没有 AI 供应商',
-                    ),
-                  );
-                }
                 if (index == 1) {
                   return _VersionSettingsTile(controller: controller);
                 }
-                if (index == 2) {
-                  return _DeveloperSettingsTile(controller: controller);
-                }
-                final provider = controller.providers[index - 3];
-                return ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.smart_toy_outlined),
-                  ),
-                  title: Text(provider.name),
-                  subtitle: Text(provider.model),
-                  trailing: PopupMenuButton<String>(
-                    tooltip: '供应商操作',
-                    onSelected: (value) {
-                      if (value == 'edit') {
-                        showProviderEditor(context, controller, provider);
-                      } else if (value == 'test') {
-                        _testProvider(context, provider);
-                      } else {
-                        _deleteProvider(context, provider);
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(value: 'test', child: Text('测试连接')),
-                      PopupMenuItem(value: 'edit', child: Text('编辑')),
-                      PopupMenuItem(value: 'delete', child: Text('删除')),
-                    ],
-                  ),
-                );
+                return _DeveloperSettingsTile(controller: controller);
               },
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => showProviderEditor(context, controller),
-        tooltip: '添加 AI 供应商',
-        child: const Icon(Icons.add),
-      ),
     );
-  }
-
-  Future<void> _testProvider(
-    BuildContext context,
-    ProviderProfile provider,
-  ) async {
-    try {
-      await controller.testProvider(provider);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('连接成功')));
-      }
-    } catch (error) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('连接失败：$error')));
-      }
-    }
-  }
-
-  Future<void> _deleteProvider(
-    BuildContext context,
-    ProviderProfile provider,
-  ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除供应商？'),
-        content: Text(provider.name),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      await controller.deleteProvider(provider);
-    } catch (error) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('删除失败：$error')));
-      }
-    }
   }
 }
 

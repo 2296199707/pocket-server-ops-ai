@@ -246,6 +246,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   late final TextEditingController _baseUrl;
   late final TextEditingController _model;
   late final TextEditingController _secret;
+  String _reasoningEffort = 'default';
   bool _isDefault = false;
   bool _saving = false;
   bool _loadingModels = false;
@@ -260,6 +261,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _baseUrl = TextEditingController(text: profile?.baseUrl);
     _model = TextEditingController(text: profile?.model);
     _secret = TextEditingController();
+    _reasoningEffort = profile?.reasoningEffort ?? 'default';
     _isDefault = profile?.isDefault ?? false;
   }
 
@@ -302,7 +304,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 Expanded(
                   child: TextFormField(
                     controller: _model,
-                    decoration: const InputDecoration(labelText: '模型'),
+                    decoration: const InputDecoration(labelText: '默认模型'),
                     validator: _required,
                   ),
                 ),
@@ -333,6 +335,20 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                   if (value != null) setState(() => _model.text = value);
                 },
               ),
+            DropdownButtonFormField<String>(
+              initialValue: _reasoningEffort,
+              decoration: const InputDecoration(labelText: '默认推理强度'),
+              items: [
+                for (final effort in reasoningEffortOptions)
+                  DropdownMenuItem(
+                    value: effort,
+                    child: Text('${reasoningEffortLabel(effort)}（$effort）'),
+                  ),
+              ],
+              onChanged: (value) {
+                if (value != null) setState(() => _reasoningEffort = value);
+              },
+            ),
             TextFormField(
               controller: _secret,
               obscureText: true,
@@ -389,6 +405,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         name: _name.text.trim(),
         baseUrl: _baseUrl.text.trim(),
         model: _model.text.trim(),
+        reasoningEffort: _reasoningEffort,
         secret: _secret.text,
         isDefault: _isDefault,
       );
@@ -409,6 +426,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       name: _name.text.trim().isEmpty ? '模型测试' : _name.text.trim(),
       baseUrl: _baseUrl.text.trim(),
       model: _model.text.trim().isEmpty ? 'unknown' : _model.text.trim(),
+      reasoningEffort: _reasoningEffort,
       apiKeyRef: widget.existing?.apiKeyRef,
       isDefault: _isDefault,
     );

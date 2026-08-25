@@ -113,6 +113,7 @@ void main() {
     final body = jsonDecode(request.body) as Map<String, Object?>;
     expect(request.url.path, '/v1/responses');
     expect(body['store'], false);
+    expect(body.containsKey('reasoning'), isFalse);
     expect(body['context_management'], [
       {'type': 'compaction'},
     ]);
@@ -127,6 +128,44 @@ void main() {
     expect(response.toolCalls.single.effectiveCallId, 'call_1');
     expect(response.responsesOutputItems.single['type'], 'function_call');
   });
+
+  test(
+    'Responses sends the selected official reasoning effort unchanged',
+    () async {
+      late http.Request request;
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'gpt-5.6-luna',
+        reasoningEffort: 'xhigh',
+        client: MockClient((incoming) async {
+          request = incoming;
+          return http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '完成'},
+                  ],
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      await client.complete(messages: [AiMessage.user('检查')], tools: const []);
+
+      final body = jsonDecode(request.body) as Map<String, Object?>;
+      expect(body['reasoning'], {'effort': 'xhigh'});
+    },
+  );
 
   test(
     'Responses output items, including compaction, are replayed verbatim',

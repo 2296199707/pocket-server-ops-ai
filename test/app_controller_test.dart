@@ -167,6 +167,41 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'task model and reasoning overrides are persisted and continued',
+    () async {
+      final controller = AppController(
+        database: MemoryAppDatabase(demoData: true),
+        credentials: MemoryCredentialStore(),
+        previewMode: true,
+      );
+      await controller.load();
+      final task = await controller.createTask(
+        providerId: 'demo-provider',
+        title: '模型设置',
+        modelOverride: 'demo-coder',
+        reasoningEffortOverride: 'high',
+      );
+
+      final updated = await controller.updateTaskConfiguration(
+        taskId: task.id,
+        mode: task.mode,
+        serverId: task.serverId,
+        providerId: task.providerId,
+        workingDirectory: task.workingDirectory,
+        executionMode: task.executionMode,
+        modelOverride: '',
+      );
+      expect(updated.modelOverride, isNull);
+      expect(updated.reasoningEffortOverride, 'high');
+
+      final continued = await controller.createContinuationTask(updated);
+      expect(continued.modelOverride, isNull);
+      expect(continued.reasoningEffortOverride, 'high');
+      controller.dispose();
+    },
+  );
+
   test('different phone Agent tasks can run concurrently', () async {
     final controller = AppController(
       database: MemoryAppDatabase(demoData: true),

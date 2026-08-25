@@ -1,3 +1,40 @@
+// `default` is an app-only sentinel: omitting reasoning.effort lets the
+// selected model use its documented default. The other values are the
+// official Responses API effort values; individual models support subsets.
+const reasoningEffortOptions = <String>[
+  'default',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+String reasoningEffortLabel(String value) {
+  switch (value) {
+    case 'default':
+      return '模型默认';
+    case 'none':
+      return '无推理';
+    case 'minimal':
+      return '最小';
+    case 'low':
+      return '低';
+    case 'medium':
+      return '中';
+    case 'high':
+      return '高';
+    case 'xhigh':
+      return '极高';
+    case 'max':
+      return '最高';
+    default:
+      return value;
+  }
+}
+
 class ServerProfile {
   final String id;
   final String name;
@@ -90,6 +127,7 @@ class ProviderProfile {
   final String name;
   final String baseUrl;
   final String model;
+  final String reasoningEffort;
   final String? apiKeyRef;
   final bool isDefault;
 
@@ -98,6 +136,7 @@ class ProviderProfile {
     required this.name,
     required this.baseUrl,
     required this.model,
+    this.reasoningEffort = 'default',
     required this.apiKeyRef,
     required this.isDefault,
   });
@@ -108,6 +147,7 @@ class ProviderProfile {
       name: map['name'] as String,
       baseUrl: map['baseUrl'] as String,
       model: map['model'] as String,
+      reasoningEffort: map['reasoningEffort'] as String? ?? 'default',
       apiKeyRef: map['apiKeyRef'] as String?,
       isDefault: map['isDefault'] as bool,
     );
@@ -118,6 +158,7 @@ class ProviderProfile {
     'name': name,
     'baseUrl': baseUrl,
     'model': model,
+    'reasoningEffort': reasoningEffort,
     'apiKeyRef': apiKeyRef,
     'isDefault': isDefault,
   };
@@ -128,6 +169,8 @@ class Task {
   final String mode;
   final String? serverId;
   final String? providerId;
+  final String? modelOverride;
+  final String? reasoningEffortOverride;
   final String title;
   final String? workingDirectory;
   final String executionMode;
@@ -140,6 +183,8 @@ class Task {
     required this.mode,
     required this.serverId,
     required this.providerId,
+    this.modelOverride,
+    this.reasoningEffortOverride,
     required this.title,
     required this.workingDirectory,
     required this.executionMode,
@@ -155,6 +200,8 @@ class Task {
       mode: map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent'),
       serverId: serverId,
       providerId: map['providerId'] as String?,
+      modelOverride: map['modelOverride'] as String?,
+      reasoningEffortOverride: map['reasoningEffortOverride'] as String?,
       title: map['title'] as String,
       workingDirectory: map['workingDirectory'] as String?,
       executionMode: map['executionMode'] == 'auto' ? 'auto' : 'confirm',
@@ -169,6 +216,8 @@ class Task {
     'mode': mode,
     'serverId': serverId,
     'providerId': providerId,
+    'modelOverride': modelOverride,
+    'reasoningEffortOverride': reasoningEffortOverride,
     'title': title,
     'workingDirectory': workingDirectory,
     'executionMode': executionMode,
@@ -181,6 +230,8 @@ class Task {
     String? mode,
     String? serverId,
     String? providerId,
+    String? modelOverride,
+    String? reasoningEffortOverride,
     String? title,
     String? workingDirectory,
     String? executionMode,
@@ -193,6 +244,9 @@ class Task {
       mode: mode ?? this.mode,
       serverId: serverId ?? this.serverId,
       providerId: providerId ?? this.providerId,
+      modelOverride: modelOverride ?? this.modelOverride,
+      reasoningEffortOverride:
+          reasoningEffortOverride ?? this.reasoningEffortOverride,
       title: title ?? this.title,
       workingDirectory: workingDirectory ?? this.workingDirectory,
       executionMode: executionMode ?? this.executionMode,

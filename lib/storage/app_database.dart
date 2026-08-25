@@ -14,7 +14,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 2,
+      version: 4,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -37,6 +37,7 @@ class AppDatabase {
             name TEXT NOT NULL,
             baseUrl TEXT NOT NULL,
             model TEXT NOT NULL,
+            reasoningEffort TEXT NOT NULL DEFAULT 'default',
             apiKeyRef TEXT,
             isDefault INTEGER NOT NULL
           )
@@ -47,6 +48,8 @@ class AppDatabase {
             mode TEXT NOT NULL,
             serverId TEXT,
             providerId TEXT,
+            modelOverride TEXT,
+            reasoningEffortOverride TEXT,
             title TEXT NOT NULL,
             workingDirectory TEXT,
             executionMode TEXT NOT NULL,
@@ -80,6 +83,17 @@ class AppDatabase {
               value TEXT NOT NULL
             )
           ''');
+        }
+        if (oldVersion < 3) {
+          await db.execute(
+            "ALTER TABLE providers ADD COLUMN reasoningEffort TEXT NOT NULL DEFAULT 'default'",
+          );
+        }
+        if (oldVersion < 4) {
+          await db.execute('ALTER TABLE tasks ADD COLUMN modelOverride TEXT');
+          await db.execute(
+            'ALTER TABLE tasks ADD COLUMN reasoningEffortOverride TEXT',
+          );
         }
       },
     );

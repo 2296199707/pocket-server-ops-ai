@@ -33,6 +33,7 @@ class MemoryAppDatabase extends AppDatabase {
       name: '演示 OpenAI Compatible',
       baseUrl: 'https://provider.demo.invalid/v1',
       model: 'demo-model',
+      reasoningEffort: 'default',
       apiKeyRef: 'demo-provider-key',
       isDefault: true,
     );
@@ -71,6 +72,7 @@ class MemoryAppDatabase extends AppDatabase {
         name: profile.name,
         baseUrl: profile.baseUrl,
         model: profile.model,
+        reasoningEffort: profile.reasoningEffort,
         apiKeyRef: profile.apiKeyRef,
         isDefault: false,
       );

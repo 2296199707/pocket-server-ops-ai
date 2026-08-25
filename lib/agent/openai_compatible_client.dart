@@ -61,6 +61,7 @@ class OpenAiCompatibleClient implements AiChatClient {
     required String baseUrl,
     required String apiKey,
     required String model,
+    String reasoningEffort = 'default',
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
     int? compactThreshold,
@@ -77,6 +78,7 @@ class OpenAiCompatibleClient implements AiChatClient {
       baseUrl: baseUrl.trim().replaceFirst(RegExp(r'/+$'), ''),
       apiKey: apiKey,
       model: model,
+      reasoningEffort: reasoningEffort,
       timeout: timeout,
       client: client ?? http.Client(),
       compactThreshold: compactThreshold,
@@ -88,6 +90,7 @@ class OpenAiCompatibleClient implements AiChatClient {
     required this.baseUrl,
     required this._apiKey,
     required this.model,
+    required this.reasoningEffort,
     required this.timeout,
     required this._client,
     required this.compactThreshold,
@@ -97,6 +100,7 @@ class OpenAiCompatibleClient implements AiChatClient {
   final String baseUrl;
   final String _apiKey;
   final String model;
+  final String reasoningEffort;
   final Duration timeout;
   final http.Client _client;
   final int? compactThreshold;
@@ -148,6 +152,9 @@ class OpenAiCompatibleClient implements AiChatClient {
     };
     if (tools.isNotEmpty) {
       requestBody['tools'] = _responsesTools(tools);
+    }
+    if (reasoningEffort != 'default') {
+      requestBody['reasoning'] = {'effort': reasoningEffort};
     }
     request.body = jsonEncode(requestBody);
 
