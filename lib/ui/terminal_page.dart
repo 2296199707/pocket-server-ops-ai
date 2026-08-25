@@ -7,6 +7,7 @@ import 'package:xterm/xterm.dart';
 import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
+import 'file_manager_page.dart';
 
 class TerminalPage extends StatefulWidget {
   const TerminalPage({
@@ -37,6 +38,7 @@ class _TerminalPageState extends State<TerminalPage> {
   var _altHeld = false;
   var _previewRunning = false;
   var _previewLine = '';
+  late String _fileManagerPath;
 
   bool get _preview => widget.controller.previewMode;
   bool get _connected => _session != null && !_disconnected;
@@ -45,6 +47,10 @@ class _TerminalPageState extends State<TerminalPage> {
   @override
   void initState() {
     super.initState();
+    _fileManagerPath =
+        widget.server.defaultWorkingDirectory?.trim().isNotEmpty == true
+        ? widget.server.defaultWorkingDirectory!
+        : '/';
     _terminal.onOutput = _onTerminalOutput;
     _terminal.onResize = (width, height, _, _) {
       if (width <= 0 || height <= 0) return;
@@ -88,6 +94,11 @@ class _TerminalPageState extends State<TerminalPage> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: '文件管理器',
+            onPressed: _openFileDrawer,
+            icon: const Icon(Icons.folder_open_outlined),
+          ),
           if (_connected)
             IconButton(
               tooltip: '发送 Ctrl+C',
@@ -328,6 +339,48 @@ class _TerminalPageState extends State<TerminalPage> {
       _previewLine = '';
       _terminal.write('\$ ');
     }
+  }
+
+  Future<void> _openFileDrawer() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final height = MediaQuery.sizeOf(sheetContext).height * .82;
+        return SizedBox(
+          height: height,
+          child: FileManagerPage(
+            controller: widget.controller,
+            server: widget.server,
+            initialPath: _fileManagerPath,
+            onCdToDirectory: (path) {
+              _cdToDirectory(path);
+              Navigator.of(sheetContext).pop();
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void _cdToDirectory(String path) {
+    final directory = path.trim();
+    if (directory.isEmpty) return;
+    _fileManagerPath = directory;
+    if (_preview) {
+      _terminal.write('cd -- ${_quote(directory)}\r\n\$ ');
+      return;
+    }
+    if (!_connected) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('终端尚未连接，无法切换目录')));
+      }
+      return;
+    }
+    _session?.stream.writeText('cd -- ${_quote(directory)}\n');
   }
 
   Future<bool> _confirmHostKey(SshHostKey key) async {

@@ -10,11 +10,15 @@ class FileManagerPage extends StatefulWidget {
   const FileManagerPage({
     required this.controller,
     required this.server,
+    this.initialPath,
+    this.onCdToDirectory,
     super.key,
   });
 
   final AppController controller;
   final ServerProfile server;
+  final String? initialPath;
+  final ValueChanged<String>? onCdToDirectory;
 
   @override
   State<FileManagerPage> createState() => _FileManagerPageState();
@@ -29,12 +33,25 @@ class _FileManagerPageState extends State<FileManagerPage> {
   @override
   void initState() {
     super.initState();
+    final configuredPath = widget.initialPath?.trim();
     _path = TextEditingController(
-      text: widget.server.defaultWorkingDirectory?.trim().isNotEmpty == true
+      text: configuredPath?.isNotEmpty == true
+          ? configuredPath!
+          : widget.server.defaultWorkingDirectory?.trim().isNotEmpty == true
           ? widget.server.defaultWorkingDirectory
           : '/',
     );
-    unawaited(_load());
+    final cached = widget.controller.cachedServerDirectory(
+      widget.server,
+      _path.text,
+    );
+    if (cached == null) {
+      unawaited(_load());
+    } else {
+      _entries = cached;
+      _loading = true;
+      unawaited(_refresh(_path.text));
+    }
   }
 
   @override
@@ -54,6 +71,12 @@ class _FileManagerPageState extends State<FileManagerPage> {
             onPressed: _loading ? null : _createFile,
             icon: const Icon(Icons.note_add_outlined),
           ),
+          if (widget.onCdToDirectory != null)
+            IconButton(
+              tooltip: 'cd 到当前位置',
+              onPressed: _loading ? null : _cdToCurrentDirectory,
+              icon: const Icon(Icons.subdirectory_arrow_right),
+            ),
           IconButton(
             tooltip: '刷新目录',
             onPressed: _loading ? null : _load,
@@ -98,6 +121,18 @@ class _FileManagerPageState extends State<FileManagerPage> {
               ],
             ),
           ),
+          if (widget.onCdToDirectory != null)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 12, bottom: 4),
+                child: TextButton.icon(
+                  onPressed: _loading ? null : _cdToCurrentDirectory,
+                  icon: const Icon(Icons.terminal_outlined, size: 18),
+                  label: const Text('cd 到当前位置'),
+                ),
+              ),
+            ),
           if (_error != null)
             Container(
               width: double.infinity,
@@ -140,34 +175,61 @@ class _FileManagerPageState extends State<FileManagerPage> {
     );
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool forceRefresh = false}) async {
     final path = _path.text.trim();
     if (path.isEmpty) return;
+    final cached = widget.controller.cachedServerDirectory(widget.server, path);
+    if (!forceRefresh && cached != null) {
+      if (mounted) {
+        setState(() {
+          _entries = cached;
+          _loading = true;
+          _error = null;
+        });
+      }
+      await _refresh(path);
+      return;
+    }
     setState(() {
       _loading = true;
       _error = null;
     });
+    await _refresh(path);
+  }
+
+  Future<void> _refresh(String path) async {
     try {
       final entries = await widget.controller.listServerDirectory(
         widget.server,
         path,
         onFirstHostKey: _confirmHostKey,
+        forceRefresh: true,
       );
-      if (mounted) setState(() => _entries = entries);
+      if (mounted && _path.text.trim() == path) {
+        setState(() => _entries = entries);
+      }
     } catch (error) {
-      if (mounted) setState(() => _error = '读取目录失败：$error');
+      if (mounted && _path.text.trim() == path) {
+        setState(
+          () => _error = _entries.isEmpty
+              ? '读取目录失败：$error'
+              : '刷新失败，继续显示缓存：$error',
+        );
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && _path.text.trim() == path) {
+        setState(() => _loading = false);
+      }
     }
   }
 
-  void _open(SshDirectoryEntry entry) {
+  Future<void> _open(SshDirectoryEntry entry) async {
     if (entry.isDirectory) {
       _path.text = entry.path;
-      _load();
+      await _load();
       return;
     }
-    Navigator.of(context).push(
+    await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => RemoteFileEditorPage(
           controller: widget.controller,
@@ -177,6 +239,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
         ),
       ),
     );
+    if (mounted) unawaited(_load(forceRefresh: true));
   }
 
   void _goParent() {
@@ -228,12 +291,18 @@ class _FileManagerPageState extends State<FileManagerPage> {
         '',
         onFirstHostKey: _confirmHostKey,
       );
-      await _load();
+      await _load(forceRefresh: true);
     } catch (error) {
       if (mounted) {
         setState(() => _error = '新建文件失败：$error');
       }
     }
+  }
+
+  void _cdToCurrentDirectory() {
+    final path = _path.text.trim();
+    if (path.isEmpty) return;
+    widget.onCdToDirectory?.call(path);
   }
 
   Future<bool> _confirmHostKey(SshHostKey key) async {

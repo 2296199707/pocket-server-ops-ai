@@ -113,7 +113,9 @@ void main() {
     await controller.load();
 
     expect(controller.agentAutoExecute, isFalse);
+    expect(controller.betaUpdatesEnabled, isFalse);
     await controller.setAgentAutoExecute(true);
+    await controller.setBetaUpdatesEnabled(true);
     final task = await controller.createTask(
       mode: 'agent',
       serverId: 'server-1',
@@ -129,6 +131,7 @@ void main() {
     );
     await restored.load();
     expect(restored.agentAutoExecute, isTrue);
+    expect(restored.betaUpdatesEnabled, isTrue);
     restored.dispose();
   });
 
@@ -324,6 +327,10 @@ void main() {
       controller.servers.single,
       '/srv/app',
     );
+    final cachedEntries = await controller.listServerDirectory(
+      controller.servers.single,
+      '/srv/app',
+    );
     final content = await controller.readServerFile(
       controller.servers.single,
       '/srv/app/README.md',
@@ -333,11 +340,14 @@ void main() {
       '/srv/app/new.txt',
       'new content',
     );
+    await controller.listServerDirectory(controller.servers.single, '/srv/app');
     await controller.installServerStatusScript(controller.servers.single);
 
     expect(dashboard.hostname, 'test-server');
     expect(dashboard.statusScriptInstalled, isTrue);
     expect(entries.single.name, 'README.md');
+    expect(cachedEntries.single.name, 'README.md');
+    expect(connector.directoryCalls, ['/srv/app', '/srv/app']);
     expect(content, 'remote content');
     expect(connector.writes.single.path, '/srv/app/new.txt');
     expect(
@@ -352,18 +362,28 @@ void main() {
 
 class _FakeConnector implements SshConnector {
   final commands = <String>[];
+  final directoryCalls = <String>[];
   final writes = <({String path, Uint8List contents})>[];
 
   @override
   Future<SshConnection> connect(SshConnectionConfig config) async {
-    return _FakeConnection(commands: commands, writes: writes);
+    return _FakeConnection(
+      commands: commands,
+      directoryCalls: directoryCalls,
+      writes: writes,
+    );
   }
 }
 
 class _FakeConnection implements SshConnection {
-  _FakeConnection({required this.commands, required this.writes});
+  _FakeConnection({
+    required this.commands,
+    required this.directoryCalls,
+    required this.writes,
+  });
 
   final List<String> commands;
+  final List<String> directoryCalls;
   final List<({String path, Uint8List contents})> writes;
   bool closed = false;
 
@@ -426,6 +446,7 @@ class _FakeConnection implements SshConnection {
 
   @override
   Future<List<SshDirectoryEntry>> listDirectory(String remotePath) async {
+    directoryCalls.add(remotePath);
     return [
       SshDirectoryEntry(
         name: 'README.md',

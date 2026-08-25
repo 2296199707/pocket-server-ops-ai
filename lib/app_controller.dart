@@ -55,6 +55,8 @@ class AppController extends ChangeNotifier {
   final Map<String, Future<AgentResult>> _taskRuns = {};
   final Map<String, List<AiMessage>> _taskHistories = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
+  final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
+  final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
   final Map<String, Future<void>> _remoteWriteTails = {};
   final Map<String, Future<void>> _taskEventTails = {};
   final Map<String, String> _streamingAssistantText = {};
@@ -66,6 +68,7 @@ class AppController extends ChangeNotifier {
   List<Task> _tasks = const [];
   Map<String, List<TaskEvent>> _events = const {};
   bool _agentAutoExecute = false;
+  bool _betaUpdatesEnabled = false;
   bool _loading = true;
   String? _loadError;
   bool _disposed = false;
@@ -74,6 +77,7 @@ class AppController extends ChangeNotifier {
   List<ProviderProfile> get providers => List.unmodifiable(_providers);
   List<Task> get tasks => List.unmodifiable(_tasks);
   bool get agentAutoExecute => _agentAutoExecute;
+  bool get betaUpdatesEnabled => _betaUpdatesEnabled;
   bool get isLoading => _loading;
   String? get loadError => _loadError;
 
@@ -109,6 +113,8 @@ class AppController extends ChangeNotifier {
     _providers = await _database.loadProviders();
     _agentAutoExecute =
         await _database.readSetting(_agentAutoExecuteSetting) == 'true';
+    _betaUpdatesEnabled =
+        await _database.readSetting(_betaUpdatesSetting) == 'true';
     final storedTasks = await _database.loadTasks();
     final storedEvents = await _database.loadAllEvents();
     final eventsByTask = <String, List<TaskEvent>>{};
@@ -214,6 +220,15 @@ class AppController extends ChangeNotifier {
       enabled ? 'true' : 'false',
     );
     _agentAutoExecute = enabled;
+    _notify();
+  }
+
+  Future<void> setBetaUpdatesEnabled(bool enabled) async {
+    await _database.writeSetting(
+      _betaUpdatesSetting,
+      enabled ? 'true' : 'false',
+    );
+    _betaUpdatesEnabled = enabled;
     _notify();
   }
 
@@ -779,9 +794,50 @@ class AppController extends ChangeNotifier {
     ServerProfile profile,
     String remotePath, {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    bool forceRefresh = false,
   }) async {
     final path = remotePath.trim();
     if (path.isEmpty) throw ArgumentError('目录路径不能为空');
+    final cacheKey = _directoryCacheKey(profile, path);
+    final pending = _directoryLoads[cacheKey];
+    if (pending != null) return pending;
+    if (!forceRefresh) {
+      final cached = _directoryCache[cacheKey];
+      if (cached != null) return cached;
+    }
+
+    final request = _loadServerDirectory(
+      profile,
+      path,
+      onFirstHostKey: onFirstHostKey,
+    );
+    _directoryLoads[cacheKey] = request;
+    try {
+      final entries = await request;
+      final cachedEntries = List<SshDirectoryEntry>.unmodifiable(entries);
+      _directoryCache[cacheKey] = cachedEntries;
+      return cachedEntries;
+    } finally {
+      if (identical(_directoryLoads[cacheKey], request)) {
+        _directoryLoads.remove(cacheKey);
+      }
+    }
+  }
+
+  List<SshDirectoryEntry>? cachedServerDirectory(
+    ServerProfile profile,
+    String remotePath,
+  ) {
+    final path = remotePath.trim();
+    if (path.isEmpty) return null;
+    return _directoryCache[_directoryCacheKey(profile, path)];
+  }
+
+  Future<List<SshDirectoryEntry>> _loadServerDirectory(
+    ServerProfile profile,
+    String path, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
     if (previewMode) {
       final base = path == '/' ? '/' : path;
       return [
@@ -838,6 +894,21 @@ class AppController extends ChangeNotifier {
       ),
       onFirstHostKey: onFirstHostKey,
     );
+    _invalidateServerDirectoryCache(profile);
+  }
+
+  String _directoryCacheKey(ServerProfile profile, String remotePath) {
+    return '${profile.id}\u0000${profile.host}\u0000${profile.port}'
+        '\u0000${profile.username}\u0000${_normalizeRemotePath(remotePath)}';
+  }
+
+  void _invalidateServerDirectoryCache(ServerProfile profile) {
+    _invalidateServerDirectoryCacheById(profile.id);
+  }
+
+  void _invalidateServerDirectoryCacheById(String serverId) {
+    final prefix = '$serverId\u0000';
+    _directoryCache.removeWhere((key, _) => key.startsWith(prefix));
   }
 
   Future<ServerDashboard> loadServerDashboard(
@@ -979,6 +1050,7 @@ class AppController extends ChangeNotifier {
             : workingDirectory,
       ),
     ]..sort((left, right) => left.name.compareTo(right.name));
+    _invalidateServerDirectoryCacheById(id);
     _notify();
   }
 
@@ -997,6 +1069,7 @@ class AppController extends ChangeNotifier {
       for (final item in _servers)
         if (item.id != profile.id) item,
     ];
+    _invalidateServerDirectoryCache(profile);
     _notify();
   }
 
@@ -1604,6 +1677,13 @@ class AppController extends ChangeNotifier {
 }
 
 const _agentAutoExecuteSetting = 'agent_auto_execute';
+const _betaUpdatesSetting = 'beta_updates_enabled';
+
+String _normalizeRemotePath(String value) {
+  final path = value.trim();
+  if (path.length <= 1) return path;
+  return path.replaceFirst(RegExp(r'/+$'), '');
+}
 
 String? _statusForTerminalEvent(String type) {
   switch (type) {

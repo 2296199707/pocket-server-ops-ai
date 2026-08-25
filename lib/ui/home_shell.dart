@@ -13,6 +13,7 @@ import 'file_manager_page.dart';
 import 'profile_sheets.dart';
 import 'server_dashboard_page.dart';
 import 'terminal_page.dart';
+import 'updates_page.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({required this.controller, super.key});
@@ -700,8 +701,8 @@ class SettingsPage extends StatelessWidget {
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
               itemCount: controller.providers.isEmpty
-                  ? 2
-                  : controller.providers.length + 1,
+                  ? 4
+                  : controller.providers.length + 3,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -716,6 +717,12 @@ class SettingsPage extends StatelessWidget {
                   );
                 }
                 if (controller.providers.isEmpty) {
+                  if (index == 1) {
+                    return _VersionSettingsTile(controller: controller);
+                  }
+                  if (index == 2) {
+                    return _DeveloperSettingsTile(controller: controller);
+                  }
                   return const SizedBox(
                     height: 260,
                     child: _EmptyState(
@@ -724,7 +731,13 @@ class SettingsPage extends StatelessWidget {
                     ),
                   );
                 }
-                final provider = controller.providers[index - 1];
+                if (index == 1) {
+                  return _VersionSettingsTile(controller: controller);
+                }
+                if (index == 2) {
+                  return _DeveloperSettingsTile(controller: controller);
+                }
+                final provider = controller.providers[index - 3];
                 return ListTile(
                   leading: const CircleAvatar(
                     child: Icon(Icons.smart_toy_outlined),
@@ -807,6 +820,85 @@ class SettingsPage extends StatelessWidget {
             .showSnackBar(SnackBar(content: Text('删除失败：$error')));
       }
     }
+  }
+}
+
+class _VersionSettingsTile extends StatelessWidget {
+  const _VersionSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(child: Icon(Icons.system_update_outlined)),
+      title: const Text('版本与更新'),
+      subtitle: const Text('检查新版本、查看历史版本和回退下载'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) =>
+                UpdatesPage(includePrereleases: controller.betaUpdatesEnabled),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DeveloperSettingsTile extends StatelessWidget {
+  const _DeveloperSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(child: Icon(Icons.bug_report_outlined)),
+      title: const Text('开发者调试'),
+      subtitle: Text(controller.betaUpdatesEnabled ? '测试版更新已开启' : '仅显示正式版更新'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => DeveloperSettingsPage(controller: controller),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class DeveloperSettingsPage extends StatelessWidget {
+  const DeveloperSettingsPage({required this.controller, super.key});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('开发者调试')),
+      body: ListView(
+        children: [
+          SwitchListTile(
+            title: const Text('接收测试版更新'),
+            subtitle: const Text('在版本与更新中显示 GitHub 的 Beta/预发布版本。'),
+            value: controller.betaUpdatesEnabled,
+            onChanged: (value) {
+              unawaited(controller.setBetaUpdatesEnabled(value));
+            },
+          ),
+          const Divider(height: 1),
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('测试版只用于验证新功能，可能存在问题。关闭后不会影响已安装版本，也不会删除任何数据。'),
+          ),
+        ],
+      ),
+    );
   }
 }
 

@@ -19,9 +19,8 @@ PUB_CACHE="$PUB_CACHE_DIR" \
 
 VERSION_LINE="$(sed -n 's/^version: //p' "$PROJECT_DIR/pubspec.yaml" | head -n 1)"
 BUILD_NAME="${VERSION_LINE%%+*}"
-BUILD_NUMBER="${VERSION_LINE##*+}"
 APK_DIR="$PROJECT_DIR/build/app/outputs/flutter-apk"
 cp "$APK_DIR/app-${BUILD_MODE}.apk" \
-  "$APK_DIR/pocket-server-ops-v${BUILD_NAME}-build${BUILD_NUMBER}-${BUILD_MODE}.apk"
+  "$APK_DIR/pocket-server-ops-ai-v${BUILD_NAME}-${BUILD_MODE}.apk"
 printf 'Named APK: %s\n' \
-  "$APK_DIR/pocket-server-ops-v${BUILD_NAME}-build${BUILD_NUMBER}-${BUILD_MODE}.apk"
+  "$APK_DIR/pocket-server-ops-ai-v${BUILD_NAME}-${BUILD_MODE}.apk"
