@@ -9,6 +9,7 @@ import 'agent/ai_protocol.dart';
 import 'agent/openai_compatible_client.dart';
 import 'credentials/credential_store.dart';
 import 'domain/models.dart';
+import 'local/project_files.dart';
 import 'platform/android_task_service.dart';
 import 'providers/provider_connection_tester.dart';
 import 'server_status_script.dart';
@@ -50,6 +51,7 @@ class AppController extends ChangeNotifier {
   final SshConnector _sshConnector;
   final AndroidTaskService _taskService;
   final bool previewMode;
+  final ProjectFileStore _projectFiles = const ProjectFileStore();
   final TaskSshConnectionPool _sshPool = TaskSshConnectionPool();
   final Map<String, AgentCancellation> _runningTasks = {};
   final Map<String, Future<AgentResult>> _taskRuns = {};
@@ -57,6 +59,8 @@ class AppController extends ChangeNotifier {
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
   final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
+  final Map<String, List<ProjectFileEntry>> _projectDirectoryCache = {};
+  final Map<String, Future<List<ProjectFileEntry>>> _projectDirectoryLoads = {};
   final Map<String, Future<void>> _remoteWriteTails = {};
   final Map<String, Future<void>> _taskEventTails = {};
   final Map<String, String> _streamingAssistantText = {};
@@ -65,6 +69,7 @@ class AppController extends ChangeNotifier {
 
   List<ServerProfile> _servers = const [];
   List<ProviderProfile> _providers = const [];
+  List<Project> _projects = const [];
   List<Task> _tasks = const [];
   Map<String, List<TaskEvent>> _events = const {};
   bool _agentAutoExecute = false;
@@ -75,6 +80,7 @@ class AppController extends ChangeNotifier {
 
   List<ServerProfile> get servers => List.unmodifiable(_servers);
   List<ProviderProfile> get providers => List.unmodifiable(_providers);
+  List<Project> get projects => List.unmodifiable(_projects);
   List<Task> get tasks => List.unmodifiable(_tasks);
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
@@ -111,6 +117,7 @@ class AppController extends ChangeNotifier {
     _notify();
     _servers = await _database.loadServers();
     _providers = await _database.loadProviders();
+    _projects = await _database.loadProjects();
     _agentAutoExecute =
         await _database.readSetting(_agentAutoExecuteSetting) == 'true';
     _betaUpdatesEnabled =
@@ -164,8 +171,73 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
+  Project? projectFor(String? projectId) {
+    if (projectId == null) return null;
+    for (final project in _projects) {
+      if (project.id == projectId) return project;
+    }
+    return null;
+  }
+
+  Future<Project> createProject({
+    required String name,
+    String? localPath,
+  }) async {
+    final normalizedName = name.trim();
+    if (normalizedName.isEmpty) throw ArgumentError('项目名称不能为空');
+    final id = _newId('project');
+    final path =
+        _normalizeOptionalValue(localPath) ??
+        await ProjectFileStore.defaultProjectPath(id);
+    final project = Project(id: id, name: normalizedName, localPath: path);
+    await _projectFiles.ensureRoot(project);
+    await _database.saveProject(project);
+    _projects = [..._projects, project]
+      ..sort((left, right) => left.name.compareTo(right.name));
+    _notify();
+    return project;
+  }
+
+  Future<Project> updateProject({
+    required Project project,
+    required String name,
+    required String localPath,
+  }) async {
+    final normalizedName = name.trim();
+    final normalizedPath = localPath.trim();
+    if (normalizedName.isEmpty) throw ArgumentError('项目名称不能为空');
+    if (normalizedPath.isEmpty) throw ArgumentError('项目文件夹不能为空');
+    final updated = project.copyWith(
+      name: normalizedName,
+      localPath: normalizedPath,
+    );
+    await _projectFiles.ensureRoot(updated);
+    await _database.saveProject(updated);
+    _invalidateProjectDirectoryCache(project.id);
+    _projects = [..._projects]
+      ..removeWhere((item) => item.id == updated.id)
+      ..add(updated)
+      ..sort((left, right) => left.name.compareTo(right.name));
+    _notify();
+    return updated;
+  }
+
+  Future<void> deleteProject(Project project) async {
+    if (_tasks.any((task) => task.projectId == project.id)) {
+      throw StateError('项目仍有对话，不能删除');
+    }
+    await _database.deleteProject(project.id);
+    _invalidateProjectDirectoryCache(project.id);
+    _projects = [
+      for (final item in _projects)
+        if (item.id != project.id) item,
+    ];
+    _notify();
+  }
+
   Future<Task> createTask({
     String mode = 'chat',
+    String? projectId,
     String? serverId,
     String? providerId,
     required String title,
@@ -177,8 +249,10 @@ class AppController extends ChangeNotifier {
     if (mode != 'chat' && mode != 'agent') {
       throw ArgumentError('不支持的任务模式：$mode');
     }
-    if (mode == 'agent' && (serverId == null || serverId.isEmpty)) {
-      throw ArgumentError('手机 Agent 需要选择目标服务器');
+    if (mode == 'agent' &&
+        (serverId == null || serverId.isEmpty) &&
+        (projectId == null || projectId.isEmpty)) {
+      throw ArgumentError('手机 Agent 需要选择项目或目标服务器');
     }
     final requestedExecutionMode =
         executionMode ??
@@ -190,6 +264,7 @@ class AppController extends ChangeNotifier {
     final task = Task(
       id: _newId('task'),
       mode: mode,
+      projectId: projectId,
       serverId: mode == 'agent' ? serverId : null,
       providerId: providerId,
       modelOverride: _normalizeOptionalValue(modelOverride),
@@ -210,6 +285,7 @@ class AppController extends ChangeNotifier {
   Future<Task> createContinuationTask(Task source) {
     return createTask(
       mode: source.mode,
+      projectId: source.projectId,
       serverId: source.serverId,
       providerId: source.providerId,
       modelOverride: source.modelOverride,
@@ -253,6 +329,7 @@ class AppController extends ChangeNotifier {
   Future<Task> updateTaskConfiguration({
     required String taskId,
     required String mode,
+    String? projectId,
     required String? serverId,
     required String? providerId,
     required String? workingDirectory,
@@ -263,14 +340,17 @@ class AppController extends ChangeNotifier {
     if (mode != 'chat' && mode != 'agent') {
       throw ArgumentError('不支持的任务模式：$mode');
     }
-    if (mode == 'agent' && (serverId == null || serverId.isEmpty)) {
-      throw ArgumentError('手机 Agent 需要选择目标服务器');
-    }
     if (_taskRuns.containsKey(taskId)) {
       throw StateError('任务正在运行，不能修改对话设置');
     }
 
     final current = _tasks.firstWhere((task) => task.id == taskId);
+    final normalizedProjectId = projectId ?? current.projectId;
+    if (mode == 'agent' &&
+        (serverId == null || serverId.isEmpty) &&
+        (normalizedProjectId == null || normalizedProjectId.isEmpty)) {
+      throw ArgumentError('手机 Agent 需要选择项目或目标服务器');
+    }
     final normalizedExecutionMode = executionMode == 'auto'
         ? 'auto'
         : 'confirm';
@@ -286,12 +366,14 @@ class AppController extends ChangeNotifier {
         : _normalizeOptionalValue(reasoningEffortOverride);
     final contextChanged =
         current.mode != mode ||
+        current.projectId != normalizedProjectId ||
         current.serverId != normalizedServerId ||
         current.providerId != providerId;
     final now = DateTime.now().toUtc();
     final updated = Task(
       id: current.id,
       mode: mode,
+      projectId: normalizedProjectId,
       serverId: normalizedServerId,
       providerId: providerId,
       modelOverride: normalizedModelOverride,
@@ -316,6 +398,7 @@ class AppController extends ChangeNotifier {
         payload: {
           'history_boundary': true,
           'mode': mode,
+          'project_id': normalizedProjectId,
           'server_id': normalizedServerId,
           'provider_id': providerId,
         },
@@ -486,6 +569,7 @@ class AppController extends ChangeNotifier {
     final previousEvents = eventsFor(task.id);
     SshConnection? connection;
     RemoteAgentTools? remoteTools;
+    ProjectAgentTools? projectTools;
     OpenAiCompatibleClient? client;
     var remoteOperationStarted = false;
     var serviceStarted = false;
@@ -526,43 +610,70 @@ class AppController extends ChangeNotifier {
         provider.apiKeyRef,
         '供应商 API Key 不可用',
       );
-      List<AgentTool> tools = const [];
+      final tools = <AgentTool>[];
       var systemPrompt = _systemPrompt(task);
       if (task.mode == 'agent') {
+        final project = projectFor(task.projectId);
+        if (task.projectId != null && project == null) {
+          throw StateError('对话绑定的项目不存在');
+        }
+        if (project != null) {
+          await _projectFiles.ensureRoot(project);
+          projectTools = ProjectAgentTools(project, _projectFiles);
+          tools.addAll(
+            _serializeRemoteWrites(
+              projectTools.tools,
+              'project\u0000${project.id}',
+            ),
+          );
+          systemPrompt = _systemPrompt(task, project: project);
+        }
         final serverId = task.serverId;
-        if (serverId == null) throw StateError('任务没有目标服务器');
-        final server = _servers.firstWhere((value) => value.id == serverId);
-        final pendingConnection = _sshPool.acquire(
-          task.id,
-          () => _connectServer(
-            server,
-            onFirstHostKey: onFirstHostKey,
-            onUserInfoRequest: onUserInfoRequest,
-          ),
-        );
-        connection = await Future.any<SshConnection>([
-          pendingConnection,
-          cancellation.whenCancelled.then<SshConnection>(
-            (_) => throw StateError('SSH connection cancelled'),
-          ),
-        ]);
-        await _saveObservedHostKey(server, connection.hostKey);
-        final workingDirectory =
-            task.workingDirectory ?? server.defaultWorkingDirectory;
-        remoteTools = _phoneTools[task.id];
-        if (remoteTools == null || remoteTools.isClosed) {
-          await remoteTools?.close();
-          remoteTools = RemoteAgentTools(
-            connection,
+        if (serverId != null && serverId.isNotEmpty) {
+          final server = _servers.firstWhere((value) => value.id == serverId);
+          final pendingConnection = _sshPool.acquire(
+            task.id,
+            () => _connectServer(
+              server,
+              onFirstHostKey: onFirstHostKey,
+              onUserInfoRequest: onUserInfoRequest,
+            ),
+          );
+          connection = await Future.any<SshConnection>([
+            pendingConnection,
+            cancellation.whenCancelled.then<SshConnection>(
+              (_) => throw StateError('SSH connection cancelled'),
+            ),
+          ]);
+          await _saveObservedHostKey(server, connection.hostKey);
+          final workingDirectory =
+              task.workingDirectory ?? server.defaultWorkingDirectory;
+          remoteTools = _phoneTools[task.id];
+          if (remoteTools == null || remoteTools.isClosed) {
+            await remoteTools?.close();
+            remoteTools = RemoteAgentTools(
+              connection,
+              workingDirectory: workingDirectory,
+              project: project,
+              projectFiles: project == null ? null : _projectFiles,
+            );
+            _phoneTools[task.id] = remoteTools;
+          }
+          tools.addAll(
+            _serializeRemoteWrites(
+              remoteTools.tools,
+              '${server.id}\u0000$workingDirectory',
+            ),
+          );
+          systemPrompt = _systemPrompt(
+            task,
+            project: project,
             workingDirectory: workingDirectory,
           );
-          _phoneTools[task.id] = remoteTools;
         }
-        tools = _serializeRemoteWrites(
-          remoteTools.tools,
-          '${server.id}\u0000$workingDirectory',
-        );
-        systemPrompt = _systemPrompt(task, workingDirectory: workingDirectory);
+        if (tools.isEmpty) {
+          throw StateError('Agent 没有可用的项目或服务器工具');
+        }
       }
 
       client = OpenAiCompatibleClient(
@@ -716,6 +827,7 @@ class AppController extends ChangeNotifier {
     final cancellation = _runningTasks[taskId];
     if (cancellation == null) return;
     cancellation.cancel();
+    unawaited(updateTaskStatus(taskId, 'stopping'));
     unawaited(_recordCancellationRequest(taskId));
     _notify();
   }
@@ -840,6 +952,93 @@ class AppController extends ChangeNotifier {
         _directoryLoads.remove(cacheKey);
       }
     }
+  }
+
+  Future<List<ProjectFileEntry>> listProjectDirectory(
+    Project project,
+    String relativePath, {
+    bool forceRefresh = false,
+  }) async {
+    final path = _normalizeProjectUiPath(relativePath);
+    final cacheKey = _projectDirectoryCacheKey(project, path);
+    final pending = _projectDirectoryLoads[cacheKey];
+    if (pending != null) return pending;
+    if (!forceRefresh) {
+      final cached = _projectDirectoryCache[cacheKey];
+      if (cached != null) return cached;
+    }
+    final request = _projectFiles.list(project, path);
+    _projectDirectoryLoads[cacheKey] = request;
+    try {
+      final entries = List<ProjectFileEntry>.unmodifiable(await request);
+      _projectDirectoryCache[cacheKey] = entries;
+      return entries;
+    } finally {
+      if (identical(_projectDirectoryLoads[cacheKey], request)) {
+        _projectDirectoryLoads.remove(cacheKey);
+      }
+    }
+  }
+
+  List<ProjectFileEntry>? cachedProjectDirectory(
+    Project project,
+    String relativePath,
+  ) {
+    final path = _normalizeProjectUiPath(relativePath);
+    return _projectDirectoryCache[_projectDirectoryCacheKey(project, path)];
+  }
+
+  Future<String> readProjectFile(Project project, String relativePath) {
+    return _projectFiles.readText(
+      project,
+      _normalizeProjectUiPath(relativePath),
+    );
+  }
+
+  Future<void> writeProjectFile(
+    Project project,
+    String relativePath,
+    String content,
+  ) async {
+    await _projectFiles.writeText(
+      project,
+      _normalizeProjectUiPath(relativePath),
+      content,
+    );
+    _invalidateProjectDirectoryCache(project.id);
+  }
+
+  Future<void> createProjectFile(Project project, String relativePath) async {
+    await _projectFiles.createFile(
+      project,
+      _normalizeProjectUiPath(relativePath),
+    );
+    _invalidateProjectDirectoryCache(project.id);
+  }
+
+  Future<void> createProjectDirectory(
+    Project project,
+    String relativePath,
+  ) async {
+    await _projectFiles.createDirectory(
+      project,
+      _normalizeProjectUiPath(relativePath),
+    );
+    _invalidateProjectDirectoryCache(project.id);
+  }
+
+  String _projectDirectoryCacheKey(Project project, String relativePath) {
+    return '${project.id}\u0000${project.localPath}\u0000$relativePath';
+  }
+
+  void _invalidateProjectDirectoryCache(String projectId) {
+    final prefix = '$projectId\u0000';
+    _projectDirectoryCache.removeWhere((key, _) => key.startsWith(prefix));
+  }
+
+  static String _normalizeProjectUiPath(String value) {
+    final path = value.trim();
+    return path == '/' || path == '.' ? '' : path;
   }
 
   List<SshDirectoryEntry>? cachedServerDirectory(
@@ -1184,23 +1383,39 @@ class AppController extends ChangeNotifier {
     return _providers.first;
   }
 
-  String _systemPrompt(Task task, {String? workingDirectory}) {
+  String _systemPrompt(
+    Task task, {
+    Project? project,
+    String? workingDirectory,
+  }) {
     if (task.mode == 'chat') {
       return 'You are a helpful conversational assistant. Do not claim to have '
           'access to a server, terminal, files, or tools.';
     }
-    final directory = workingDirectory ?? task.workingDirectory ?? 'not set';
-    return 'You are an autonomous server coding and operations agent running '
-        'on a phone with SSH tools for the selected server. Work until the '
-        'request is complete: inspect state, make changes, and verify the '
-        'result. Use terminal.exec for short commands; use terminal.start, '
-        'terminal.poll, terminal.write, and terminal.stop for long-running or '
-        'interactive commands. Use file tools for UTF-8 text files. Never '
-        'claim success without checking the result. The default working '
-        'directory is $directory. Any terminal.start process still running '
-        'when this turn ends will be stopped. Use a server service manager or '
-        'a deliberately detached command only when a process must outlive the '
-        'turn.';
+    final scopes = <String>[];
+    if (project != null) {
+      scopes.add(
+        'The phone project is "${project.name}". Use project.list and '
+        'project.read before reading files; project paths are relative to the '
+        'project root.',
+      );
+    }
+    if (workingDirectory != null || task.serverId != null) {
+      final directory = workingDirectory ?? task.workingDirectory ?? 'not set';
+      scopes.add(
+        'The selected server working directory is $directory. Use '
+        'terminal.exec for short commands; use terminal.start, terminal.poll, '
+        'terminal.write, and terminal.stop for long-running commands. Use '
+        'file tools for UTF-8 server files.',
+      );
+    }
+    return 'You are an autonomous coding and operations agent running on a '
+        'phone. Work until the request is complete: inspect state, make '
+        'changes, and verify the result. ${scopes.join(' ')} Never claim '
+        'success without checking the result. A tool call that writes local '
+        'or server state may require confirmation. Any long-running server '
+        'process still running when this turn ends will be stopped unless it '
+        'was deliberately detached.';
   }
 
   Future<AgentResult> _runPreviewTask(

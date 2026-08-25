@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:path/path.dart' as path_util;
 
+import '../domain/models.dart';
+import '../local/project_files.dart';
 import '../ssh/ssh_connection.dart';
 import 'ai_protocol.dart';
 
@@ -21,10 +24,17 @@ class AgentTool {
 }
 
 class RemoteAgentTools {
-  RemoteAgentTools(this._connection, {this.workingDirectory});
+  RemoteAgentTools(
+    this._connection, {
+    this.workingDirectory,
+    this.project,
+    this.projectFiles,
+  });
 
   final SshConnection _connection;
   final String? workingDirectory;
+  final Project? project;
+  final ProjectFileStore? projectFiles;
   final Map<String, _ManagedProcess> _processes = {};
 
   bool get isClosed => _connection.isClosed;
@@ -176,6 +186,27 @@ class RemoteAgentTools {
       call: _replace,
       writesRemoteState: true,
     ),
+    if (project != null && projectFiles != null)
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'server.download_to_project',
+          description:
+              'Download one file from the selected server into the current '
+              'phone project. The destination path is relative to the '
+              'project folder.',
+          parameters: {
+            'type': 'object',
+            'required': ['remote_path', 'project_path'],
+            'properties': {
+              'remote_path': {'type': 'string'},
+              'project_path': {'type': 'string'},
+              'overwrite': {'type': 'boolean'},
+            },
+          },
+        ),
+        call: _downloadToProject,
+        writesRemoteState: true,
+      ),
   ];
 
   Future<Object?> _exec(Map<String, Object?> arguments) async {
@@ -281,7 +312,7 @@ class RemoteAgentTools {
     final path = _requiredString(arguments, 'path');
     await _connection.writeFile(
       _resolveRemotePath(path),
-      utf8.encode(_requiredString(arguments, 'content')),
+      utf8.encode(_requiredText(arguments, 'content')),
     );
     return {'path': path, 'written': true};
   }
@@ -291,9 +322,38 @@ class RemoteAgentTools {
     await _connection.replaceText(
       _resolveRemotePath(path),
       _requiredString(arguments, 'old'),
-      _requiredString(arguments, 'new'),
+      _requiredText(arguments, 'new'),
     );
     return {'path': path, 'replaced': true};
+  }
+
+  Future<Object?> _downloadToProject(Map<String, Object?> arguments) async {
+    final targetProject = project;
+    final files = projectFiles;
+    if (targetProject == null || files == null) {
+      throw StateError('当前对话没有绑定手机项目');
+    }
+    final remotePath = _requiredString(arguments, 'remote_path');
+    final projectPath = _requiredString(arguments, 'project_path');
+    final overwrite = arguments['overwrite'] != false;
+    if (!overwrite) {
+      try {
+        await File(resolveProjectPath(targetProject, projectPath)).stat();
+        throw StateError('项目目标文件已存在：$projectPath');
+      } on FileSystemException {
+        // The destination does not exist, so the download can continue.
+      }
+    }
+    final bytes = await _connection.readFileBytes(
+      _resolveRemotePath(remotePath),
+    );
+    await files.writeBytes(targetProject, projectPath, bytes);
+    return {
+      'remote_path': remotePath,
+      'project_path': projectPath,
+      'bytes': bytes.length,
+      'written': true,
+    };
   }
 
   String _resolveRemotePath(String filePath) {
@@ -324,6 +384,197 @@ class RemoteAgentTools {
     if (value is! String || value.isEmpty) {
       throw ArgumentError('$key is required');
     }
+    return value;
+  }
+
+  static String _requiredText(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    if (value is! String) throw ArgumentError('$key is required');
+    return value;
+  }
+
+  static String? _optionalString(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    return value is String && value.isNotEmpty ? value : null;
+  }
+
+  static int? _optionalNonNegativeInt(
+    Map<String, Object?> arguments,
+    String key,
+  ) {
+    final value = arguments[key];
+    if (value == null) return null;
+    if (value is! int || value < 0) {
+      throw ArgumentError('$key must be a non-negative integer');
+    }
+    return value;
+  }
+}
+
+String resolveProjectPath(Project project, String relativePath) {
+  return const ProjectFileStore().resolve(project, relativePath);
+}
+
+class ProjectAgentTools {
+  ProjectAgentTools(this._project, this._files);
+
+  final Project _project;
+  final ProjectFileStore _files;
+
+  List<AgentTool> get tools => [
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'project.list',
+        description:
+            'List files and folders in the current phone project. Paths are '
+            'relative to the project root.',
+        parameters: {
+          'type': 'object',
+          'properties': {
+            'path': {'type': 'string'},
+          },
+        },
+      ),
+      call: _list,
+      requiresConfirmation: false,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'project.read',
+        description:
+            'Read a UTF-8 text file from the current phone project in byte '
+            'chunks. Do not read the entire project automatically.',
+        parameters: {
+          'type': 'object',
+          'required': ['path'],
+          'properties': {
+            'path': {'type': 'string'},
+            'offset': {'type': 'integer', 'minimum': 0},
+            'length': {
+              'type': 'integer',
+              'minimum': 1,
+              'maximum': _maxFileChunkBytes,
+            },
+          },
+        },
+      ),
+      call: _read,
+      requiresConfirmation: false,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'project.write',
+        description:
+            'Write a UTF-8 text file in the current phone project. The path '
+            'is relative to the project root.',
+        parameters: {
+          'type': 'object',
+          'required': ['path', 'content'],
+          'properties': {
+            'path': {'type': 'string'},
+            'content': {'type': 'string'},
+          },
+        },
+      ),
+      call: _write,
+      writesRemoteState: true,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'project.replace',
+        description: 'Replace exactly one text block in a UTF-8 project file.',
+        parameters: {
+          'type': 'object',
+          'required': ['path', 'old', 'new'],
+          'properties': {
+            'path': {'type': 'string'},
+            'old': {'type': 'string'},
+            'new': {'type': 'string'},
+          },
+        },
+      ),
+      call: _replace,
+      writesRemoteState: true,
+    ),
+  ];
+
+  Future<Object?> _list(Map<String, Object?> arguments) async {
+    final entries = await _files.list(
+      _project,
+      _optionalString(arguments, 'path') ?? '',
+    );
+    return {
+      'project': _project.name,
+      'path': _optionalString(arguments, 'path') ?? '',
+      'entries': [
+        for (final entry in entries)
+          {
+            'name': entry.name,
+            'path': entry.path,
+            'directory': entry.isDirectory,
+            if (entry.size != null) 'size': entry.size,
+          },
+      ],
+    };
+  }
+
+  Future<Object?> _read(Map<String, Object?> arguments) async {
+    final path = _requiredString(arguments, 'path');
+    final offset = _optionalNonNegativeInt(arguments, 'offset') ?? 0;
+    final length =
+        _optionalNonNegativeInt(arguments, 'length') ?? _maxFileChunkBytes;
+    if (length > _maxFileChunkBytes) {
+      throw ArgumentError.value(
+        length,
+        'length',
+        'must not exceed $_maxFileChunkBytes bytes',
+      );
+    }
+    final chunk = await _files.readChunk(
+      _project,
+      path,
+      offset: offset,
+      length: length,
+    );
+    return {
+      'path': path,
+      'offset': chunk.offset,
+      'next_offset': chunk.nextOffset,
+      'eof': chunk.eof,
+      if (chunk.totalBytes != null) 'total_bytes': chunk.totalBytes,
+      'content': chunk.content,
+    };
+  }
+
+  Future<Object?> _write(Map<String, Object?> arguments) async {
+    final path = _requiredString(arguments, 'path');
+    final content = _requiredText(arguments, 'content');
+    await _files.writeText(_project, path, content);
+    return {'path': path, 'written': true};
+  }
+
+  Future<Object?> _replace(Map<String, Object?> arguments) async {
+    final path = _requiredString(arguments, 'path');
+    await _files.replaceText(
+      _project,
+      path,
+      _requiredString(arguments, 'old'),
+      _requiredText(arguments, 'new'),
+    );
+    return {'path': path, 'replaced': true};
+  }
+
+  static String _requiredString(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    if (value is! String || value.isEmpty) {
+      throw ArgumentError('$key is required');
+    }
+    return value;
+  }
+
+  static String _requiredText(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    if (value is! String) throw ArgumentError('$key is required');
     return value;
   }
 

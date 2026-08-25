@@ -199,6 +199,10 @@ abstract class SshConnection {
 
   Future<String> readFile(String remotePath);
 
+  /// Read a remote file as bytes for a direct download. The caller does not
+  /// place these bytes in the AI context.
+  Future<Uint8List> readFileBytes(String remotePath);
+
   /// Read a UTF-8 page. Offsets and lengths are bytes, so callers can fetch
   /// arbitrarily large files without putting the whole file in one tool
   /// result. The default implementation reads through [readFile], while the
@@ -463,6 +467,18 @@ class DartSshConnection implements SshConnection {
       try {
         final contents = await file.readBytes();
         return utf8.decode(contents);
+      } finally {
+        await file.close();
+      }
+    });
+  }
+
+  @override
+  Future<Uint8List> readFileBytes(String remotePath) async {
+    return _withSftp((sftp) async {
+      final file = await sftp.open(remotePath);
+      try {
+        return await file.readBytes();
       } finally {
         await file.close();
       }

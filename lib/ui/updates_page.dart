@@ -113,31 +113,71 @@ class UpdateService {
   void close() => _client.close();
 
   static int compareVersions(String left, String right) {
-    final a = _versionParts(left);
-    final b = _versionParts(right);
+    final a = _parseVersion(left);
+    final b = _parseVersion(right);
     for (var index = 0; index < 3; index++) {
-      final result = a[index].compareTo(b[index]);
+      final result = a.base[index].compareTo(b.base[index]);
       if (result != 0) return result;
     }
-    return 0;
+    final aPrerelease = a.prerelease;
+    final bPrerelease = b.prerelease;
+    if (aPrerelease == bPrerelease) return 0;
+    if (aPrerelease == null) return 1;
+    if (bPrerelease == null) return -1;
+    final aParts = aPrerelease.split('.');
+    final bParts = bPrerelease.split('.');
+    final length = aParts.length < bParts.length
+        ? aParts.length
+        : bParts.length;
+    for (var index = 0; index < length; index++) {
+      final leftPart = aParts[index];
+      final rightPart = bParts[index];
+      if (leftPart == rightPart) continue;
+      final leftNumber = int.tryParse(leftPart);
+      final rightNumber = int.tryParse(rightPart);
+      if (leftNumber != null && rightNumber != null) {
+        return leftNumber.compareTo(rightNumber);
+      }
+      if (leftNumber != null) return -1;
+      if (rightNumber != null) return 1;
+      return leftPart.compareTo(rightPart);
+    }
+    return aParts.length.compareTo(bParts.length);
   }
 
   static String? _normalizeVersion(Object? value) {
     if (value is! String) return null;
-    final match = RegExp(r'^v?(\d+\.\d+\.\d+)').firstMatch(value.trim());
+    final match = RegExp(r'^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)')
+        .firstMatch(value.trim());
     return match?.group(1);
   }
 
-  static List<int> _versionParts(String value) {
-    final normalized = _normalizeVersion(value);
-    if (normalized == null) return [0, 0, 0];
-    return normalized.split('.').map(int.parse).toList();
+  static _VersionParts _parseVersion(String value) {
+    final normalized = _normalizeVersion(value) ?? '0.0.0';
+    final separator = normalized.indexOf('-');
+    final base = separator < 0
+        ? normalized
+        : normalized.substring(0, separator);
+    final prerelease = separator < 0
+        ? null
+        : normalized.substring(separator + 1);
+    return _VersionParts(
+      base: base.split('.').map(int.parse).toList(growable: false),
+      prerelease: prerelease,
+    );
   }
 
   static Uri? _uriFrom(Object? value) {
     if (value is! String || value.isEmpty) return null;
     return Uri.tryParse(value);
   }
+}
+
+class _VersionParts {
+  const _VersionParts({required this.base, required this.prerelease});
+
+  final List<int> base;
+  final String? prerelease;
 }
 
 class UpdatesPage extends StatefulWidget {

@@ -164,9 +164,44 @@ class ProviderProfile {
   };
 }
 
+class Project {
+  final String id;
+  final String name;
+  final String localPath;
+
+  const Project({
+    required this.id,
+    required this.name,
+    required this.localPath,
+  });
+
+  factory Project.fromMap(Map<String, Object?> map) {
+    return Project(
+      id: map['id'] as String,
+      name: map['name'] as String,
+      localPath: map['localPath'] as String,
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'name': name,
+    'localPath': localPath,
+  };
+
+  Project copyWith({String? name, String? localPath}) {
+    return Project(
+      id: id,
+      name: name ?? this.name,
+      localPath: localPath ?? this.localPath,
+    );
+  }
+}
+
 class Task {
   final String id;
   final String mode;
+  final String? projectId;
   final String? serverId;
   final String? providerId;
   final String? modelOverride;
@@ -181,6 +216,7 @@ class Task {
   const Task({
     required this.id,
     required this.mode,
+    this.projectId,
     required this.serverId,
     required this.providerId,
     this.modelOverride,
@@ -198,6 +234,7 @@ class Task {
     return Task(
       id: map['id'] as String,
       mode: map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent'),
+      projectId: map['projectId'] as String?,
       serverId: serverId,
       providerId: map['providerId'] as String?,
       modelOverride: map['modelOverride'] as String?,
@@ -214,6 +251,7 @@ class Task {
   Map<String, Object?> toMap() => {
     'id': id,
     'mode': mode,
+    'projectId': projectId,
     'serverId': serverId,
     'providerId': providerId,
     'modelOverride': modelOverride,
@@ -228,6 +266,7 @@ class Task {
 
   Task copyWith({
     String? mode,
+    Object? projectId = _taskFieldUnset,
     String? serverId,
     String? providerId,
     String? modelOverride,
@@ -242,6 +281,9 @@ class Task {
     return Task(
       id: id,
       mode: mode ?? this.mode,
+      projectId: identical(projectId, _taskFieldUnset)
+          ? this.projectId
+          : projectId as String?,
       serverId: serverId ?? this.serverId,
       providerId: providerId ?? this.providerId,
       modelOverride: modelOverride ?? this.modelOverride,
@@ -256,6 +298,8 @@ class Task {
     );
   }
 }
+
+const _taskFieldUnset = Object();
 
 class TaskEvent {
   final String eventId;

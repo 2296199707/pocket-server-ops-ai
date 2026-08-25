@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -133,6 +135,36 @@ void main() {
     expect(restored.agentAutoExecute, isTrue);
     expect(restored.betaUpdatesEnabled, isTrue);
     restored.dispose();
+  });
+
+  test('project-only Agent can be created without a server', () async {
+    final root = Directory(
+      '/www/mobile-agent-test-project-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+      previewMode: true,
+    );
+    try {
+      await controller.load();
+      final project = await controller.createProject(
+        name: '本地项目',
+        localPath: root.path,
+      );
+      final task = await controller.createTask(
+        mode: 'agent',
+        projectId: project.id,
+        title: '本地任务',
+      );
+      final result = await controller.runTask(task, prompt: '检查本地项目');
+
+      expect(result.status, 'completed');
+      expect(task.serverId, isNull);
+    } finally {
+      controller.dispose();
+      if (await root.exists()) await root.delete(recursive: true);
+    }
   });
 
   test('task configuration can be changed after a completed turn', () async {
@@ -494,6 +526,11 @@ class _FakeConnection implements SshConnection {
 
   @override
   Future<String> readFile(String remotePath) async => 'remote content';
+
+  @override
+  Future<Uint8List> readFileBytes(String remotePath) async {
+    return Uint8List.fromList(utf8.encode('remote content'));
+  }
 
   @override
   Future<SshFileChunk> readFileChunk(

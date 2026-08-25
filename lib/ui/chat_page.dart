@@ -10,12 +10,14 @@ import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
 import 'file_manager_page.dart';
+import 'project_file_manager_page.dart';
 import 'terminal_page.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({
     required this.controller,
     required this.taskId,
+    this.initialProjectId,
     required this.onTaskActivated,
     required this.onOpenSettings,
     required this.onConfirmTool,
@@ -26,6 +28,7 @@ class ChatPage extends StatefulWidget {
 
   final AppController controller;
   final String? taskId;
+  final String? initialProjectId;
   final ValueChanged<String> onTaskActivated;
   final VoidCallback onOpenSettings;
   final Future<bool> Function(
@@ -49,6 +52,7 @@ class _ChatPageState extends State<ChatPage> {
   final _prompt = TextEditingController();
   final _scroll = ScrollController();
   String? _taskId;
+  String? _projectId;
   String? _providerId;
   String? _serverId;
   String _mode = 'chat';
@@ -58,7 +62,6 @@ class _ChatPageState extends State<ChatPage> {
   String? _reasoningEffortOverride;
   bool _loadingModels = false;
   bool _sending = false;
-  bool _toolsExpanded = false;
   List<AiAttachment> _pendingAttachments = const [];
   int _sendingGeneration = 0;
   int _lastEventCount = -1;
@@ -68,6 +71,7 @@ class _ChatPageState extends State<ChatPage> {
   void initState() {
     super.initState();
     _taskId = widget.taskId;
+    _projectId = widget.initialProjectId;
     _executionMode = widget.controller.agentAutoExecute ? 'auto' : 'confirm';
   }
 
@@ -77,6 +81,7 @@ class _ChatPageState extends State<ChatPage> {
     if (widget.taskId != oldWidget.taskId && widget.taskId != _taskId) {
       setState(() {
         _taskId = widget.taskId;
+        _projectId = widget.initialProjectId;
         _modelOverride = null;
         _reasoningEffortOverride = null;
         _visiblePresentationCount = _historyPageSize;
@@ -120,6 +125,7 @@ class _ChatPageState extends State<ChatPage> {
         ? ''
         : widget.controller.streamingAssistantText(task.id);
     final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
+    final project = widget.controller.projectFor(task?.projectId ?? _projectId);
     if (_lastEventCount != events.length) {
       _lastEventCount = events.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -128,6 +134,7 @@ class _ChatPageState extends State<ChatPage> {
     return Column(
       children: [
         _ContextBar(
+          project: project,
           server: _serverFor(task?.serverId ?? _serverId),
           mode: task?.mode ?? _mode,
           executionMode: task?.executionMode ?? _executionMode,
@@ -287,33 +294,18 @@ class _ChatPageState extends State<ChatPage> {
                               )
                             : const Icon(Icons.send_outlined),
                       ),
-                    const SizedBox(width: 4),
-                    IconButton.filledTonal(
-                      tooltip: _toolsExpanded ? '收起服务器工具' : '展开服务器工具',
-                      onPressed: () =>
-                          setState(() => _toolsExpanded = !_toolsExpanded),
-                      icon: Icon(
-                        _toolsExpanded
-                            ? Icons.expand_less_rounded
-                            : Icons.expand_more_rounded,
-                      ),
-                    ),
                   ],
                 ),
-                AnimatedSize(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOut,
-                  child: _toolsExpanded
-                      ? Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: _ChatToolsDrawer(
-                            server: _toolServer,
-                            hasServers: widget.controller.servers.isNotEmpty,
-                            onTerminal: _openTerminalFromTools,
-                            onFiles: _openFilesFromTools,
-                          ),
-                        )
-                      : const SizedBox.shrink(),
+                _ChatUtilityBar(
+                  hasProject: project != null,
+                  hasServers: widget.controller.servers.isNotEmpty,
+                  onProjectFiles: project == null ? null : _openProjectFiles,
+                  onServerFiles: widget.controller.servers.isEmpty
+                      ? null
+                      : _openFilesFromTools,
+                  onTerminal: widget.controller.servers.isEmpty
+                      ? null
+                      : _openTerminalFromTools,
                 ),
               ],
             ),
@@ -454,6 +446,21 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  Future<void> _openProjectFiles() async {
+    final project = widget.controller.projectFor(
+      _currentTask?.projectId ?? _projectId,
+    );
+    if (project == null || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ProjectFileManagerPage(
+          controller: widget.controller,
+          project: project,
+        ),
+      ),
+    );
+  }
+
   Future<void> _editContext() async {
     final task = _currentTask;
     final result = await showModalBottomSheet<_ConversationConfig>(
@@ -468,6 +475,7 @@ class _ChatPageState extends State<ChatPage> {
           mode: task?.mode ?? _mode,
           executionMode: task?.executionMode ?? _executionMode,
           workingDirectory: task?.workingDirectory ?? _workingDirectory,
+          hasProject: task?.projectId != null || _projectId != null,
         ),
       ),
     );
@@ -689,7 +697,7 @@ class _ChatPageState extends State<ChatPage> {
       widget.onOpenSettings();
       return;
     }
-    if (_mode == 'agent' && _serverId == null) {
+    if (_mode == 'agent' && _serverId == null && _projectId == null) {
       await _editContext();
       if (_serverId == null || !mounted) return;
     }
@@ -702,8 +710,11 @@ class _ChatPageState extends State<ChatPage> {
       if (task == null) {
         task = await widget.controller.createTask(
           mode: _mode,
+          projectId: _projectId,
           serverId: _serverId,
           providerId: providerId,
+          modelOverride: _modelOverride,
+          reasoningEffortOverride: _reasoningEffortOverride,
           title: _titleFromPrompt(prompt),
           workingDirectory: _workingDirectory,
           executionMode: _executionMode,
@@ -784,6 +795,7 @@ class _ConversationConfig {
     required this.mode,
     required this.executionMode,
     required this.workingDirectory,
+    required this.hasProject,
   });
 
   final String? providerId;
@@ -791,6 +803,7 @@ class _ConversationConfig {
   final String mode;
   final String executionMode;
   final String? workingDirectory;
+  final bool hasProject;
 }
 
 class _ConversationSetupSheet extends StatefulWidget {
@@ -861,13 +874,16 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
           ),
           if (_mode == 'agent') ...[
             DropdownButtonFormField<String>(
-              initialValue: _serverId,
+              initialValue: _serverId ?? '',
               decoration: const InputDecoration(labelText: '目标服务器'),
               items: [
+                const DropdownMenuItem(value: '', child: Text('不连接服务器')),
                 for (final server in widget.controller.servers)
                   DropdownMenuItem(value: server.id, child: Text(server.name)),
               ],
-              onChanged: (value) => setState(() => _serverId = value),
+              onChanged: (value) => setState(
+                () => _serverId = value == null || value.isEmpty ? null : value,
+              ),
             ),
             TextField(
               controller: _directory,
@@ -888,7 +904,11 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
           const SizedBox(height: 20),
           FilledButton(
             onPressed: () {
-              if (_mode == 'agent' && _serverId == null) return;
+              if (_mode == 'agent' &&
+                  _serverId == null &&
+                  !widget.initial.hasProject) {
+                return;
+              }
               Navigator.pop(
                 context,
                 _ConversationConfig(
@@ -900,6 +920,7 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
                       _mode != 'agent' || _directory.text.trim().isEmpty
                       ? null
                       : _directory.text.trim(),
+                  hasProject: widget.initial.hasProject,
                 ),
               );
             },
@@ -913,6 +934,7 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
 
 class _ContextBar extends StatelessWidget {
   const _ContextBar({
+    required this.project,
     required this.server,
     required this.mode,
     required this.executionMode,
@@ -924,6 +946,7 @@ class _ContextBar extends StatelessWidget {
     required this.onShowContext,
   });
 
+  final Project? project;
   final ServerProfile? server;
   final String mode;
   final String executionMode;
@@ -951,6 +974,13 @@ class _ContextBar extends StatelessWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
+                  if (project != null) ...[
+                    _ContextPill(
+                      icon: Icons.folder_outlined,
+                      label: project!.name,
+                    ),
+                    const SizedBox(width: 6),
+                  ],
                   _ContextPill(
                     icon: mode == 'agent'
                         ? Icons.dns_outlined
@@ -1208,77 +1238,45 @@ class _AttachmentStrip extends StatelessWidget {
   }
 }
 
-class _ChatToolsDrawer extends StatelessWidget {
-  const _ChatToolsDrawer({
-    required this.server,
+class _ChatUtilityBar extends StatelessWidget {
+  const _ChatUtilityBar({
+    required this.hasProject,
     required this.hasServers,
+    required this.onProjectFiles,
+    required this.onServerFiles,
     required this.onTerminal,
-    required this.onFiles,
   });
 
-  final ServerProfile? server;
+  final bool hasProject;
   final bool hasServers;
-  final VoidCallback onTerminal;
-  final VoidCallback onFiles;
+  final VoidCallback? onProjectFiles;
+  final VoidCallback? onServerFiles;
+  final VoidCallback? onTerminal;
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final serverLabel = server == null
-        ? hasServers
-              ? '点击工具后选择服务器'
-              : '请先添加目标服务器'
-        : '当前服务器：${server!.name}';
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      decoration: BoxDecoration(
-        color: colors.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: colors.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return SizedBox(
+      height: 34,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Row(
-            children: [
-              Icon(
-                Icons.build_circle_outlined,
-                size: 19,
-                color: colors.primary,
-              ),
-              const SizedBox(width: 7),
-              const Text('服务器工具'),
-              const Spacer(),
-              Flexible(
-                child: Text(
-                  serverLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-              ),
-            ],
+          IconButton(
+            tooltip: hasProject ? '手机项目文件夹' : '当前对话未绑定手机项目',
+            onPressed: onProjectFiles,
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.folder_special_outlined, size: 20),
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: hasServers ? onTerminal : null,
-                  icon: const Icon(Icons.terminal_outlined),
-                  label: const Text('终端'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: hasServers ? onFiles : null,
-                  icon: const Icon(Icons.folder_outlined),
-                  label: const Text('文件管理器'),
-                ),
-              ),
-            ],
+          IconButton(
+            tooltip: hasServers ? '服务器文件夹' : '尚未添加服务器',
+            onPressed: onServerFiles,
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.dns_outlined, size: 20),
+          ),
+          IconButton(
+            tooltip: hasServers ? '服务器终端' : '尚未添加服务器',
+            onPressed: onTerminal,
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.terminal_outlined, size: 20),
           ),
         ],
       ),
@@ -1358,14 +1356,17 @@ class _TaskStatusBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final (icon, label, color) = switch (task.status) {
-      'completed' => (Icons.check_circle_outline, '已完成  执行结束', Colors.green),
-      'running' => (Icons.sync_rounded, '执行中  AI 正在处理', colors.primary),
-      'cancelled' => (Icons.stop_circle_outlined, '已停止', colors.outline),
-      'unknown' => (Icons.help_outline_rounded, '状态未知', colors.error),
+      'completed' => (Icons.check_circle_outline, '已完成', Colors.green),
+      'running' => (Icons.sync_rounded, '运行中', colors.primary),
+      'stopping' => (Icons.stop_circle_outlined, '正在停止', colors.outline),
+      'cancelled' ||
+      'canceled' => (Icons.stop_circle_outlined, '已取消', colors.outline),
+      'interrupted' => (Icons.pause_circle_outline, '已中断', colors.error),
+      'unknown' => (Icons.help_outline_rounded, '状态待核实', colors.error),
       'failed' => (Icons.error_outline_rounded, '执行失败', colors.error),
-      _ => (Icons.schedule_outlined, '等待执行', colors.outline),
+      'queued' => (Icons.schedule_outlined, '等待执行', colors.outline),
+      _ => (Icons.help_outline_rounded, '状态待核实', colors.error),
     };
-    final time = _formatTaskTime(task.updatedAt);
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -1380,23 +1381,14 @@ class _TaskStatusBar extends StatelessWidget {
           const SizedBox(width: 7),
           Expanded(
             child: Text(
-              running ? '执行中  AI 正在处理' : label,
+              running && task.status == 'running' ? '运行中' : label,
               style: TextStyle(color: color, fontWeight: FontWeight.w600),
             ),
           ),
-          Text(time, style: Theme.of(context).textTheme.labelSmall),
         ],
       ),
     );
   }
-}
-
-String _formatTaskTime(DateTime value) {
-  final local = value.toLocal();
-  final hour = local.hour.toString().padLeft(2, '0');
-  final minute = local.minute.toString().padLeft(2, '0');
-  final second = local.second.toString().padLeft(2, '0');
-  return '$hour:$minute:$second';
 }
 
 class _EventPresentation {

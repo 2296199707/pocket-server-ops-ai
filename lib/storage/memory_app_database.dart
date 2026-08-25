@@ -9,6 +9,7 @@ class MemoryAppDatabase extends AppDatabase {
   final bool demoData;
   final Map<String, ServerProfile> _servers = {};
   final Map<String, ProviderProfile> _providers = {};
+  final Map<String, Project> _projects = {};
   final Map<String, Task> _tasks = {};
   final Map<String, TaskEvent> _events = {};
   final Map<String, String> _settings = {};
@@ -87,6 +88,23 @@ class MemoryAppDatabase extends AppDatabase {
   @override
   Future<void> deleteProvider(String id) async {
     _providers.remove(id);
+  }
+
+  @override
+  Future<List<Project>> loadProjects() async {
+    final values = _projects.values.toList()
+      ..sort((left, right) => left.name.compareTo(right.name));
+    return values;
+  }
+
+  @override
+  Future<void> saveProject(Project project) async {
+    _projects[project.id] = project;
+  }
+
+  @override
+  Future<void> deleteProject(String id) async {
+    _projects.remove(id);
   }
 
   @override

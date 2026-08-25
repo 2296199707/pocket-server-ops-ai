@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -28,6 +29,7 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
   String? _activeTaskId;
+  String? _pendingProjectId;
   int _chatRevision = 0;
   Future<void> _agentConfirmationQueue = Future<void>.value();
 
@@ -48,7 +50,8 @@ class _HomeShellState extends State<HomeShell> {
         appBar: AppBar(
           title: Text(
             _selectedIndex == 0
-                ? (_activeTask?.title ?? '新对话')
+                ? (_activeTask?.title ??
+                      (_pendingProjectId == null ? '其他对话' : '新对话'))
                 : _selectedIndex == 1
                 ? '服务器'
                 : '设置',
@@ -58,8 +61,10 @@ class _HomeShellState extends State<HomeShell> {
           actions: [
             if (_selectedIndex == 0)
               IconButton(
-                tooltip: '新对话',
-                onPressed: _startNewChat,
+                tooltip: _activeTask?.projectId == null
+                    ? '在其他对话中新建'
+                    : '在当前项目中新建对话',
+                onPressed: _startNewChatFromCurrent,
                 icon: const Icon(Icons.add_comment_outlined),
               ),
           ],
@@ -86,6 +91,7 @@ class _HomeShellState extends State<HomeShell> {
           key: ValueKey('$_chatRevision-${widget.controller.agentAutoExecute}'),
           controller: widget.controller,
           taskId: _activeTaskId,
+          initialProjectId: _pendingProjectId,
           onTaskActivated: (taskId) => setState(() => _activeTaskId = taskId),
           onOpenSettings: _openProviderSettings,
           onConfirmTool: _confirmAgentTool,
@@ -96,6 +102,9 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Widget _buildDrawer(BuildContext context) {
+    final otherTasks = widget.controller.tasks
+        .where((task) => task.projectId == null)
+        .toList(growable: false);
     return Drawer(
       child: SafeArea(
         child: Column(
@@ -113,10 +122,7 @@ class _HomeShellState extends State<HomeShell> {
               leading: const Icon(Icons.add_comment_outlined),
               title: const Text('新对话'),
               selected: _selectedIndex == 0 && _activeTaskId == null,
-              onTap: () {
-                Navigator.pop(context);
-                _startNewChat();
-              },
+              onTap: _openNewConversationPicker,
             ),
             const Divider(height: 1),
             Padding(
@@ -149,72 +155,79 @@ class _HomeShellState extends State<HomeShell> {
                 ],
               ),
             ),
-            const Divider(height: 1),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text('对话记录'),
-              ),
-            ),
             Expanded(
-              child: widget.controller.tasks.isEmpty
-                  ? const Center(child: Text('暂无对话'))
-                  : ListView.builder(
-                      padding: EdgeInsets.zero,
-                      itemCount: widget.controller.tasks.length,
-                      itemBuilder: (context, index) {
-                        final task = widget.controller.tasks[index];
-                        return ListTile(
-                          leading: Icon(_statusIcon(task.status)),
-                          title: Text(
-                            task.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            _taskLabel(task),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          selected:
-                              _selectedIndex == 0 && _activeTaskId == task.id,
-                          onTap: () {
-                            Navigator.pop(context);
-                            setState(() {
-                              _selectedIndex = 0;
-                              _activeTaskId = task.id;
-                            });
-                          },
-                          trailing: PopupMenuButton<String>(
-                            tooltip: '对话操作',
-                            onSelected: (value) {
-                              if (value == 'rename') {
-                                _renameTask(context, task);
-                              } else if (value == 'copy_id') {
-                                Clipboard.setData(ClipboardData(text: task.id));
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('对话 ID 已复制')),
-                                );
-                              } else {
-                                _deleteTask(context, task);
-                              }
-                            },
-                            itemBuilder: (context) => const [
-                              PopupMenuItem(
-                                value: 'rename',
-                                child: Text('重命名'),
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  _drawerSectionTitle('其他对话'),
+                  if (otherTasks.isEmpty)
+                    const ListTile(
+                      dense: true,
+                      leading: Icon(Icons.chat_bubble_outline),
+                      title: Text('暂无对话'),
+                    )
+                  else
+                    for (final task in otherTasks) _taskTile(context, task),
+                  _drawerSectionTitle('项目'),
+                  if (widget.controller.projects.isEmpty)
+                    const ListTile(
+                      dense: true,
+                      leading: Icon(Icons.folder_off_outlined),
+                      title: Text('暂无项目'),
+                    )
+                  else
+                    for (final project in widget.controller.projects)
+                      ExpansionTile(
+                        key: PageStorageKey<String>('project-${project.id}'),
+                        leading: const Icon(Icons.folder_outlined),
+                        title: Text(
+                          project.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          project.localPath,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: '在项目中新建对话',
+                              onPressed: () =>
+                                  _startNewChatInDrawer(project.id),
+                              icon: const Icon(Icons.add, size: 20),
+                            ),
+                            IconButton(
+                              tooltip: '项目设置',
+                              onPressed: () =>
+                                  _openProjectSettingsFromDrawer(project),
+                              icon: const Icon(
+                                Icons.settings_outlined,
+                                size: 20,
                               ),
-                              PopupMenuItem(
-                                value: 'copy_id',
-                                child: Text('复制对话 ID'),
-                              ),
-                              PopupMenuItem(value: 'delete', child: Text('删除')),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
+                            ),
+                            const Icon(Icons.expand_more),
+                          ],
+                        ),
+                        children: [
+                          for (final task in widget.controller.tasks.where(
+                            (task) => task.projectId == project.id,
+                          ))
+                            _taskTile(context, task, indent: 16),
+                          if (!widget.controller.tasks.any(
+                            (task) => task.projectId == project.id,
+                          ))
+                            const ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.only(left: 56),
+                              title: Text('暂无项目对话'),
+                            ),
+                        ],
+                      ),
+                ],
+              ),
             ),
             const Divider(height: 1),
             ListTile(
@@ -228,6 +241,57 @@ class _HomeShellState extends State<HomeShell> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _drawerSectionTitle(String title) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+      ),
+    );
+  }
+
+  Widget _taskTile(BuildContext context, Task task, {double indent = 0}) {
+    return ListTile(
+      contentPadding: EdgeInsets.only(left: 16 + indent, right: 8),
+      leading: Icon(_statusIcon(task.status)),
+      title: Text(task.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text(
+        _taskLabel(task),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      selected: _selectedIndex == 0 && _activeTaskId == task.id,
+      onTap: () {
+        Navigator.pop(context);
+        setState(() {
+          _selectedIndex = 0;
+          _activeTaskId = task.id;
+          _pendingProjectId = task.projectId;
+        });
+      },
+      trailing: PopupMenuButton<String>(
+        tooltip: '对话操作',
+        onSelected: (value) {
+          if (value == 'rename') {
+            _renameTask(context, task);
+          } else if (value == 'copy_id') {
+            Clipboard.setData(ClipboardData(text: task.id));
+            ScaffoldMessenger.of(context)
+                .showSnackBar(const SnackBar(content: Text('对话 ID 已复制')));
+          } else {
+            _deleteTask(context, task);
+          }
+        },
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 'rename', child: Text('重命名')),
+          PopupMenuItem(value: 'copy_id', child: Text('复制对话 ID')),
+          PopupMenuItem(value: 'delete', child: Text('删除')),
+        ],
       ),
     );
   }
@@ -469,10 +533,172 @@ class _HomeShellState extends State<HomeShell> {
     return result;
   }
 
-  void _startNewChat() {
+  void _openNewConversationPicker() {
+    Navigator.pop(context);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_chooseNewConversationTarget());
+    });
+  }
+
+  Future<void> _chooseNewConversationTarget() async {
+    const other = '__other__';
+    const create = '__create__';
+    final target = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('新建对话'),
+              subtitle: Text('选择对话归属；服务器和供应商仍在对话中单独设置'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.chat_bubble_outline),
+              title: const Text('其他对话'),
+              subtitle: const Text('不绑定项目文件夹'),
+              onTap: () => Navigator.pop(context, other),
+            ),
+            for (final project in widget.controller.projects)
+              ListTile(
+                leading: const Icon(Icons.folder_outlined),
+                title: Text(project.name),
+                subtitle: Text(
+                  project.localPath,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () => Navigator.pop(context, project.id),
+              ),
+            ListTile(
+              leading: const Icon(Icons.create_new_folder_outlined),
+              title: const Text('创建新项目并绑定'),
+              onTap: () => Navigator.pop(context, create),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || target == null) return;
+    if (target == create) {
+      final project = await _showProjectEditor();
+      if (project != null && mounted) _startNewChat(projectId: project.id);
+      return;
+    }
+    _startNewChat(projectId: target == other ? null : target);
+  }
+
+  void _startNewChatFromCurrent() {
+    _startNewChat(projectId: _activeTask?.projectId ?? _pendingProjectId);
+  }
+
+  void _startNewChatInDrawer(String projectId) {
+    Navigator.pop(context);
+    _startNewChat(projectId: projectId);
+  }
+
+  Future<void> _openProjectSettingsFromDrawer(Project project) async {
+    Navigator.pop(context);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_showProjectEditor(existing: project));
+    });
+  }
+
+  Future<Project?> _showProjectEditor({Project? existing}) async {
+    final nameController = TextEditingController(text: existing?.name ?? '');
+    String? selectedPath = existing?.localPath;
+    final value = await showDialog<_ProjectFormValue>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(existing == null ? '创建项目' : '项目设置'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameController,
+                  autofocus: existing == null,
+                  decoration: const InputDecoration(labelText: '项目名称'),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  selectedPath == null ? '未选择文件夹，将使用 App 的项目目录' : selectedPath!,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final path = await FilePicker.platform.getDirectoryPath(
+                      dialogTitle: '选择项目文件夹',
+                    );
+                    if (path != null && context.mounted) {
+                      setDialogState(() => selectedPath = path);
+                    }
+                  },
+                  icon: const Icon(Icons.folder_open_outlined),
+                  label: const Text('选择项目文件夹'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                _ProjectFormValue(
+                  name: nameController.text,
+                  localPath: selectedPath,
+                ),
+              ),
+              child: Text(existing == null ? '创建并绑定' : '保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    nameController.dispose();
+    if (value == null || !mounted) return null;
+    try {
+      final project = existing == null
+          ? await widget.controller.createProject(
+              name: value.name,
+              localPath: value.localPath,
+            )
+          : await widget.controller.updateProject(
+              project: existing,
+              name: value.name,
+              localPath: value.localPath ?? existing.localPath,
+            );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(existing == null ? '项目已创建' : '项目设置已保存')),
+        );
+      }
+      return project;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('保存项目失败：$error')));
+      }
+      return null;
+    }
+  }
+
+  void _startNewChat({String? projectId}) {
     setState(() {
       _selectedIndex = 0;
       _activeTaskId = null;
+      _pendingProjectId = projectId;
       _chatRevision++;
     });
   }
@@ -542,6 +768,13 @@ class _HomeShellState extends State<HomeShell> {
       }
     }
   }
+}
+
+class _ProjectFormValue {
+  const _ProjectFormValue({required this.name, required this.localPath});
+
+  final String name;
+  final String? localPath;
 }
 
 class _DrawerActionButton extends StatelessWidget {
@@ -864,8 +1097,12 @@ IconData _statusIcon(String status) {
       return Icons.check_circle_outline;
     case 'failed':
       return Icons.error_outline;
-    case 'cancelled':
+    case 'stopping':
       return Icons.stop_circle_outlined;
+    case 'cancelled':
+    case 'canceled':
+      return Icons.stop_circle_outlined;
+    case 'interrupted':
     case 'unknown':
       return Icons.help_outline;
     default:

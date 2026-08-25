@@ -34,12 +34,20 @@ void main() {
 
     final withBeta = await service.fetchReleases(includePrereleases: true);
     expect(withBeta.first.isPrerelease, isTrue);
-    expect(withBeta.first.version, '1.0.3');
+    expect(withBeta.first.version, '1.0.3-beta.1');
   });
 
   test('version comparison ignores a leading v', () {
     expect(UpdateService.compareVersions('v1.0.2', '1.0.0'), greaterThan(0));
     expect(UpdateService.compareVersions('1.0.2', 'v1.0.2'), 0);
     expect(UpdateService.compareVersions('1.0.1', '1.0.2'), lessThan(0));
+    expect(
+      UpdateService.compareVersions('1.0.3-beta.2', '1.0.3-beta.1'),
+      greaterThan(0),
+    );
+    expect(
+      UpdateService.compareVersions('1.0.3', '1.0.3-beta.9'),
+      greaterThan(0),
+    );
   });
 }

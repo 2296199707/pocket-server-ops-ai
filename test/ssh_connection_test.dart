@@ -30,24 +30,26 @@ void main() {
     await pool.close();
   });
 
-  test('file chunk offsets allow large UTF-8 files to be read by pages',
-      () async {
-    final connection = _FakeConnection(fileContent: '甲乙丙丁');
-    final first = await connection.readFileChunk(
-      '/tmp/file',
-      length: utf8.encode('甲乙').length,
-    );
-    final second = await connection.readFileChunk(
-      '/tmp/file',
-      offset: first.nextOffset,
-      length: utf8.encode('丙丁').length,
-    );
+  test(
+    'file chunk offsets allow large UTF-8 files to be read by pages',
+    () async {
+      final connection = _FakeConnection(fileContent: '甲乙丙丁');
+      final first = await connection.readFileChunk(
+        '/tmp/file',
+        length: utf8.encode('甲乙').length,
+      );
+      final second = await connection.readFileChunk(
+        '/tmp/file',
+        offset: first.nextOffset,
+        length: utf8.encode('丙丁').length,
+      );
 
-    expect(first.content, '甲乙');
-    expect(first.eof, isFalse);
-    expect(second.content, '丙丁');
-    expect(second.eof, isTrue);
-  });
+      expect(first.content, '甲乙');
+      expect(first.eof, isFalse);
+      expect(second.content, '丙丁');
+      expect(second.eof, isTrue);
+    },
+  );
 }
 
 class _FakeConnection implements SshConnection {
@@ -101,6 +103,11 @@ class _FakeConnection implements SshConnection {
   @override
   Future<String> readFile(String remotePath) async {
     return fileContent;
+  }
+
+  @override
+  Future<Uint8List> readFileBytes(String remotePath) async {
+    return Uint8List.fromList(utf8.encode(fileContent));
   }
 
   @override

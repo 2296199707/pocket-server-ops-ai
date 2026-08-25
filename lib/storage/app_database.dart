@@ -14,7 +14,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 4,
+      version: 5,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -43,9 +43,17 @@ class AppDatabase {
           )
         ''');
         await db.execute('''
+          CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            localPath TEXT NOT NULL
+          )
+        ''');
+        await db.execute('''
           CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
             mode TEXT NOT NULL,
+            projectId TEXT,
             serverId TEXT,
             providerId TEXT,
             modelOverride TEXT,
@@ -94,6 +102,16 @@ class AppDatabase {
           await db.execute(
             'ALTER TABLE tasks ADD COLUMN reasoningEffortOverride TEXT',
           );
+        }
+        if (oldVersion < 5) {
+          await db.execute('''
+            CREATE TABLE projects (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              localPath TEXT NOT NULL
+            )
+          ''');
+          await db.execute('ALTER TABLE tasks ADD COLUMN projectId TEXT');
         }
       },
     );
@@ -163,6 +181,25 @@ class AppDatabase {
 
   Future<void> deleteProvider(String id) async {
     await (await _db).delete('providers', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<List<Project>> loadProjects() async {
+    final rows = await (await _db).query('projects', orderBy: 'name');
+    return rows
+        .map((row) => Project.fromMap(Map<String, Object?>.from(row)))
+        .toList(growable: false);
+  }
+
+  Future<void> saveProject(Project project) async {
+    await (await _db).insert(
+      'projects',
+      project.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> deleteProject(String id) async {
+    await (await _db).delete('projects', where: 'id = ?', whereArgs: [id]);
   }
 
   Future<void> saveTask(Task task) async {
