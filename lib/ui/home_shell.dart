@@ -962,7 +962,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 3,
+              itemCount: 4,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -979,9 +979,68 @@ class SettingsPage extends StatelessWidget {
                 if (index == 1) {
                   return _VersionSettingsTile(controller: controller);
                 }
+                if (index == 2) {
+                  return _FontScaleSettingsTile(controller: controller);
+                }
                 return _DeveloperSettingsTile(controller: controller);
               },
             ),
+    );
+  }
+}
+
+class _FontScaleSettingsTile extends StatelessWidget {
+  const _FontScaleSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final percent = (controller.fontScale * 100).round();
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(child: Icon(Icons.text_fields_outlined)),
+      title: const Text('字体大小'),
+      subtitle: Text('$percent% · 调整对话和设置页面文字'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () async {
+        var value = controller.fontScale;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => StatefulBuilder(
+            builder: (context, setState) => AlertDialog(
+              title: const Text('字体大小'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('${(value * 100).round()}%'),
+                  Slider(
+                    min: 0.85,
+                    max: 1.15,
+                    divisions: 6,
+                    value: value,
+                    label: '${(value * 100).round()}%',
+                    onChanged: (next) => setState(() => value = next),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    unawaited(controller.setFontScale(value));
+                    Navigator.pop(context);
+                  },
+                  child: const Text('保存'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

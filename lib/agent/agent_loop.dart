@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'agent_tools.dart';
 import 'ai_protocol.dart';
+import 'chat_completions_client.dart';
 import 'openai_compatible_client.dart';
 
 class AgentCancellation {
@@ -66,8 +67,12 @@ class AgentLoop {
     var deltaEvents = Future<void>.value();
     final handledToolCallIds = <String>{};
 
+    String toolResultId(AiToolCall call) {
+      return _wireApi(client) == 'responses' ? call.effectiveCallId : call.id;
+    }
+
     void addToolResult(AiToolCall call, String content) {
-      final callId = call.effectiveCallId;
+      final callId = toolResultId(call);
       messages.add(AiMessage.tool(toolCallId: callId, content: content));
       handledToolCallIds.add(callId);
     }
@@ -77,7 +82,7 @@ class AgentLoop {
       String content,
     ) async {
       for (final call in calls) {
-        final callId = call.effectiveCallId;
+        final callId = toolResultId(call);
         if (handledToolCallIds.contains(callId)) continue;
         await _emit(onEvent, 'tool.failed', {
           'id': call.id,
@@ -175,11 +180,15 @@ class AgentLoop {
       _dropHistoryBeforeLatestCompaction(messages);
       await _emit(onEvent, 'assistant.completed', {
         'text': assistantForHistory.content ?? '',
+        'wire_api': _wireApi(client),
         'tools': assistantForHistory.toolCalls
             .map((call) => _findTool(call.name)?.definition.name ?? call.name)
             .toList(),
         'tool_calls': assistantForHistory.toolCalls
-            .map((call) => call.toEventJson())
+            .map(
+              (call) =>
+                  call.toEventJson(responses: _wireApi(client) == 'responses'),
+            )
             .toList(),
         'finish_reason': finishReason,
         'responses_output_items': assistantForHistory.responsesOutputItems,
@@ -248,7 +257,7 @@ class AgentLoop {
           final error = 'Unknown tool: ${call.name}';
           await _emit(onEvent, 'tool.failed', {
             'id': call.id,
-            'call_id': call.effectiveCallId,
+            'call_id': toolResultId(call),
             'name': call.name,
             'error': error,
           });
@@ -262,7 +271,7 @@ class AgentLoop {
           final message = 'Invalid tool arguments: $error';
           await _emit(onEvent, 'tool.failed', {
             'id': call.id,
-            'call_id': call.effectiveCallId,
+            'call_id': toolResultId(call),
             'name': call.name,
             'error': message,
           });
@@ -272,7 +281,7 @@ class AgentLoop {
 
         await _emit(onEvent, 'tool.started', {
           'id': call.id,
-          'call_id': call.effectiveCallId,
+          'call_id': toolResultId(call),
           'name': tool.definition.name,
           'arguments': arguments,
         });
@@ -287,7 +296,7 @@ class AgentLoop {
             const message = 'Tool call cancelled before execution.';
             await _emit(onEvent, 'tool.failed', {
               'id': call.id,
-              'call_id': call.effectiveCallId,
+              'call_id': toolResultId(call),
               'name': call.name,
               'error': message,
             });
@@ -298,7 +307,7 @@ class AgentLoop {
             const message = 'User declined this tool call.';
             await _emit(onEvent, 'tool.failed', {
               'id': call.id,
-              'call_id': call.effectiveCallId,
+              'call_id': toolResultId(call),
               'name': call.name,
               'error': message,
             });
@@ -323,7 +332,7 @@ class AgentLoop {
           final serialized = jsonEncode(result);
           await _emit(onEvent, 'tool.completed', {
             'id': call.id,
-            'call_id': call.effectiveCallId,
+            'call_id': toolResultId(call),
             'name': tool.definition.name,
             'result': result,
           });
@@ -337,7 +346,7 @@ class AgentLoop {
             );
             await _emit(onEvent, 'task.unknown', {
               'id': call.id,
-              'call_id': call.effectiveCallId,
+              'call_id': toolResultId(call),
               'name': call.name,
               'error': message,
             });
@@ -357,7 +366,7 @@ class AgentLoop {
           final message = '$error';
           await _emit(onEvent, 'tool.failed', {
             'id': call.id,
-            'call_id': call.effectiveCallId,
+            'call_id': toolResultId(call),
             'name': tool.definition.name,
             'error': message,
           });
@@ -371,7 +380,7 @@ class AgentLoop {
             );
             await _emit(onEvent, 'task.unknown', {
               'id': call.id,
-              'call_id': call.effectiveCallId,
+              'call_id': toolResultId(call),
               'name': call.name,
               'error': cancellationMessage,
             });
@@ -495,4 +504,8 @@ class AgentLoop {
       ..clear()
       ..addAll(trimmed);
   }
+}
+
+String _wireApi(AiChatClient client) {
+  return client is ChatCompletionsClient ? 'chat-completions' : 'responses';
 }

@@ -138,6 +138,11 @@ class AiToolCall {
     return value;
   }
 
+  /// Chat Completions identifies a tool result with the tool-call id itself;
+  /// Responses uses its separate call_id. AgentLoop uses this protocol-neutral
+  /// value after the selected client has validated its own wire format.
+  String get toolResultId => callId == null || callId!.isEmpty ? id : callId!;
+
   Map<String, Object?> toJson() {
     return {
       'id': id,
@@ -146,8 +151,8 @@ class AiToolCall {
     };
   }
 
-  Map<String, Object?> toEventJson() {
-    return {...toJson(), 'call_id': effectiveCallId};
+  Map<String, Object?> toEventJson({bool responses = true}) {
+    return {...toJson(), 'call_id': responses ? effectiveCallId : toolResultId};
   }
 }
 

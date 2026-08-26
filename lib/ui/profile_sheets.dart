@@ -247,6 +247,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   late final TextEditingController _model;
   late final TextEditingController _secret;
   String _reasoningEffort = 'default';
+  String _wireApi = 'responses';
   bool _isDefault = false;
   bool _saving = false;
   bool _loadingModels = false;
@@ -262,6 +263,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _model = TextEditingController(text: profile?.model);
     _secret = TextEditingController();
     _reasoningEffort = profile?.reasoningEffort ?? 'default';
+    _wireApi = profile?.wireApi ?? 'responses';
     _isDefault = profile?.isDefault ?? false;
   }
 
@@ -287,6 +289,40 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _ProviderPresetButton(
+                  label: 'WFL AI',
+                  onPressed: () => _applyPreset(
+                    name: 'WFL AI',
+                    baseUrl: 'https://api.ai-pixel.online/v1',
+                    model: 'gpt-5.6-luna',
+                    wireApi: 'responses',
+                  ),
+                ),
+                _ProviderPresetButton(
+                  label: 'DeepSeek',
+                  onPressed: () => _applyPreset(
+                    name: 'DeepSeek',
+                    baseUrl: 'https://api.deepseek.com/v1',
+                    model: 'deepseek-chat',
+                    wireApi: 'chat-completions',
+                  ),
+                ),
+                _ProviderPresetButton(
+                  label: 'OpenCode',
+                  onPressed: () => _applyPreset(
+                    name: 'OpenCode',
+                    baseUrl: 'https://opencode.ai/zen/go/v1',
+                    model: '',
+                    wireApi: 'chat-completions',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             TextFormField(
               controller: _name,
               decoration: const InputDecoration(labelText: '名称'),
@@ -335,6 +371,19 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                   if (value != null) setState(() => _model.text = value);
                 },
               ),
+            DropdownButtonFormField<String>(
+              initialValue: wireApiOptions.contains(_wireApi)
+                  ? _wireApi
+                  : 'responses',
+              decoration: const InputDecoration(labelText: '协议'),
+              items: [
+                for (final api in wireApiOptions)
+                  DropdownMenuItem(value: api, child: Text(wireApiLabel(api))),
+              ],
+              onChanged: (value) {
+                if (value != null) setState(() => _wireApi = value);
+              },
+            ),
             DropdownButtonFormField<String>(
               initialValue: _reasoningEffort,
               decoration: const InputDecoration(labelText: '默认推理强度'),
@@ -406,6 +455,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         baseUrl: _baseUrl.text.trim(),
         model: _model.text.trim(),
         reasoningEffort: _reasoningEffort,
+        wireApi: _wireApi,
         secret: _secret.text,
         isDefault: _isDefault,
       );
@@ -427,6 +477,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       baseUrl: _baseUrl.text.trim(),
       model: _model.text.trim().isEmpty ? 'unknown' : _model.text.trim(),
       reasoningEffort: _reasoningEffort,
+      wireApi: _wireApi,
       apiKeyRef: widget.existing?.apiKeyRef,
       isDefault: _isDefault,
     );
@@ -445,6 +496,39 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     } finally {
       if (mounted) setState(() => _loadingModels = false);
     }
+  }
+
+  void _applyPreset({
+    required String name,
+    required String baseUrl,
+    required String model,
+    required String wireApi,
+  }) {
+    setState(() {
+      _name.text = name;
+      _baseUrl.text = baseUrl;
+      _model.text = model;
+      _wireApi = wireApi;
+    });
+  }
+}
+
+class _ProviderPresetButton extends StatelessWidget {
+  const _ProviderPresetButton({required this.label, required this.onPressed});
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton(
+      onPressed: onPressed,
+      style: OutlinedButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+      ),
+      child: Text(label),
+    );
   }
 }
 

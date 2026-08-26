@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
@@ -21,17 +23,21 @@ class ProvidersPage extends StatelessWidget {
             ? const Center(child: Text('还没有 AI 供应商'))
             : ListView.separated(
                 padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-                itemCount: controller.providers.length,
+                itemCount: controller.providers.length + 1,
                 separatorBuilder: (_, _) => const Divider(height: 1),
                 itemBuilder: (context, index) {
-                  final provider = controller.providers[index];
+                  if (index == 0) {
+                    return _ImageProviderTile(controller: controller);
+                  }
+                  final provider = controller.providers[index - 1];
                   return ListTile(
                     leading: const CircleAvatar(
                       child: Icon(Icons.smart_toy_outlined),
                     ),
                     title: Text(provider.name),
                     subtitle: Text(
-                      '${provider.model} · 推理${reasoningEffortLabel(provider.reasoningEffort)}',
+                      '${provider.model} · ${wireApiLabel(provider.wireApi)} · '
+                      '推理${reasoningEffortLabel(provider.reasoningEffort)}',
                     ),
                     trailing: PopupMenuButton<String>(
                       tooltip: '供应商操作',
@@ -110,5 +116,38 @@ class ProvidersPage extends StatelessWidget {
             .showSnackBar(SnackBar(content: Text('删除失败：$error')));
       }
     }
+  }
+}
+
+class _ImageProviderTile extends StatelessWidget {
+  const _ImageProviderTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = controller.imageProviderId ?? 'follow-default';
+    return ListTile(
+      leading: const CircleAvatar(child: Icon(Icons.image_outlined)),
+      title: const Text('生图供应商'),
+      subtitle: const Text('Agent 调用 image.generate 时使用，可跟随默认供应商'),
+      trailing: DropdownButton<String>(
+        value: selected,
+        underline: const SizedBox.shrink(),
+        items: [
+          const DropdownMenuItem(value: 'follow-default', child: Text('跟随默认')),
+          for (final provider in controller.providers)
+            DropdownMenuItem(value: provider.id, child: Text(provider.name)),
+        ],
+        onChanged: (value) {
+          if (value == null) return;
+          unawaited(
+            controller.setImageProviderId(
+              value == 'follow-default' ? null : value,
+            ),
+          );
+        },
+      ),
+    );
   }
 }

@@ -3,27 +3,27 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../agent/ai_protocol.dart';
-import '../agent/openai_compatible_client.dart';
+import '../agent/ai_client_factory.dart';
 import '../domain/models.dart';
 
 class ProviderConnectionTester {
   Future<void> test(ProviderProfile profile, String secret) async {
-    final client = OpenAiCompatibleClient(
+    final client = createAiClient(
+      wireApi: profile.wireApi,
       baseUrl: profile.baseUrl,
       apiKey: secret,
       model: profile.model,
       reasoningEffort: profile.reasoningEffort,
     );
     try {
-      // Test the same strict Responses path used by an actual task. A models
-      // endpoint alone does not prove that this model supports Responses,
-      // streaming, or the configured credentials.
+      // Test the exact protocol selected for the provider. A models endpoint
+      // alone does not prove that the configured protocol and credentials work.
       await client.complete(
         messages: [AiMessage.user('回复 OK。')],
         tools: const [],
       );
     } finally {
-      client.close();
+      closeAiClient(client);
     }
   }
 

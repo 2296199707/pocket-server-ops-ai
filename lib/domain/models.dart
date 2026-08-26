@@ -12,6 +12,19 @@ const reasoningEffortOptions = <String>[
   'max',
 ];
 
+const wireApiOptions = <String>['responses', 'chat-completions'];
+
+String wireApiLabel(String value) {
+  switch (value) {
+    case 'responses':
+      return 'Responses';
+    case 'chat-completions':
+      return 'Chat Completions';
+    default:
+      return value;
+  }
+}
+
 String reasoningEffortLabel(String value) {
   switch (value) {
     case 'default':
@@ -128,6 +141,7 @@ class ProviderProfile {
   final String baseUrl;
   final String model;
   final String reasoningEffort;
+  final String wireApi;
   final String? apiKeyRef;
   final bool isDefault;
 
@@ -137,6 +151,7 @@ class ProviderProfile {
     required this.baseUrl,
     required this.model,
     this.reasoningEffort = 'default',
+    this.wireApi = 'responses',
     required this.apiKeyRef,
     required this.isDefault,
   });
@@ -148,6 +163,7 @@ class ProviderProfile {
       baseUrl: map['baseUrl'] as String,
       model: map['model'] as String,
       reasoningEffort: map['reasoningEffort'] as String? ?? 'default',
+      wireApi: map['wireApi'] as String? ?? 'responses',
       apiKeyRef: map['apiKeyRef'] as String?,
       isDefault: map['isDefault'] as bool,
     );
@@ -159,9 +175,68 @@ class ProviderProfile {
     'baseUrl': baseUrl,
     'model': model,
     'reasoningEffort': reasoningEffort,
+    'wireApi': wireApi,
     'apiKeyRef': apiKeyRef,
     'isDefault': isDefault,
   };
+}
+
+class ProviderBalance {
+  const ProviderBalance({
+    required this.amount,
+    required this.remaining,
+    required this.currency,
+    this.granted,
+    this.toppedUp,
+  });
+
+  final double amount;
+  final double remaining;
+  final String currency;
+  final double? granted;
+  final double? toppedUp;
+}
+
+class ProviderUsageWindow {
+  const ProviderUsageWindow({
+    required this.label,
+    required this.usedPercent,
+    this.status = 'ok',
+    this.resetsAt,
+  });
+
+  final String label;
+  final double usedPercent;
+  final String status;
+  final DateTime? resetsAt;
+}
+
+class ProviderUsageSnapshot {
+  const ProviderUsageSnapshot({
+    required this.providerId,
+    required this.status,
+    this.balance,
+    this.windows = const [],
+    this.planName,
+    this.mode,
+    this.todayRequests,
+    this.todayCost,
+    this.message,
+    this.updatedAt,
+  });
+
+  final String providerId;
+  final String status;
+  final ProviderBalance? balance;
+  final List<ProviderUsageWindow> windows;
+  final String? planName;
+  final String? mode;
+  final int? todayRequests;
+  final double? todayCost;
+  final String? message;
+  final DateTime? updatedAt;
+
+  bool get isUsable => status == 'ok' || status == 'stale';
 }
 
 class Project {

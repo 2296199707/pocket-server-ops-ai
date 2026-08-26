@@ -35,6 +35,7 @@ class MemoryAppDatabase extends AppDatabase {
       baseUrl: 'https://provider.demo.invalid/v1',
       model: 'demo-model',
       reasoningEffort: 'default',
+      wireApi: 'responses',
       apiKeyRef: 'demo-provider-key',
       isDefault: true,
     );
@@ -74,6 +75,7 @@ class MemoryAppDatabase extends AppDatabase {
         baseUrl: profile.baseUrl,
         model: profile.model,
         reasoningEffort: profile.reasoningEffort,
+        wireApi: profile.wireApi,
         apiKeyRef: profile.apiKeyRef,
         isDefault: false,
       );

@@ -49,15 +49,25 @@ class _MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'PocketServerOps AI',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        fontFamily: 'NotoSansSC',
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0F766E)),
-      ),
-      home: HomeShell(controller: _controller),
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        final baseTheme = ThemeData(
+          useMaterial3: true,
+          fontFamily: 'NotoSansSC',
+          colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0F766E)),
+        );
+        return MaterialApp(
+          title: 'PocketServerOps AI',
+          debugShowCheckedModeBanner: false,
+          theme: baseTheme.copyWith(
+            textTheme: baseTheme.textTheme.apply(
+              fontSizeFactor: _controller.fontScale,
+            ),
+          ),
+          home: HomeShell(controller: _controller),
+        );
+      },
     );
   }
 }

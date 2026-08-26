@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import 'agent/agent_loop.dart';
 import 'agent/agent_tools.dart';
+import 'agent/ai_client_factory.dart';
 import 'agent/ai_protocol.dart';
 import 'agent/openai_compatible_client.dart';
 import 'credentials/credential_store.dart';
@@ -12,6 +13,8 @@ import 'domain/models.dart';
 import 'local/project_files.dart';
 import 'platform/android_task_service.dart';
 import 'providers/provider_connection_tester.dart';
+import 'providers/image_generation_client.dart';
+import 'providers/provider_usage_client.dart';
 import 'server_status_script.dart';
 import 'ssh/ssh_connection.dart';
 import 'storage/app_database.dart';
@@ -33,6 +36,7 @@ class AppController extends ChangeNotifier {
     AppDatabase? database,
     required CredentialStore credentials,
     ProviderConnectionTester? providerTester,
+    ProviderUsageClient? providerUsageClient,
     SshConnector? sshConnector,
     AndroidTaskService? taskService,
     this.previewMode = false,
@@ -42,12 +46,14 @@ class AppController extends ChangeNotifier {
        // ignore: prefer_initializing_formals
        _credentials = credentials,
        _providerTester = providerTester ?? ProviderConnectionTester(),
+       _providerUsageClient = providerUsageClient ?? ProviderUsageClient(),
        _sshConnector = sshConnector ?? DartSshConnector(),
        _taskService = taskService ?? const AndroidTaskService();
 
   final AppDatabase _database;
   final CredentialStore _credentials;
   final ProviderConnectionTester _providerTester;
+  final ProviderUsageClient _providerUsageClient;
   final SshConnector _sshConnector;
   final AndroidTaskService _taskService;
   final bool previewMode;
@@ -64,6 +70,8 @@ class AppController extends ChangeNotifier {
   final Map<String, Future<void>> _remoteWriteTails = {};
   final Map<String, Future<void>> _taskEventTails = {};
   final Map<String, String> _streamingAssistantText = {};
+  final Map<String, ProviderUsageSnapshot> _providerUsages = {};
+  final Map<String, Future<ProviderUsageSnapshot>> _providerUsageLoads = {};
   Future<void> _loadTail = Future<void>.value();
   int _idSequence = 0;
 
@@ -74,6 +82,8 @@ class AppController extends ChangeNotifier {
   Map<String, List<TaskEvent>> _events = const {};
   bool _agentAutoExecute = false;
   bool _betaUpdatesEnabled = false;
+  String? _imageProviderId;
+  double _fontScale = 1.0;
   bool _loading = true;
   String? _loadError;
   bool _disposed = false;
@@ -84,8 +94,26 @@ class AppController extends ChangeNotifier {
   List<Task> get tasks => List.unmodifiable(_tasks);
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
+  double get fontScale => _fontScale;
+  String? get imageProviderId => _imageProviderId;
   bool get isLoading => _loading;
   String? get loadError => _loadError;
+
+  ProviderUsageSnapshot? providerUsageFor(String providerId) =>
+      _providerUsages[providerId];
+
+  ProviderProfile? imageProviderFor(Task task) {
+    final selectedId = _imageProviderId ?? task.providerId;
+    if (selectedId != null) {
+      for (final provider in _providers) {
+        if (provider.id == selectedId) return provider;
+      }
+    }
+    for (final provider in _providers) {
+      if (provider.isDefault) return provider;
+    }
+    return _providers.isEmpty ? null : _providers.first;
+  }
 
   bool isTaskRunning(String taskId) => _runningTasks.containsKey(taskId);
 
@@ -122,6 +150,19 @@ class AppController extends ChangeNotifier {
         await _database.readSetting(_agentAutoExecuteSetting) == 'true';
     _betaUpdatesEnabled =
         await _database.readSetting(_betaUpdatesSetting) == 'true';
+    final savedImageProviderId = await _database.readSetting(
+      _imageProviderSetting,
+    );
+    _imageProviderId = savedImageProviderId?.isEmpty == true
+        ? null
+        : savedImageProviderId;
+    _fontScale =
+        (double.tryParse(
+                  await _database.readSetting(_fontScaleSetting) ?? '',
+                ) ??
+                1.0)
+            .clamp(0.85, 1.15)
+            .toDouble();
     final storedTasks = await _database.loadTasks();
     final storedEvents = await _database.loadAllEvents();
     final eventsByTask = <String, List<TaskEvent>>{};
@@ -311,6 +352,25 @@ class AppController extends ChangeNotifier {
       enabled ? 'true' : 'false',
     );
     _betaUpdatesEnabled = enabled;
+    _notify();
+  }
+
+  Future<void> setFontScale(double scale) async {
+    final value = scale.clamp(0.85, 1.15).toDouble();
+    await _database.writeSetting(_fontScaleSetting, '$value');
+    _fontScale = value;
+    _notify();
+  }
+
+  Future<void> setImageProviderId(String? providerId) async {
+    final value = providerId?.trim();
+    if (value != null &&
+        value.isNotEmpty &&
+        !_providers.any((provider) => provider.id == value)) {
+      throw StateError('图片供应商不存在');
+    }
+    await _database.writeSetting(_imageProviderSetting, value ?? '');
+    _imageProviderId = value == null || value.isEmpty ? null : value;
     _notify();
   }
 
@@ -570,7 +630,8 @@ class AppController extends ChangeNotifier {
     SshConnection? connection;
     RemoteAgentTools? remoteTools;
     ProjectAgentTools? projectTools;
-    OpenAiCompatibleClient? client;
+    Project? taskProject;
+    AiChatClient? client;
     var remoteOperationStarted = false;
     var serviceStarted = false;
     try {
@@ -614,6 +675,7 @@ class AppController extends ChangeNotifier {
       var systemPrompt = _systemPrompt(task);
       if (task.mode == 'agent') {
         final project = projectFor(task.projectId);
+        taskProject = project;
         if (task.projectId != null && project == null) {
           throw StateError('对话绑定的项目不存在');
         }
@@ -676,7 +738,13 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      client = OpenAiCompatibleClient(
+      final imageProvider = imageProviderFor(task);
+      if (imageProvider != null) {
+        tools.add(_imageGenerationTool(imageProvider, taskProject));
+      }
+
+      client = createAiClient(
+        wireApi: provider.wireApi,
         baseUrl: provider.baseUrl,
         apiKey: apiKey,
         model: task.modelOverride ?? provider.model,
@@ -753,7 +821,7 @@ class AppController extends ChangeNotifier {
       );
     } finally {
       _streamingAssistantText.remove(task.id);
-      client?.close();
+      if (client != null) closeAiClient(client);
       if (task.mode == 'agent' && serviceStarted) {
         if (connection == null && cancellation.isCancelled) {
           _sshPool.abort(task.id);
@@ -1296,6 +1364,7 @@ class AppController extends ChangeNotifier {
     required String baseUrl,
     required String model,
     String reasoningEffort = 'default',
+    String wireApi = 'responses',
     required String secret,
     required bool isDefault,
   }) async {
@@ -1313,6 +1382,7 @@ class AppController extends ChangeNotifier {
       baseUrl: baseUrl,
       model: model,
       reasoningEffort: reasoningEffort,
+      wireApi: wireApi,
       apiKeyRef: apiKeyRef,
       isDefault: isDefault,
     );
@@ -1327,6 +1397,7 @@ class AppController extends ChangeNotifier {
                   baseUrl: provider.baseUrl,
                   model: provider.model,
                   reasoningEffort: provider.reasoningEffort,
+                  wireApi: provider.wireApi,
                   apiKeyRef: provider.apiKeyRef,
                   isDefault: false,
                 )
@@ -1353,6 +1424,10 @@ class AppController extends ChangeNotifier {
       for (final item in _providers)
         if (item.id != profile.id) item,
     ];
+    if (_imageProviderId == profile.id) {
+      await _database.writeSetting(_imageProviderSetting, '');
+      _imageProviderId = null;
+    }
     _notify();
   }
 
@@ -1360,6 +1435,67 @@ class AppController extends ChangeNotifier {
     if (previewMode) throw StateError('预览模式不会发送真实供应商请求');
     final apiKey = await _readCredential(profile.apiKeyRef, 'API Key 不可用');
     await _providerTester.test(profile, apiKey);
+  }
+
+  Future<ProviderUsageSnapshot> loadProviderUsage(
+    ProviderProfile profile, {
+    bool force = false,
+  }) async {
+    final cached = _providerUsages[profile.id];
+    if (!force &&
+        cached?.updatedAt != null &&
+        DateTime.now().toUtc().difference(cached!.updatedAt!).inSeconds < 60) {
+      return cached;
+    }
+    final existing = _providerUsageLoads[profile.id];
+    if (existing != null) return existing;
+    if (previewMode) {
+      const snapshot = ProviderUsageSnapshot(
+        providerId: 'preview',
+        status: 'ok',
+        planName: '预览',
+      );
+      _providerUsages[profile.id] = snapshot;
+      return snapshot;
+    }
+    final load = () async {
+      try {
+        final apiKey = await _readCredential(
+          profile.apiKeyRef,
+          '供应商 API Key 不可用',
+        );
+        final snapshot = await _providerUsageClient.fetch(profile, apiKey);
+        final withTime = ProviderUsageSnapshot(
+          providerId: snapshot.providerId,
+          status: snapshot.status,
+          balance: snapshot.balance,
+          windows: snapshot.windows,
+          planName: snapshot.planName,
+          mode: snapshot.mode,
+          todayRequests: snapshot.todayRequests,
+          todayCost: snapshot.todayCost,
+          message: snapshot.message,
+          updatedAt: DateTime.now().toUtc(),
+        );
+        _providerUsages[profile.id] = withTime;
+        _notify();
+        return withTime;
+      } catch (error) {
+        final snapshot = ProviderUsageSnapshot(
+          providerId: profile.id,
+          status: 'error',
+          message: '$error',
+          updatedAt: DateTime.now().toUtc(),
+        );
+        _providerUsages[profile.id] = snapshot;
+        _notify();
+        return snapshot;
+      } finally {
+        _providerUsageLoads.remove(profile.id);
+      }
+    }();
+    _providerUsageLoads[profile.id] = load;
+    return load;
   }
 
   Future<List<String>> loadProviderModels(
@@ -1390,7 +1526,9 @@ class AppController extends ChangeNotifier {
   }) {
     if (task.mode == 'chat') {
       return 'You are a helpful conversational assistant. Do not claim to have '
-          'access to a server, terminal, files, or tools.';
+          'access to a server, terminal, or files. When the user asks for an '
+          'image, use the provided image.generate tool instead of claiming '
+          'that an image was created without calling it.';
     }
     final scopes = <String>[];
     if (project != null) {
@@ -1491,7 +1629,12 @@ class AppController extends ChangeNotifier {
           assistantIndex = null;
           activeToolCallIds = <String, String>{};
         case 'assistant.completed':
-          final calls = _readToolCalls(event.payload['tool_calls']);
+          final isChatCompletions =
+              event.payload['wire_api'] == 'chat-completions';
+          final calls = _readToolCalls(
+            event.payload['tool_calls'],
+            requireCallId: !isChatCompletions,
+          );
           final text = event.payload['text'];
           messages.add(
             AiMessage(
@@ -1508,17 +1651,24 @@ class AppController extends ChangeNotifier {
           );
           assistantIndex = messages.length - 1;
           activeToolCallIds = {
-            for (final call in calls) call.id: call.effectiveCallId,
+            for (final call in calls) call.id: call.toolResultId,
           };
         case 'tool.started':
           final id = event.payload['id'];
           final name = event.payload['name'];
           final callId = event.payload['call_id'];
           final index = assistantIndex;
+          final isChatCompletions =
+              event.payload['wire_api'] == 'chat-completions' ||
+              (callId is! String || callId.isEmpty);
+          final resolvedCallId = callId is String && callId.isNotEmpty
+              ? callId
+              : id is String
+              ? id
+              : null;
           if (id is String &&
               name is String &&
-              callId is String &&
-              callId.isNotEmpty &&
+              resolvedCallId != null &&
               index != null &&
               !activeToolCallIds.containsKey(id)) {
             final assistant = messages[index];
@@ -1533,12 +1683,12 @@ class AppController extends ChangeNotifier {
                   arguments: jsonEncode(
                     event.payload['arguments'] ?? const <String, Object?>{},
                   ),
-                  callId: callId,
+                  callId: isChatCompletions ? null : resolvedCallId,
                 ),
               ],
               responsesOutputItems: assistant.responsesOutputItems,
             );
-            activeToolCallIds[id] = callId;
+            activeToolCallIds[id] = resolvedCallId;
           } else if (id is String &&
               name is String &&
               index != null &&
@@ -1637,7 +1787,10 @@ class AppController extends ChangeNotifier {
     toolCallIds.clear();
   }
 
-  static List<AiToolCall> _readToolCalls(Object? value) {
+  static List<AiToolCall> _readToolCalls(
+    Object? value, {
+    bool requireCallId = true,
+  }) {
     if (value is! List) return const [];
     final calls = <AiToolCall>[];
     for (final item in value) {
@@ -1649,7 +1802,7 @@ class AppController extends ChangeNotifier {
       final arguments = function['arguments'];
       final callId = item['call_id'];
       if (name is! String || arguments is! String) continue;
-      if (callId is! String || callId.isEmpty) {
+      if (requireCallId && (callId is! String || callId.isEmpty)) {
         throw StateError('Stored Responses function call is missing call_id');
       }
       calls.add(
@@ -1657,7 +1810,7 @@ class AppController extends ChangeNotifier {
           id: id,
           name: name,
           arguments: _validToolArguments(arguments),
-          callId: callId,
+          callId: callId is String && callId.isNotEmpty ? callId : null,
         ),
       );
     }
@@ -1760,6 +1913,116 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       // Resource cleanup is best effort during app shutdown.
     }
+  }
+
+  AgentTool _imageGenerationTool(ProviderProfile provider, Project? project) {
+    return AgentTool(
+      definition: const AiToolDefinition(
+        name: 'image.generate',
+        description:
+            'Generate one image from a text prompt. If a phone project is '
+            'bound, save the result there and return its relative path.',
+        parameters: {
+          'type': 'object',
+          'required': ['prompt'],
+          'properties': {
+            'prompt': {'type': 'string'},
+            'model': {'type': 'string'},
+            'size': {
+              'type': 'string',
+              'description': 'Provider-supported size, for example 1024x1024',
+            },
+            'filename': {'type': 'string'},
+          },
+        },
+      ),
+      requiresConfirmation: true,
+      call: (arguments) => _generateImage(provider, project, arguments),
+    );
+  }
+
+  Future<Object?> _generateImage(
+    ProviderProfile provider,
+    Project? project,
+    Map<String, Object?> arguments,
+  ) async {
+    final prompt = arguments['prompt'];
+    if (prompt is! String || prompt.trim().isEmpty) {
+      throw ArgumentError('prompt is required');
+    }
+    final model =
+        arguments['model'] is String &&
+            (arguments['model'] as String).trim().isNotEmpty
+        ? (arguments['model'] as String).trim()
+        : provider.model;
+    final size =
+        arguments['size'] is String &&
+            (arguments['size'] as String).trim().isNotEmpty
+        ? (arguments['size'] as String).trim()
+        : '1024x1024';
+    final apiKey = await _readCredential(
+      provider.apiKeyRef,
+      '图片供应商 API Key 不可用',
+    );
+    final client = ImageGenerationClient(
+      baseUrl: provider.baseUrl,
+      apiKey: apiKey,
+    );
+    try {
+      final generated = await client.generate(
+        prompt: prompt.trim(),
+        model: model,
+        size: size,
+        responseFormat: 'b64_json',
+      );
+      final encoded = generated.b64Json;
+      if (encoded != null) {
+        final bytes = Uint8List.fromList(base64Decode(encoded));
+        if (project != null) {
+          final relativePath = _generatedImagePath(arguments['filename']);
+          await _projectFiles.writeBytes(project, relativePath, bytes);
+          _invalidateProjectDirectoryCache(project.id);
+          return {
+            'generated': true,
+            'project_path': relativePath,
+            'bytes': bytes.length,
+            if (generated.revisedPrompt != null)
+              'revised_prompt': generated.revisedPrompt,
+          };
+        }
+        return {
+          'generated': true,
+          'mime_type': 'image/png',
+          'data_url': 'data:image/png;base64,$encoded',
+          if (generated.revisedPrompt != null)
+            'revised_prompt': generated.revisedPrompt,
+        };
+      }
+      if (generated.url != null) {
+        return {
+          'generated': true,
+          'url': generated.url,
+          if (generated.revisedPrompt != null)
+            'revised_prompt': generated.revisedPrompt,
+        };
+      }
+      throw const ImageGenerationInvalidResponseException('图片供应商没有返回图片');
+    } finally {
+      client.close();
+    }
+  }
+
+  static String _generatedImagePath(Object? value) {
+    final raw = value is String ? value.trim() : '';
+    final safe = raw
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')
+        .replaceFirst(RegExp(r'^\.+'), '');
+    final name = safe.isEmpty
+        ? 'generated-${DateTime.now().millisecondsSinceEpoch}.png'
+        : safe;
+    return name.toLowerCase().endsWith('.png')
+        ? 'generated/$name'
+        : 'generated/$name.png';
   }
 
   Future<String> _readCredential(String? ref, String message) async {
@@ -1908,12 +2171,15 @@ class AppController extends ChangeNotifier {
       List<Future<void>>.of(_taskEventTails.values),
       eagerError: false,
     );
+    _providerUsageClient.close();
     await _database.close();
   }
 }
 
 const _agentAutoExecuteSetting = 'agent_auto_execute';
 const _betaUpdatesSetting = 'beta_updates_enabled';
+const _fontScaleSetting = 'font_scale';
+const _imageProviderSetting = 'image_provider_id';
 
 String _normalizeRemotePath(String value) {
   final path = value.trim();

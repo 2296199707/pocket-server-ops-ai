@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
@@ -66,6 +67,7 @@ class _ChatPageState extends State<ChatPage> {
   int _sendingGeneration = 0;
   int _lastEventCount = -1;
   int _visiblePresentationCount = _historyPageSize;
+  String? _usageRequestedFor;
 
   @override
   void initState() {
@@ -125,6 +127,12 @@ class _ChatPageState extends State<ChatPage> {
         ? ''
         : widget.controller.streamingAssistantText(task.id);
     final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
+    if (provider != null && _usageRequestedFor != provider.id) {
+      _usageRequestedFor = provider.id;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(widget.controller.loadProviderUsage(provider));
+      });
+    }
     final project = widget.controller.projectFor(task?.projectId ?? _projectId);
     if (_lastEventCount != events.length) {
       _lastEventCount = events.length;
@@ -138,15 +146,12 @@ class _ChatPageState extends State<ChatPage> {
           server: _serverFor(task?.serverId ?? _serverId),
           mode: task?.mode ?? _mode,
           executionMode: task?.executionMode ?? _executionMode,
-          model: task?.modelOverride ?? _modelOverride ?? provider?.model,
-          reasoningEffort:
-              task?.reasoningEffortOverride ??
-              _reasoningEffortOverride ??
-              provider?.reasoningEffort ??
-              'default',
-          onTap: running ? null : _editContext,
-          onModelTap: running || _loadingModels ? null : _selectModel,
-          onReasoningTap: running ? null : _selectReasoningEffort,
+          provider: provider,
+          usage: provider == null
+              ? null
+              : widget.controller.providerUsageFor(provider.id),
+          onProviderTap: running ? null : _selectProvider,
+          onEdit: running ? null : _editContext,
           onShowContext: () => _showContextStatus(events),
         ),
         if (task != null && task.status != 'queued')
@@ -217,24 +222,22 @@ class _ChatPageState extends State<ChatPage> {
                       });
                     },
                   ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    IconButton(
-                      tooltip: '添加图片或文件',
-                      onPressed:
-                          widget.controller.providers.isEmpty ||
-                              running ||
-                              _sending
-                          ? null
-                          : _pickAttachments,
-                      icon: const Icon(Icons.attach_file_rounded),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.48),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: Theme.of(context).colorScheme.outlineVariant,
                     ),
-                    Expanded(
-                      child: TextField(
+                  ),
+                  padding: const EdgeInsets.fromLTRB(12, 8, 6, 4),
+                  child: Column(
+                    children: [
+                      TextField(
                         controller: _prompt,
-                        minLines: 1,
-                        maxLines: 5,
+                        minLines: 2,
+                        maxLines: 6,
                         enabled:
                             widget.controller.providers.isNotEmpty &&
                             !running &&
@@ -243,69 +246,91 @@ class _ChatPageState extends State<ChatPage> {
                           hintText: task?.mode == 'agent' || _mode == 'agent'
                               ? '告诉手机 Agent 要完成什么'
                               : '发消息',
-                          filled: true,
-                          fillColor: Theme.of(context)
-                              .colorScheme
-                              .surfaceContainerHighest
-                              .withValues(alpha: 0.55),
-                          prefixIcon: const Icon(Icons.edit_outlined, size: 20),
+                          border: InputBorder.none,
+                          isDense: true,
                           contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(22),
-                            borderSide: BorderSide.none,
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(22),
-                            borderSide: BorderSide.none,
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(22),
-                            borderSide: BorderSide(
-                              color: Theme.of(context).colorScheme.primary,
-                            ),
+                            horizontal: 2,
+                            vertical: 4,
                           ),
                         ),
                         onSubmitted: (_) => _send(),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (running)
-                      IconButton.filled(
-                        tooltip: '停止',
-                        onPressed: () => widget.controller.stopTask(task.id),
-                        icon: const Icon(Icons.stop),
-                      )
-                    else
-                      IconButton.filled(
-                        tooltip: '发送',
-                        onPressed:
-                            _sending || widget.controller.providers.isEmpty
-                            ? null
-                            : _send,
-                        icon: _sending
-                            ? const SizedBox.square(
-                                dimension: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.send_outlined),
+                      Row(
+                        children: [
+                          IconButton(
+                            tooltip: '附件、图片和项目文件',
+                            visualDensity: VisualDensity.compact,
+                            onPressed:
+                                widget.controller.providers.isEmpty ||
+                                    running ||
+                                    _sending
+                                ? null
+                                : _openComposerActions,
+                            icon: const Icon(Icons.add_circle_outline),
+                          ),
+                          Flexible(
+                            child: _ModelReasoningPill(
+                              model:
+                                  task?.modelOverride ??
+                                  _modelOverride ??
+                                  provider?.model,
+                              reasoningEffort:
+                                  task?.reasoningEffortOverride ??
+                                  _reasoningEffortOverride ??
+                                  provider?.reasoningEffort ??
+                                  'default',
+                              onModelTap: running || _loadingModels
+                                  ? null
+                                  : _selectModel,
+                              onReasoningTap: running
+                                  ? null
+                                  : _selectReasoningEffort,
+                            ),
+                          ),
+                          _ChatUtilityBar(
+                            hasProject: project != null,
+                            hasServers: widget.controller.servers.isNotEmpty,
+                            onProjectFiles: project == null
+                                ? null
+                                : _openProjectFiles,
+                            onServerFiles: widget.controller.servers.isEmpty
+                                ? null
+                                : _openFilesFromTools,
+                            onTerminal: widget.controller.servers.isEmpty
+                                ? null
+                                : _openTerminalFromTools,
+                          ),
+                          const SizedBox(width: 2),
+                          if (running)
+                            IconButton.filled(
+                              tooltip: '停止',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () =>
+                                  widget.controller.stopTask(task.id),
+                              icon: const Icon(Icons.stop),
+                            )
+                          else
+                            IconButton.filled(
+                              tooltip: '发送',
+                              visualDensity: VisualDensity.compact,
+                              onPressed:
+                                  _sending ||
+                                      widget.controller.providers.isEmpty
+                                  ? null
+                                  : _send,
+                              icon: _sending
+                                  ? const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.send_outlined),
+                            ),
+                        ],
                       ),
-                  ],
-                ),
-                _ChatUtilityBar(
-                  hasProject: project != null,
-                  hasServers: widget.controller.servers.isNotEmpty,
-                  onProjectFiles: project == null ? null : _openProjectFiles,
-                  onServerFiles: widget.controller.servers.isEmpty
-                      ? null
-                      : _openFilesFromTools,
-                  onTerminal: widget.controller.servers.isEmpty
-                      ? null
-                      : _openTerminalFromTools,
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -459,6 +484,163 @@ class _ChatPageState extends State<ChatPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _openComposerActions() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('添加到消息'),
+              subtitle: Text('附件会随本次消息发送给当前供应商'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.attach_file_outlined),
+              title: const Text('上传文件或图片'),
+              onTap: () => Navigator.pop(context, 'attachment'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: const Text('让 AI 生成图片'),
+              subtitle: const Text('生成请求会作为普通消息发送，由 Agent 自行调用生图工具'),
+              onTap: () => Navigator.pop(context, 'image'),
+            ),
+            if (widget.controller.projectFor(
+                  _currentTask?.projectId ?? _projectId,
+                ) !=
+                null)
+              ListTile(
+                leading: const Icon(Icons.folder_special_outlined),
+                title: const Text('选择手机项目文件'),
+                onTap: () => Navigator.pop(context, 'project'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'attachment') {
+      await _pickAttachments();
+    } else if (action == 'project') {
+      await _openProjectFiles();
+    } else if (action == 'image') {
+      await _requestImagePrompt();
+    }
+  }
+
+  Future<void> _requestImagePrompt() async {
+    final editor = TextEditingController();
+    final prompt = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('生成图片'),
+        content: TextField(
+          controller: editor,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 5,
+          decoration: const InputDecoration(hintText: '描述你想生成的图片'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, editor.text.trim()),
+            child: const Text('继续'),
+          ),
+        ],
+      ),
+    );
+    editor.dispose();
+    if (prompt == null || prompt.isEmpty || !mounted) return;
+    _prompt.text = '请生成图片：$prompt';
+    await _send();
+  }
+
+  Future<void> _selectProvider() async {
+    if (widget.controller.providers.isEmpty) {
+      widget.onOpenSettings();
+      return;
+    }
+    final current = _currentTask?.providerId ?? _effectiveProviderId;
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('切换 AI 供应商'),
+              subtitle: Text('只影响当前对话；不会修改供应商配置'),
+            ),
+            for (final provider in widget.controller.providers)
+              ListTile(
+                leading: Icon(
+                  provider.id == current
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text(provider.name),
+                subtitle: Text(
+                  '${wireApiLabel(provider.wireApi)} · '
+                  '${_providerUsageText(widget.controller.providerUsageFor(provider.id))}',
+                ),
+                onTap: () => Navigator.pop(context, provider.id),
+              ),
+            ListTile(
+              leading: const Icon(Icons.settings_outlined),
+              title: const Text('供应商设置'),
+              onTap: () {
+                Navigator.pop(context);
+                widget.onOpenSettings();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || selected == current || !mounted) return;
+    final task = _currentTask;
+    try {
+      if (task == null) {
+        setState(() {
+          _providerId = selected;
+          _modelOverride = null;
+          _reasoningEffortOverride = null;
+          _usageRequestedFor = null;
+        });
+      } else {
+        final updated = await widget.controller.updateTaskConfiguration(
+          taskId: task.id,
+          mode: task.mode,
+          serverId: task.serverId,
+          providerId: selected,
+          workingDirectory: task.workingDirectory,
+          executionMode: task.executionMode,
+          modelOverride: '',
+          reasoningEffortOverride: '',
+        );
+        if (!mounted) return;
+        setState(() {
+          _providerId = updated.providerId;
+          _modelOverride = null;
+          _reasoningEffortOverride = null;
+          _usageRequestedFor = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换供应商失败：$error')));
+      }
+    }
   }
 
   Future<void> _editContext() async {
@@ -938,11 +1120,10 @@ class _ContextBar extends StatelessWidget {
     required this.server,
     required this.mode,
     required this.executionMode,
-    required this.model,
-    required this.reasoningEffort,
-    required this.onTap,
-    required this.onModelTap,
-    required this.onReasoningTap,
+    required this.provider,
+    required this.usage,
+    required this.onProviderTap,
+    required this.onEdit,
     required this.onShowContext,
   });
 
@@ -950,92 +1131,118 @@ class _ContextBar extends StatelessWidget {
   final ServerProfile? server;
   final String mode;
   final String executionMode;
-  final String? model;
-  final String reasoningEffort;
-  final VoidCallback? onTap;
-  final VoidCallback? onModelTap;
-  final VoidCallback? onReasoningTap;
+  final ProviderProfile? provider;
+  final ProviderUsageSnapshot? usage;
+  final VoidCallback? onProviderTap;
+  final VoidCallback? onEdit;
   final VoidCallback onShowContext;
 
   @override
   Widget build(BuildContext context) {
-    final content = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
-      child: Row(
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 8, 5),
+      child: Column(
         children: [
-          Icon(
-            mode == 'agent' ? Icons.terminal_rounded : Icons.chat_rounded,
-            size: 20,
-            color: Theme.of(context).colorScheme.primary,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  if (project != null) ...[
-                    _ContextPill(
-                      icon: Icons.folder_outlined,
-                      label: project!.name,
+          Row(
+            children: [
+              Icon(
+                mode == 'agent' ? Icons.terminal_rounded : Icons.chat_rounded,
+                size: 20,
+                color: colors.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      mode == 'agent' ? (server?.name ?? '未选择服务器') : '普通对话',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelLarge,
                     ),
-                    const SizedBox(width: 6),
+                    Text(
+                      project?.name ?? '其他对话',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ],
-                  _ContextPill(
-                    icon: mode == 'agent'
-                        ? Icons.dns_outlined
-                        : Icons.forum_outlined,
-                    label: mode == 'agent' ? (server?.name ?? '选择服务器') : '普通对话',
+                ),
+              ),
+              if (provider != null)
+                Flexible(
+                  child: _ContextPill(
+                    icon: Icons.hub_outlined,
+                    label: provider!.name,
+                    onTap: onProviderTap,
                   ),
-                  const SizedBox(width: 6),
-                  _ContextPill(
-                    icon: Icons.auto_awesome_outlined,
-                    label: model ?? '未配置模型',
-                    onTap: onModelTap,
+                )
+              else
+                _ContextPill(
+                  icon: Icons.hub_outlined,
+                  label: '配置供应商',
+                  onTap: onProviderTap,
+                ),
+              IconButton(
+                tooltip: '上下文状态',
+                onPressed: onShowContext,
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.data_usage_outlined, size: 19),
+              ),
+              IconButton(
+                tooltip: '对话设置',
+                onPressed: onEdit,
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.tune_outlined, size: 19),
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 28, top: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    executionMode == 'auto'
+                        ? Icons.bolt_outlined
+                        : Icons.verified_user_outlined,
+                    size: 14,
+                    color: executionMode == 'auto'
+                        ? colors.primary
+                        : colors.outline,
                   ),
-                  const SizedBox(width: 6),
-                  _ContextPill(
-                    icon: Icons.psychology_outlined,
-                    label: '推理${reasoningEffortLabel(reasoningEffort)}',
-                    onTap: onReasoningTap,
+                  const SizedBox(width: 4),
+                  Text(
+                    executionMode == 'auto' ? '自动执行' : '执行前确认',
+                    style: Theme.of(context).textTheme.labelSmall,
                   ),
+                  if (usage != null &&
+                      _providerUsageText(usage).isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      _providerUsageText(usage),
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ],
                 ],
               ),
             ),
           ),
-          const SizedBox(width: 6),
-          _ContextPill(
-            icon: executionMode == 'auto'
-                ? Icons.bolt_outlined
-                : Icons.verified_user_outlined,
-            label: executionMode == 'auto' ? '自动执行' : '执行前确认',
-            emphasized: executionMode == 'auto',
-          ),
-          IconButton(
-            tooltip: '上下文状态',
-            onPressed: onShowContext,
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.data_usage_outlined, size: 19),
-          ),
-          if (onTap != null) const Icon(Icons.expand_more, size: 20),
         ],
       ),
     );
-    return onTap == null ? content : InkWell(onTap: onTap, child: content);
   }
 }
 
 class _ContextPill extends StatelessWidget {
-  const _ContextPill({
-    required this.icon,
-    required this.label,
-    this.emphasized = false,
-    this.onTap,
-  });
+  const _ContextPill({required this.icon, required this.label, this.onTap});
 
   final IconData icon;
   final String label;
-  final bool emphasized;
   final VoidCallback? onTap;
 
   @override
@@ -1044,9 +1251,7 @@ class _ContextPill extends StatelessWidget {
     final content = Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: emphasized
-            ? colors.primaryContainer
-            : colors.surfaceContainerHighest,
+        color: colors.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
@@ -1074,6 +1279,81 @@ class _ContextPill extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(10),
         child: content,
+      ),
+    );
+  }
+}
+
+class _ModelReasoningPill extends StatelessWidget {
+  const _ModelReasoningPill({
+    required this.model,
+    required this.reasoningEffort,
+    required this.onModelTap,
+    required this.onReasoningTap,
+  });
+
+  final String? model;
+  final String reasoningEffort;
+  final VoidCallback? onModelTap;
+  final VoidCallback? onReasoningTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final modelText = _shortModelName(model ?? '未配置模型');
+    final effortText = reasoningEffort == 'default'
+        ? 'default'
+        : reasoningEffort;
+    return Container(
+      constraints: const BoxConstraints(minHeight: 30),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: InkWell(
+              onTap: onModelTap,
+              borderRadius: const BorderRadius.horizontal(
+                left: Radius.circular(10),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.auto_awesome_outlined, size: 14),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        modelText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Container(width: 1, height: 16, color: colors.outlineVariant),
+          InkWell(
+            onTap: onReasoningTap,
+            borderRadius: const BorderRadius.horizontal(
+              right: Radius.circular(10),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Text(
+                effortText,
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1186,6 +1466,33 @@ String _formatUsage(int? value) {
   return buffer.toString();
 }
 
+String _shortModelName(String value) {
+  final compact = value.trim();
+  if (compact.length <= 22) return compact;
+  return '${compact.substring(0, 19)}...';
+}
+
+String _providerUsageText(ProviderUsageSnapshot? usage) {
+  if (usage == null) return '';
+  if (usage.balance != null) {
+    final balance = usage.balance!;
+    final text = '余额 ${_formatDecimal(balance.remaining)} ${balance.currency}';
+    return usage.planName == null ? text : '$text · ${usage.planName}';
+  }
+  if (usage.windows.isNotEmpty) {
+    final window = usage.windows.first;
+    return '${window.label} ${window.usedPercent.round()}%';
+  }
+  if (usage.planName != null) return usage.planName!;
+  if (usage.status == 'error' || usage.status == 'unsupported') return '额度不可用';
+  return '';
+}
+
+String _formatDecimal(double value) {
+  if (value == value.roundToDouble()) return value.toStringAsFixed(0);
+  return value.toStringAsFixed(2);
+}
+
 class _MissingProvider extends StatelessWidget {
   const _MissingProvider({required this.onOpenSettings});
 
@@ -1257,25 +1564,32 @@ class _ChatUtilityBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       height: 34,
+      width: 120,
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
             tooltip: hasProject ? '手机项目文件夹' : '当前对话未绑定手机项目',
             onPressed: onProjectFiles,
             visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
             icon: const Icon(Icons.folder_special_outlined, size: 20),
           ),
           IconButton(
             tooltip: hasServers ? '服务器文件夹' : '尚未添加服务器',
             onPressed: onServerFiles,
             visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
             icon: const Icon(Icons.dns_outlined, size: 20),
           ),
           IconButton(
             tooltip: hasServers ? '服务器终端' : '尚未添加服务器',
             onPressed: onTerminal,
             visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
             icon: const Icon(Icons.terminal_outlined, size: 20),
           ),
         ],
@@ -1368,24 +1682,30 @@ class _TaskStatusBar extends StatelessWidget {
       _ => (Icons.help_outline_rounded, '状态待核实', colors.error),
     };
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      margin: const EdgeInsets.fromLTRB(12, 2, 12, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.10),
         border: Border.all(color: color.withValues(alpha: 0.35)),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(20),
       ),
-      child: Row(
-        children: [
-          Icon(icon, size: 17, color: color),
-          const SizedBox(width: 7),
-          Expanded(
-            child: Text(
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 17, color: color),
+            const SizedBox(width: 7),
+            Text(
               running && task.status == 'running' ? '运行中' : label,
-              style: TextStyle(color: color, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1657,12 +1977,42 @@ class _ToolEventTile extends StatelessWidget {
           children: [
             if (arguments != null)
               _ToolDetail(title: '参数', value: _prettyValue(arguments)),
+            if (resultValue is Map && resultValue['data_url'] is String)
+              _GeneratedImagePreview(
+                dataUrl: resultValue['data_url'] as String,
+              ),
             if (result != null)
               _ToolDetail(title: '结果', value: _prettyValue(resultValue)),
           ],
         ),
       ),
     );
+  }
+}
+
+class _GeneratedImagePreview extends StatelessWidget {
+  const _GeneratedImagePreview({required this.dataUrl});
+
+  final String dataUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final separator = dataUrl.indexOf(',');
+    if (separator <= 0 || separator == dataUrl.length - 1) {
+      return const SizedBox.shrink();
+    }
+    try {
+      final bytes = base64Decode(dataUrl.substring(separator + 1));
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.memory(bytes, fit: BoxFit.contain),
+        ),
+      );
+    } on FormatException {
+      return const SizedBox.shrink();
+    }
   }
 }
 
@@ -1764,6 +2114,10 @@ bool _isStatusEvent(String type) =>
 
 String _prettyValue(Object? value) {
   if (value is String) return value;
+  if (value is Map && value['data_url'] is String) {
+    return const JsonEncoder.withIndent('  ')
+        .convert({'generated': true, 'image': '已生成并显示在上方'});
+  }
   try {
     return const JsonEncoder.withIndent('  ').convert(value);
   } catch (_) {
