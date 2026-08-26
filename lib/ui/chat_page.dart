@@ -1820,7 +1820,7 @@ class _MessageBubble extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 760),
           child: Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: MainAxisSize.max,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (!isUser) ...[
@@ -1833,8 +1833,8 @@ class _MessageBubble extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 680),
+              Flexible(
+                fit: FlexFit.loose,
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 14,
