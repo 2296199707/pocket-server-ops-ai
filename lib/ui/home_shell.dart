@@ -27,10 +27,10 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
+  final _chatKey = GlobalKey<ChatPageState>();
   int _selectedIndex = 0;
   String? _activeTaskId;
   String? _pendingProjectId;
-  int _chatRevision = 0;
   Future<void> _agentConfirmationQueue = Future<void>.value();
 
   Task? get _activeTask {
@@ -60,6 +60,21 @@ class _HomeShellState extends State<HomeShell> {
           ),
           actions: [
             if (_selectedIndex == 0)
+              Tooltip(
+                message: '切换工作模式',
+                child: TextButton.icon(
+                  onPressed: _openWorkModeFromAppBar,
+                  icon: const Icon(Icons.sync_alt_rounded, size: 17),
+                  label: const Text('协同', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    minimumSize: Size.zero,
+                    padding: const EdgeInsets.symmetric(horizontal: 5),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ),
+            if (_selectedIndex == 0)
               IconButton(
                 tooltip: _activeTask?.projectId == null
                     ? '在其他对话中新建'
@@ -88,8 +103,9 @@ class _HomeShellState extends State<HomeShell> {
         return SettingsPage(controller: widget.controller);
       default:
         return ChatPage(
-          key: ValueKey('$_chatRevision-${widget.controller.agentAutoExecute}'),
+          key: _chatKey,
           controller: widget.controller,
+          agentAutoExecute: widget.controller.agentAutoExecute,
           taskId: _activeTaskId,
           initialProjectId: _pendingProjectId,
           onTaskActivated: (taskId) => setState(() => _activeTaskId = taskId),
@@ -320,6 +336,11 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => ProvidersPage(controller: widget.controller),
       ),
     );
+  }
+
+  void _openWorkModeFromAppBar() {
+    final chat = _chatKey.currentState;
+    if (chat != null) unawaited(chat.openWorkModePicker());
   }
 
   void _openDashboardFromDrawer() {
@@ -800,7 +821,6 @@ class _HomeShellState extends State<HomeShell> {
       _selectedIndex = 0;
       _activeTaskId = null;
       _pendingProjectId = projectId;
-      _chatRevision++;
     });
   }
 

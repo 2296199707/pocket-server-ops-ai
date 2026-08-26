@@ -20,6 +20,7 @@ import 'terminal_page.dart';
 class ChatPage extends StatefulWidget {
   const ChatPage({
     required this.controller,
+    this.agentAutoExecute,
     required this.taskId,
     this.initialProjectId,
     required this.onTaskActivated,
@@ -31,6 +32,7 @@ class ChatPage extends StatefulWidget {
   });
 
   final AppController controller;
+  final bool? agentAutoExecute;
   final String? taskId;
   final String? initialProjectId;
   final ValueChanged<String> onTaskActivated;
@@ -46,10 +48,10 @@ class ChatPage extends StatefulWidget {
   onUserInfoRequest;
 
   @override
-  State<ChatPage> createState() => _ChatPageState();
+  ChatPageState createState() => ChatPageState();
 }
 
-class _ChatPageState extends State<ChatPage> {
+class ChatPageState extends State<ChatPage> {
   static const _historyPageSize = 40;
   static const _maxAttachmentBytes = 20 * 1024 * 1024;
 
@@ -75,31 +77,50 @@ class _ChatPageState extends State<ChatPage> {
   int _visiblePresentationCount = _historyPageSize;
   String? _usageRequestedFor;
 
+  bool get _agentAutoExecute =>
+      widget.agentAutoExecute ?? widget.controller.agentAutoExecute;
+
   @override
   void initState() {
     super.initState();
     _taskId = widget.taskId;
     _projectId = widget.initialProjectId;
-    _executionMode = widget.controller.agentAutoExecute ? 'auto' : 'confirm';
+    _executionMode = _agentAutoExecute ? 'auto' : 'confirm';
   }
 
   @override
   void didUpdateWidget(covariant ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.taskId != oldWidget.taskId && widget.taskId != _taskId) {
+    final conversationChanged =
+        (widget.taskId != oldWidget.taskId && widget.taskId != _taskId) ||
+        (widget.initialProjectId != oldWidget.initialProjectId &&
+            widget.taskId == null);
+    if (conversationChanged) {
       setState(() {
         _taskId = widget.taskId;
         _projectId = widget.initialProjectId;
+        _providerId = null;
         _reviewProviderId = null;
         _reviewModelOverride = null;
+        _serverId = null;
         _workMode = 'chat';
         _mode = 'chat';
+        _executionMode = _agentAutoExecute ? 'auto' : 'confirm';
+        _workingDirectory = null;
         _modelOverride = null;
         _reasoningEffortOverride = null;
+        _pendingAttachments = const [];
         _visiblePresentationCount = _historyPageSize;
       });
+    } else if (_agentAutoExecute !=
+            (oldWidget.agentAutoExecute ??
+                oldWidget.controller.agentAutoExecute) &&
+        _currentTask == null) {
+      setState(() => _executionMode = _agentAutoExecute ? 'auto' : 'confirm');
     }
   }
+
+  Future<void> openWorkModePicker() => _selectWorkMode();
 
   @override
   void dispose() {
@@ -169,13 +190,11 @@ class _ChatPageState extends State<ChatPage> {
           project: activeProject,
           server: boundServer,
           workMode: workMode,
-          executionMode: task?.executionMode ?? _executionMode,
           provider: provider,
           usage: provider == null
               ? null
               : widget.controller.providerUsageFor(provider.id),
           onProviderTap: running ? null : _selectProvider,
-          onWorkModeTap: running ? null : _selectWorkMode,
           onEdit: running ? null : _editContext,
           onShowContext: () => _showContextStatus(events),
         ),
@@ -188,44 +207,55 @@ class _ChatPageState extends State<ChatPage> {
           const _Notice(icon: Icons.error_outline, text: '任务执行失败，可以补充消息继续处理。'),
         const Divider(height: 1),
         Expanded(
-          child: widget.controller.providers.isEmpty
-              ? _MissingProvider(onOpenSettings: widget.onOpenSettings)
-              : presentations.isEmpty
-              ? streamingText.isEmpty
-                    ? const _EmptyConversation()
-                    : ListView(
-                        controller: _scroll,
-                        padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-                        children: [_StreamingTile(text: streamingText)],
-                      )
-              : ListView.builder(
-                  controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-                  itemCount:
-                      visiblePresentations.length +
-                      (earlierCount == 0 ? 0 : 1) +
-                      (streamingText.isEmpty ? 0 : 1),
-                  itemBuilder: (context, index) {
-                    if (earlierCount > 0 && index == 0) {
-                      return _LoadEarlierTile(
-                        remaining: earlierCount,
-                        onPressed: _loadEarlier,
-                      );
-                    }
-                    final contentIndex = index - (earlierCount > 0 ? 1 : 0);
-                    if (contentIndex == visiblePresentations.length) {
-                      return _StreamingTile(text: streamingText);
-                    }
-                    return _EventTile(
-                      presentation: visiblePresentations[contentIndex],
-                      key: ValueKey(
-                        '${visiblePresentations[contentIndex].event.eventId}-$contentIndex',
-                      ),
-                    );
-                  },
+          child: Stack(
+            children: [
+              widget.controller.providers.isEmpty
+                  ? _MissingProvider(onOpenSettings: widget.onOpenSettings)
+                  : presentations.isEmpty
+                  ? streamingText.isEmpty
+                        ? const _EmptyConversation()
+                        : ListView(
+                            controller: _scroll,
+                            padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+                            children: [_StreamingTile(text: streamingText)],
+                          )
+                  : ListView.builder(
+                      controller: _scroll,
+                      padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+                      itemCount:
+                          visiblePresentations.length +
+                          (earlierCount == 0 ? 0 : 1) +
+                          (streamingText.isEmpty ? 0 : 1),
+                      itemBuilder: (context, index) {
+                        if (earlierCount > 0 && index == 0) {
+                          return _LoadEarlierTile(
+                            remaining: earlierCount,
+                            onPressed: _loadEarlier,
+                          );
+                        }
+                        final contentIndex = index - (earlierCount > 0 ? 1 : 0);
+                        if (contentIndex == visiblePresentations.length) {
+                          return _StreamingTile(text: streamingText);
+                        }
+                        return _EventTile(
+                          presentation: visiblePresentations[contentIndex],
+                          key: ValueKey(
+                            '${visiblePresentations[contentIndex].event.eventId}-$contentIndex',
+                          ),
+                        );
+                      },
+                    ),
+              if (task != null)
+                Positioned(
+                  right: 12,
+                  bottom: 6,
+                  child: IgnorePointer(
+                    child: _TaskStatusBar(task: task, events: events),
+                  ),
                 ),
+            ],
+          ),
         ),
-        if (task != null) _TaskStatusBar(task: task, events: events),
         const Divider(height: 1),
         SafeArea(
           top: false,
@@ -292,6 +322,7 @@ class _ChatPageState extends State<ChatPage> {
                                 : _openComposerActions,
                             icon: const Icon(Icons.add_circle_outline),
                           ),
+                          const Spacer(),
                           Flexible(
                             child: _ModelReasoningPill(
                               model:
@@ -357,13 +388,18 @@ class _ChatPageState extends State<ChatPage> {
                     ],
                   ),
                 ),
-                if (boundServer != null && task != null)
-                  _ServerStatusSummary(
-                    controller: widget.controller,
-                    server: boundServer,
-                    onOpenDashboard: () => _openServerDashboard(boundServer),
-                    onFirstHostKey: (key) => widget.onConfirmHostKey(task, key),
-                  ),
+                _ConversationFooter(
+                  controller: widget.controller,
+                  server: boundServer,
+                  task: task,
+                  executionMode: task?.executionMode ?? _executionMode,
+                  onOpenDashboard: boundServer == null
+                      ? null
+                      : () => _openServerDashboard(boundServer),
+                  onFirstHostKey: task == null
+                      ? null
+                      : (key) => widget.onConfirmHostKey(task, key),
+                ),
               ],
             ),
           ),
@@ -724,6 +760,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _selectWorkMode() async {
     final task = _currentTask;
+    if (task != null && widget.controller.isTaskRunning(task.id)) return;
     final current =
         task?.effectiveWorkMode ??
         resolveWorkMode(
@@ -1555,11 +1592,9 @@ class _ContextBar extends StatelessWidget {
     required this.project,
     required this.server,
     required this.workMode,
-    required this.executionMode,
     required this.provider,
     required this.usage,
     required this.onProviderTap,
-    required this.onWorkModeTap,
     required this.onEdit,
     required this.onShowContext,
   });
@@ -1567,61 +1602,44 @@ class _ContextBar extends StatelessWidget {
   final Project? project;
   final ServerProfile? server;
   final String workMode;
-  final String executionMode;
   final ProviderProfile? provider;
   final ProviderUsageSnapshot? usage;
   final VoidCallback? onProviderTap;
-  final VoidCallback? onWorkModeTap;
   final VoidCallback? onEdit;
   final VoidCallback onShowContext;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final contextName = workModeUsesServer(workMode)
+        ? (server?.name ?? '未选择服务器')
+        : workMode == 'chat'
+        ? '普通对话'
+        : '手机 Agent';
+    final contextLabel = project == null
+        ? contextName
+        : '$contextName · ${project!.name}';
+    final usageText = _providerCompactUsageText(usage);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 8, 5),
+      padding: const EdgeInsets.fromLTRB(12, 3, 8, 3),
       child: Column(
         children: [
           Row(
             children: [
-              Icon(_workModeIcon(workMode), size: 20, color: colors.primary),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      workModeUsesServer(workMode)
-                          ? (server?.name ?? '未选择服务器')
-                          : workMode == 'chat'
-                          ? '普通对话'
-                          : '手机 Agent',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelLarge,
-                    ),
-                    Text(
-                      project?.name ?? '其他对话',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-              ),
+              Icon(_workModeIcon(workMode), size: 18, color: colors.primary),
               const SizedBox(width: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 82),
-                child: _ContextPill(
-                  icon: _workModeIcon(workMode),
-                  label: workModeLabel(workMode),
-                  onTap: onWorkModeTap,
+              Expanded(
+                child: Text(
+                  contextLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium,
                 ),
               ),
             ],
           ),
           Padding(
-            padding: const EdgeInsets.only(left: 28, top: 2),
+            padding: const EdgeInsets.only(left: 24, top: 2),
             child: Row(
               children: [
                 Expanded(
@@ -1637,71 +1655,39 @@ class _ContextBar extends StatelessWidget {
                           onTap: onProviderTap,
                         ),
                 ),
+                if (usageText.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    usageText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ],
                 const SizedBox(width: 4),
                 IconButton(
                   tooltip: '上下文状态',
                   onPressed: onShowContext,
                   visualDensity: VisualDensity.compact,
                   constraints: const BoxConstraints.tightFor(
-                    width: 36,
-                    height: 36,
+                    width: 32,
+                    height: 32,
                   ),
                   padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.data_usage_outlined, size: 19),
+                  icon: const Icon(Icons.data_usage_outlined, size: 17),
                 ),
                 IconButton(
                   tooltip: '对话设置',
                   onPressed: onEdit,
                   visualDensity: VisualDensity.compact,
                   constraints: const BoxConstraints.tightFor(
-                    width: 36,
-                    height: 36,
+                    width: 32,
+                    height: 32,
                   ),
                   padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.tune_outlined, size: 19),
+                  icon: const Icon(Icons.tune_outlined, size: 17),
                 ),
               ],
-            ),
-          ),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Padding(
-              padding: const EdgeInsets.only(left: 28, top: 2),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    executionMode == 'auto'
-                        ? Icons.bolt_outlined
-                        : executionMode == 'auto_review'
-                        ? Icons.policy_outlined
-                        : Icons.verified_user_outlined,
-                    size: 14,
-                    color: executionMode == 'auto'
-                        ? colors.primary
-                        : executionMode == 'auto_review'
-                        ? colors.secondary
-                        : colors.outline,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    executionMode == 'auto'
-                        ? '自由执行'
-                        : executionMode == 'auto_review'
-                        ? '自动审查'
-                        : '执行前确认',
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                  if (usage != null &&
-                      _providerUsageText(usage).isNotEmpty) ...[
-                    const SizedBox(width: 8),
-                    Text(
-                      _providerUsageText(usage),
-                      style: Theme.of(context).textTheme.labelSmall,
-                    ),
-                  ],
-                ],
-              ),
             ),
           ),
         ],
@@ -1958,6 +1944,15 @@ String _providerUsageText(ProviderUsageSnapshot? usage) {
   return '';
 }
 
+String _providerCompactUsageText(ProviderUsageSnapshot? usage) {
+  final balance = usage?.balance;
+  if (balance != null) return _formatDecimal(balance.remaining);
+  if (usage != null && usage.windows.isNotEmpty) {
+    return '${usage.windows.first.usedPercent.round()}%';
+  }
+  return '';
+}
+
 String _formatDecimal(double value) {
   if (value == value.roundToDouble()) return value.toStringAsFixed(0);
   return value.toStringAsFixed(2);
@@ -2151,6 +2146,94 @@ class _Notice extends StatelessWidget {
   }
 }
 
+class _ConversationFooter extends StatelessWidget {
+  const _ConversationFooter({
+    required this.controller,
+    required this.server,
+    required this.task,
+    required this.executionMode,
+    required this.onOpenDashboard,
+    required this.onFirstHostKey,
+  });
+
+  final AppController controller;
+  final ServerProfile? server;
+  final Task? task;
+  final String executionMode;
+  final VoidCallback? onOpenDashboard;
+  final FutureOr<bool> Function(SshHostKey key)? onFirstHostKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasServerStatus =
+        server != null &&
+        task != null &&
+        onOpenDashboard != null &&
+        onFirstHostKey != null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 1, 12, 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (hasServerStatus)
+            Expanded(
+              child: _ServerStatusSummary(
+                controller: controller,
+                server: server!,
+                onOpenDashboard: onOpenDashboard!,
+                onFirstHostKey: onFirstHostKey!,
+              ),
+            )
+          else
+            const Spacer(),
+          _ExecutionModeStatus(executionMode: executionMode),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExecutionModeStatus extends StatelessWidget {
+  const _ExecutionModeStatus({required this.executionMode});
+
+  final String executionMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final (label, description, color) = switch (executionMode) {
+      'auto' => ('自由', '自由执行', colors.primary),
+      'auto_review' => ('审查', '自动审查后执行', colors.secondary),
+      _ => ('确认', '执行前确认', colors.outline),
+    };
+    return Tooltip(
+      message: '工具审批：$description',
+      child: Semantics(
+        label: '工具审批：$description',
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.policy_outlined, size: 11, color: color),
+              const SizedBox(width: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 8,
+                  height: 1,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ServerStatusSummary extends StatefulWidget {
   const _ServerStatusSummary({
     required this.controller,
@@ -2322,75 +2405,72 @@ class _TaskStatusBarState extends State<_TaskStatusBar> {
     final colors = Theme.of(context).colorScheme;
     final color = _taskStatusColor(presentation.status, colors);
     final screenWidth = MediaQuery.sizeOf(context).width;
-    final maxWidth = screenWidth - 24 > 0 ? screenWidth - 24 : screenWidth;
-    final maxDetailWidth = (screenWidth * 0.34).clamp(80.0, 130.0).toDouble();
+    final maxWidth = (screenWidth * 0.48).clamp(112.0, 184.0).toDouble();
     final borderColor = color.withValues(alpha: 0.35);
 
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxWidth),
-          child: Semantics(
-            container: true,
-            liveRegion: true,
-            label: presentation.accessibleLabel,
-            child: Container(
-              constraints: const BoxConstraints(minHeight: 20),
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: color.withValues(alpha: 0.10),
-                border: Border.all(color: borderColor),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 5,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: color,
-                      shape: BoxShape.circle,
-                    ),
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        label: presentation.accessibleLabel,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+          decoration: BoxDecoration(
+            color: colors.surface.withValues(alpha: 0.52),
+            border: Border.all(color: borderColor),
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 4,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
                   ),
-                  const SizedBox(width: 4),
-                  Text(
-                    presentation.label,
-                    style: TextStyle(
-                      color: colors.onSurface,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 9,
-                      height: 1,
-                    ),
+                ),
+                const SizedBox(width: 3),
+                Text(
+                  presentation.label,
+                  style: TextStyle(
+                    color: colors.onSurface,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 7,
+                    height: 1,
                   ),
-                  const SizedBox(width: 4),
-                  ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: maxDetailWidth),
-                    child: Text(
-                      presentation.detail,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: colors.onSurfaceVariant,
-                        fontSize: 9,
-                        height: 1,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 5),
-                  Text(
-                    presentation.time,
+                ),
+                const SizedBox(width: 3),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 78),
+                  child: Text(
+                    presentation.detail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: colors.onSurfaceVariant,
-                      fontFamily: 'monospace',
-                      fontSize: 8,
+                      fontSize: 7,
                       height: 1,
                     ),
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 3),
+                Text(
+                  presentation.time,
+                  style: TextStyle(
+                    color: colors.onSurfaceVariant,
+                    fontFamily: 'monospace',
+                    fontSize: 7,
+                    height: 1,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
