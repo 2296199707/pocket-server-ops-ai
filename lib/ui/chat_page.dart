@@ -52,7 +52,6 @@ class ChatPage extends StatefulWidget {
 }
 
 class ChatPageState extends State<ChatPage> {
-  static const _historyPageSize = 40;
   static const _maxAttachmentBytes = 20 * 1024 * 1024;
 
   final _prompt = TextEditingController();
@@ -74,7 +73,7 @@ class ChatPageState extends State<ChatPage> {
   List<AiAttachment> _pendingAttachments = const [];
   int _sendingGeneration = 0;
   int _lastEventCount = -1;
-  int _visiblePresentationCount = _historyPageSize;
+  bool _loadingEarlier = false;
   String? _usageRequestedFor;
 
   bool get _agentAutoExecute =>
@@ -86,6 +85,7 @@ class ChatPageState extends State<ChatPage> {
     _taskId = widget.taskId;
     _projectId = widget.initialProjectId;
     _executionMode = _agentAutoExecute ? 'auto' : 'confirm';
+    _ensureTaskEvents();
   }
 
   @override
@@ -110,8 +110,8 @@ class ChatPageState extends State<ChatPage> {
         _modelOverride = null;
         _reasoningEffortOverride = null;
         _pendingAttachments = const [];
-        _visiblePresentationCount = _historyPageSize;
       });
+      _ensureTaskEvents();
     } else if (_agentAutoExecute !=
             (oldWidget.agentAutoExecute ??
                 oldWidget.controller.agentAutoExecute) &&
@@ -121,6 +121,24 @@ class ChatPageState extends State<ChatPage> {
   }
 
   Future<void> openWorkModePicker() => _selectWorkMode();
+
+  void _ensureTaskEvents() {
+    final taskId = _taskId;
+    if (taskId == null) return;
+    unawaited(
+      widget.controller
+          .ensureTaskEventsLoaded(taskId)
+          .then((_) {
+            if (mounted && _taskId == taskId) setState(() {});
+          })
+          .catchError((Object error, StackTrace stack) {
+            if (mounted && _taskId == taskId) {
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(SnackBar(content: Text('历史记录加载失败：$error')));
+            }
+          }),
+    );
+  }
 
   @override
   void dispose() {
@@ -148,11 +166,8 @@ class ChatPageState extends State<ChatPage> {
         ? const <TaskEvent>[]
         : widget.controller.eventsFor(task.id);
     final presentations = _eventPresentations(events);
-    final visibleStart = presentations.length > _visiblePresentationCount
-        ? presentations.length - _visiblePresentationCount
-        : 0;
-    final visiblePresentations = presentations.sublist(visibleStart);
-    final earlierCount = visibleStart;
+    final hasEarlier =
+        task != null && widget.controller.hasEarlierTaskEvents(task.id);
     final running = task != null && widget.controller.isTaskRunning(task.id);
     final streamingText = task == null
         ? ''
@@ -179,7 +194,7 @@ class ChatPageState extends State<ChatPage> {
     final project = widget.controller.projectFor(projectId);
     final activeProject = usesLocal ? project : null;
     final boundServer = usesServer ? _serverFor(serverId) : null;
-    if (_lastEventCount != events.length) {
+    if (_lastEventCount != events.length && !_loadingEarlier) {
       _lastEventCount = events.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     }
@@ -211,6 +226,10 @@ class ChatPageState extends State<ChatPage> {
             children: [
               widget.controller.providers.isEmpty
                   ? _MissingProvider(onOpenSettings: widget.onOpenSettings)
+                  : task != null &&
+                        !widget.controller.taskEventsLoaded(task.id) &&
+                        presentations.isEmpty
+                  ? const Center(child: CircularProgressIndicator())
                   : presentations.isEmpty
                   ? streamingText.isEmpty
                         ? const _EmptyConversation()
@@ -223,24 +242,25 @@ class ChatPageState extends State<ChatPage> {
                       controller: _scroll,
                       padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
                       itemCount:
-                          visiblePresentations.length +
-                          (earlierCount == 0 ? 0 : 1) +
+                          presentations.length +
+                          (hasEarlier ? 1 : 0) +
                           (streamingText.isEmpty ? 0 : 1),
                       itemBuilder: (context, index) {
-                        if (earlierCount > 0 && index == 0) {
+                        if (hasEarlier && index == 0) {
                           return _LoadEarlierTile(
-                            remaining: earlierCount,
-                            onPressed: _loadEarlier,
+                            loading: _loadingEarlier,
+                            onPressed: _loadingEarlier ? null : _loadEarlier,
                           );
                         }
-                        final contentIndex = index - (earlierCount > 0 ? 1 : 0);
-                        if (contentIndex == visiblePresentations.length) {
+                        final contentIndex = index - (hasEarlier ? 1 : 0);
+                        if (contentIndex == presentations.length) {
                           return _StreamingTile(text: streamingText);
                         }
                         return _EventTile(
-                          presentation: visiblePresentations[contentIndex],
+                          controller: widget.controller,
+                          presentation: presentations[contentIndex],
                           key: ValueKey(
-                            '${visiblePresentations[contentIndex].event.eventId}-$contentIndex',
+                            '${presentations[contentIndex].event.eventId}-$contentIndex',
                           ),
                         );
                       },
@@ -435,13 +455,31 @@ class ChatPageState extends State<ChatPage> {
     return null;
   }
 
-  void _loadEarlier() {
-    if (!mounted) return;
+  Future<void> _loadEarlier() async {
+    final taskId = _taskId;
+    if (!mounted || taskId == null || _loadingEarlier) return;
     final oldOffset = _scroll.hasClients ? _scroll.offset : 0.0;
     final oldMaxExtent = _scroll.hasClients
         ? _scroll.position.maxScrollExtent
         : 0.0;
-    setState(() => _visiblePresentationCount += _historyPageSize);
+    setState(() => _loadingEarlier = true);
+    try {
+      await widget.controller.loadEarlierTaskEvents(taskId);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('历史记录加载失败：$error')));
+      }
+      return;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingEarlier = false;
+          _lastEventCount = widget.controller.eventsFor(taskId).length;
+        });
+      }
+    }
+    if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       final addedExtent = _scroll.position.maxScrollExtent - oldMaxExtent;
@@ -1218,6 +1256,7 @@ class ChatPageState extends State<ChatPage> {
         AiAttachment(
           name: file.name,
           mimeType: _mimeTypeForName(file.name),
+          byteLength: bytes.length,
           base64Data: base64Encode(bytes),
         ),
       );
@@ -2103,10 +2142,10 @@ class _EmptyConversation extends StatelessWidget {
 }
 
 class _LoadEarlierTile extends StatelessWidget {
-  const _LoadEarlierTile({required this.remaining, required this.onPressed});
+  const _LoadEarlierTile({required this.loading, required this.onPressed});
 
-  final int remaining;
-  final VoidCallback onPressed;
+  final bool loading;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -2115,8 +2154,13 @@ class _LoadEarlierTile extends StatelessWidget {
       child: Center(
         child: OutlinedButton.icon(
           onPressed: onPressed,
-          icon: const Icon(Icons.history_rounded, size: 18),
-          label: Text('加载更早记录（还有 $remaining 条）'),
+          icon: loading
+              ? const SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.history_rounded, size: 18),
+          label: Text(loading ? '正在加载' : '加载更早记录'),
         ),
       ),
     );
@@ -2712,8 +2756,13 @@ bool _sameToolEvent(TaskEvent first, TaskEvent second) {
 }
 
 class _EventTile extends StatelessWidget {
-  const _EventTile({required this.presentation, super.key});
+  const _EventTile({
+    required this.controller,
+    required this.presentation,
+    super.key,
+  });
 
+  final AppController controller;
   final _EventPresentation presentation;
 
   @override
@@ -2721,6 +2770,7 @@ class _EventTile extends StatelessWidget {
     final event = presentation.event;
     if (_isToolEvent(event.type)) {
       return _ToolEventTile(
+        controller: controller,
         started: event.type == 'tool.started' ? event : null,
         result: event.type == 'tool.started' ? presentation.related : event,
       );
@@ -2732,6 +2782,7 @@ class _EventTile extends StatelessWidget {
       text: _eventBody(event),
       isUser: event.type == 'user.message',
       attachments: _readChatAttachments(event.payload['attachments']),
+      controller: controller,
     );
   }
 }
@@ -2742,12 +2793,14 @@ class _MessageBubble extends StatelessWidget {
     required this.isUser,
     this.streaming = false,
     this.attachments = const [],
+    this.controller,
   });
 
   final String text;
   final bool isUser;
   final bool streaming;
   final List<AiAttachment> attachments;
+  final AppController? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -2787,7 +2840,7 @@ class _MessageBubble extends StatelessWidget {
                 runSpacing: 6,
                 children: [
                   for (final attachment in attachments)
-                    Chip(
+                    ActionChip(
                       avatar: Icon(
                         attachment.isImage
                             ? Icons.image_outlined
@@ -2798,6 +2851,13 @@ class _MessageBubble extends StatelessWidget {
                         attachment.name,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      onPressed: controller == null || attachment.id == null
+                          ? null
+                          : () => _showStoredAttachment(
+                              context,
+                              controller!,
+                              attachment,
+                            ),
                     ),
                 ],
               ),
@@ -2901,8 +2961,9 @@ class _MessageAvatar extends StatelessWidget {
 }
 
 class _ToolEventTile extends StatelessWidget {
-  const _ToolEventTile({this.started, this.result});
+  const _ToolEventTile({required this.controller, this.started, this.result});
 
+  final AppController controller;
   final TaskEvent? started;
   final TaskEvent? result;
 
@@ -2956,9 +3017,21 @@ class _ToolEventTile extends StatelessWidget {
           children: [
             if (arguments != null)
               _ToolDetail(title: '参数', value: _prettyValue(arguments)),
-            if (resultValue is Map && resultValue['data_url'] is String)
+            if (resultValue is Map &&
+                resultValue['attachment_id'] is String &&
+                resultValue['mime_type'] is String)
               _GeneratedImagePreview(
-                dataUrl: resultValue['data_url'] as String,
+                controller: controller,
+                attachment: AiAttachment(
+                  id: resultValue['attachment_id'] as String,
+                  name: resultValue['name'] is String
+                      ? resultValue['name'] as String
+                      : 'generated-image',
+                  mimeType: resultValue['mime_type'] as String,
+                  byteLength: resultValue['bytes'] is int
+                      ? resultValue['bytes'] as int
+                      : null,
+                ),
               ),
             if (result != null)
               _ToolDetail(title: '结果', value: _prettyValue(resultValue)),
@@ -2970,29 +3043,69 @@ class _ToolEventTile extends StatelessWidget {
 }
 
 class _GeneratedImagePreview extends StatelessWidget {
-  const _GeneratedImagePreview({required this.dataUrl});
+  const _GeneratedImagePreview({
+    required this.controller,
+    required this.attachment,
+  });
 
-  final String dataUrl;
+  final AppController controller;
+  final AiAttachment attachment;
 
   @override
   Widget build(BuildContext context) {
-    final separator = dataUrl.indexOf(',');
-    if (separator <= 0 || separator == dataUrl.length - 1) {
-      return const SizedBox.shrink();
-    }
-    try {
-      final bytes = base64Decode(dataUrl.substring(separator + 1));
-      return Padding(
-        padding: const EdgeInsets.only(top: 8),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: Image.memory(bytes, fit: BoxFit.contain),
-        ),
-      );
-    } on FormatException {
-      return const SizedBox.shrink();
-    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        onPressed: () => _showStoredAttachment(context, controller, attachment),
+        icon: const Icon(Icons.image_outlined, size: 16),
+        label: const Text('查看生成图片'),
+      ),
+    );
   }
+}
+
+Future<void> _showStoredAttachment(
+  BuildContext context,
+  AppController controller,
+  AiAttachment attachment,
+) {
+  final attachmentId = attachment.id;
+  if (attachmentId == null) return Future.value();
+  return showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(attachment.name, overflow: TextOverflow.ellipsis),
+      content: SizedBox(
+        width: 560,
+        child: FutureBuilder<Uint8List>(
+          future: controller.loadAttachmentBytes(attachmentId),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return const Text('附件文件不可用');
+            }
+            final bytes = snapshot.data;
+            if (bytes == null) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (!attachment.isImage) {
+              return Text('${attachment.mimeType} · ${bytes.length} bytes');
+            }
+            return InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4,
+              child: Image.memory(bytes, fit: BoxFit.contain),
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
 }
 
 class _ToolDetail extends StatelessWidget {

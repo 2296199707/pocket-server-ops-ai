@@ -5,6 +5,13 @@ import 'package:sqflite/sqflite.dart';
 
 import '../domain/models.dart';
 
+class TaskEventPage {
+  const TaskEventPage({required this.events, required this.hasEarlier});
+
+  final List<TaskEvent> events;
+  final bool hasEarlier;
+}
+
 class AppDatabase {
   Database? _database;
 
@@ -14,7 +21,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 8,
+      version: 9,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -80,6 +87,24 @@ class AppDatabase {
             payload TEXT NOT NULL
           )
         ''');
+        await db.execute(
+          'CREATE INDEX task_events_task_sequence '
+          'ON task_events(taskId, sequence)',
+        );
+        await db.execute('''
+          CREATE TABLE attachments (
+            id TEXT PRIMARY KEY,
+            taskId TEXT NOT NULL,
+            name TEXT NOT NULL,
+            mimeType TEXT NOT NULL,
+            byteLength INTEGER NOT NULL,
+            storagePath TEXT NOT NULL,
+            createdAt TEXT NOT NULL
+          )
+        ''');
+        await db.execute(
+          'CREATE INDEX attachments_task ON attachments(taskId)',
+        );
         await db.execute('''
           CREATE TABLE settings (
             key TEXT PRIMARY KEY,
@@ -132,6 +157,26 @@ class AppDatabase {
         }
         if (oldVersion < 8) {
           await db.execute('ALTER TABLE tasks ADD COLUMN workMode TEXT');
+        }
+        if (oldVersion < 9) {
+          await db.execute(
+            'CREATE INDEX task_events_task_sequence '
+            'ON task_events(taskId, sequence)',
+          );
+          await db.execute('''
+            CREATE TABLE attachments (
+              id TEXT PRIMARY KEY,
+              taskId TEXT NOT NULL,
+              name TEXT NOT NULL,
+              mimeType TEXT NOT NULL,
+              byteLength INTEGER NOT NULL,
+              storagePath TEXT NOT NULL,
+              createdAt TEXT NOT NULL
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX attachments_task ON attachments(taskId)',
+          );
         }
       },
     );
@@ -239,8 +284,19 @@ class AppDatabase {
 
   Future<void> deleteTask(String id) async {
     final database = await _db;
-    await database.delete('task_events', where: 'taskId = ?', whereArgs: [id]);
-    await database.delete('tasks', where: 'id = ?', whereArgs: [id]);
+    await database.transaction((transaction) async {
+      await transaction.delete(
+        'task_events',
+        where: 'taskId = ?',
+        whereArgs: [id],
+      );
+      await transaction.delete(
+        'attachments',
+        where: 'taskId = ?',
+        whereArgs: [id],
+      );
+      await transaction.delete('tasks', where: 'id = ?', whereArgs: [id]);
+    });
   }
 
   Future<void> saveEvent(TaskEvent event) async {
@@ -263,12 +319,197 @@ class AppDatabase {
     return rows.map(_eventFromRow).toList(growable: false);
   }
 
-  Future<List<TaskEvent>> loadAllEvents() async {
-    final rows = await (await _db).query(
+  Future<List<TaskEvent>> loadModelEvents(
+    String taskId, {
+    bool useCompactionBoundary = true,
+  }) async {
+    final database = await _db;
+    final boundaryRows = await database.query(
       'task_events',
-      orderBy: 'taskId, sequence',
+      columns: ['sequence'],
+      where: "taskId = ? AND type = 'task.context_changed'",
+      whereArgs: [taskId],
+      orderBy: 'sequence DESC',
+      limit: 1,
+    );
+    var startSequence = boundaryRows.isEmpty
+        ? 0
+        : boundaryRows.first['sequence'] as int;
+    if (useCompactionBoundary) {
+      const scanPageSize = 32;
+      var offset = 0;
+      var foundCompaction = false;
+      while (!foundCompaction) {
+        final rows = await database.query(
+          'task_events',
+          columns: ['sequence', 'payload'],
+          where:
+              "taskId = ? AND type = 'assistant.completed' AND sequence >= ?",
+          whereArgs: [taskId, startSequence],
+          orderBy: 'sequence DESC',
+          limit: scanPageSize,
+          offset: offset,
+        );
+        for (final row in rows) {
+          final payload = Map<String, Object?>.from(
+            jsonDecode(row['payload'] as String) as Map,
+          );
+          if (_payloadHasCompaction(payload)) {
+            startSequence = row['sequence'] as int;
+            foundCompaction = true;
+            break;
+          }
+        }
+        if (foundCompaction || rows.length < scanPageSize) break;
+        offset += rows.length;
+      }
+    }
+    final rows = await database.query(
+      'task_events',
+      where: 'taskId = ? AND sequence >= ?',
+      whereArgs: [taskId, startSequence],
+      orderBy: 'sequence',
     );
     return rows.map(_eventFromRow).toList(growable: false);
+  }
+
+  Future<TaskEventPage> loadRecentEvents(
+    String taskId, {
+    int limit = 40,
+  }) async {
+    final rows = await (await _db).query(
+      'task_events',
+      where: 'taskId = ?',
+      whereArgs: [taskId],
+      orderBy: 'sequence DESC',
+      limit: limit + 1,
+    );
+    final hasEarlier = rows.length > limit;
+    final selected = hasEarlier ? rows.take(limit) : rows;
+    return TaskEventPage(
+      events: selected
+          .map(_eventFromRow)
+          .toList(growable: false)
+          .reversed
+          .toList(growable: false),
+      hasEarlier: hasEarlier,
+    );
+  }
+
+  Future<TaskEventPage> loadEventsBefore(
+    String taskId, {
+    required int beforeSequence,
+    int limit = 40,
+  }) async {
+    final rows = await (await _db).query(
+      'task_events',
+      where: 'taskId = ? AND sequence < ?',
+      whereArgs: [taskId, beforeSequence],
+      orderBy: 'sequence DESC',
+      limit: limit + 1,
+    );
+    final hasEarlier = rows.length > limit;
+    final selected = hasEarlier ? rows.take(limit) : rows;
+    return TaskEventPage(
+      events: selected
+          .map(_eventFromRow)
+          .toList(growable: false)
+          .reversed
+          .toList(growable: false),
+      hasEarlier: hasEarlier,
+    );
+  }
+
+  Future<TaskEvent?> loadLatestEvent(String taskId) async {
+    final rows = await (await _db).query(
+      'task_events',
+      where: 'taskId = ?',
+      whereArgs: [taskId],
+      orderBy: 'sequence DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _eventFromRow(rows.first);
+  }
+
+  Future<TaskEvent?> loadLatestTerminalEvent(String taskId) async {
+    final rows = await (await _db).query(
+      'task_events',
+      where:
+          "taskId = ? AND type IN ('task.completed', 'task.failed', "
+          "'task.cancelled', 'task.unknown')",
+      whereArgs: [taskId],
+      orderBy: 'sequence DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _eventFromRow(rows.first);
+  }
+
+  Future<int> nextEventSequence(String taskId) async {
+    final rows = await (await _db).rawQuery(
+      'SELECT MAX(sequence) AS value FROM task_events WHERE taskId = ?',
+      [taskId],
+    );
+    return ((rows.first['value'] as int?) ?? 0) + 1;
+  }
+
+  Future<void> saveAttachments(List<AttachmentRecord> records) async {
+    if (records.isEmpty) return;
+    final database = await _db;
+    await database.transaction((transaction) async {
+      for (final record in records) {
+        await transaction.insert(
+          'attachments',
+          record.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
+  Future<AttachmentRecord?> loadAttachment(String id) async {
+    final rows = await (await _db).query(
+      'attachments',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    return rows.isEmpty
+        ? null
+        : AttachmentRecord.fromMap(Map<String, Object?>.from(rows.first));
+  }
+
+  Future<List<TaskEvent>> loadLegacyAttachmentEvents(String taskId) async {
+    final rows = await (await _db).query(
+      'task_events',
+      where:
+          "taskId = ? AND ((type = 'user.message' AND payload LIKE ?) OR "
+          "(type = 'tool.completed' AND payload LIKE ?))",
+      whereArgs: [taskId, '%"base64"%', '%"data_url":"data:image/%'],
+      orderBy: 'sequence',
+    );
+    return rows.map(_eventFromRow).toList(growable: false);
+  }
+
+  Future<void> replaceEventAttachments(
+    TaskEvent event,
+    List<AttachmentRecord> records,
+  ) async {
+    final database = await _db;
+    await database.transaction((transaction) async {
+      for (final record in records) {
+        await transaction.insert(
+          'attachments',
+          record.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await transaction.update(
+        'task_events',
+        {'payload': jsonEncode(event.payload)},
+        where: 'eventId = ?',
+        whereArgs: [event.eventId],
+      );
+    });
   }
 
   TaskEvent _eventFromRow(Map<String, Object?> row) {
@@ -277,6 +518,12 @@ class AppDatabase {
       jsonDecode(row['payload'] as String) as Map,
     );
     return TaskEvent.fromMap(map);
+  }
+
+  static bool _payloadHasCompaction(Map<String, Object?> payload) {
+    final items = payload['responses_output_items'];
+    return items is List &&
+        items.any((item) => item is Map && item['type'] == 'compaction');
   }
 
   Future<void> close() async {

@@ -115,7 +115,7 @@ void main() {
     expect(body['store'], false);
     expect(body.containsKey('reasoning'), isFalse);
     expect(body['context_management'], [
-      {'type': 'compaction'},
+      {'type': 'compaction', 'compact_threshold': 200000},
     ]);
     expect((body['tools'] as List).single, {
       'type': 'function',

@@ -26,6 +26,7 @@ void main() {
       }),
     );
     addTearDown(client.close);
+    expect(client.maxResponseBytes, isNull);
 
     final result = await client.generate(
       prompt: 'a small server dashboard',
@@ -108,6 +109,30 @@ void main() {
     expect(error.toString(), contains('HTTP 401'));
     expect(error.toString(), contains('[REDACTED]'));
     expect(error.toString(), isNot(contains('secret-key')));
+  });
+
+  test('downloads a generated image URL for durable storage', () async {
+    late http.Request request;
+    final client = ImageGenerationClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'secret-key',
+      client: MockClient((incoming) async {
+        request = incoming;
+        return http.Response.bytes(
+          [1, 2, 3, 4],
+          200,
+          headers: {'content-type': 'image/webp; charset=binary'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final result = await client.download('https://cdn.example/image.webp');
+
+    expect(request.method, 'GET');
+    expect(request.headers.containsKey('authorization'), isFalse);
+    expect(result.mimeType, 'image/webp');
+    expect(result.bytes, [1, 2, 3, 4]);
   });
 
   test('enforces the response body size limit', () async {

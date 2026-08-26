@@ -162,7 +162,7 @@ void main() {
         ),
       ),
     );
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.textContaining('用时 2 分'), findsOneWidget);
     expect(find.textContaining('用时 12 小时'), findsNothing);

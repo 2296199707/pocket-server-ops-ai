@@ -64,10 +64,10 @@ class OpenAiCompatibleClient implements AiChatClient {
     String reasoningEffort = 'default',
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
-    int? compactThreshold,
+    int compactThreshold = 200000,
     int? maxResponseBytes,
   }) {
-    if (compactThreshold != null && compactThreshold < 1000) {
+    if (compactThreshold < 1000) {
       throw ArgumentError.value(
         compactThreshold,
         'compactThreshold',
@@ -103,7 +103,7 @@ class OpenAiCompatibleClient implements AiChatClient {
   final String reasoningEffort;
   final Duration timeout;
   final http.Client _client;
-  final int? compactThreshold;
+  final int compactThreshold;
   final int? maxResponseBytes;
 
   @override
@@ -144,10 +144,7 @@ class OpenAiCompatibleClient implements AiChatClient {
       // transcript on the phone while the provider performs compaction.
       'store': false,
       'context_management': [
-        {
-          'type': 'compaction',
-          if (compactThreshold != null) 'compact_threshold': compactThreshold,
-        },
+        {'type': 'compaction', 'compact_threshold': compactThreshold},
       ],
     };
     if (tools.isNotEmpty) {

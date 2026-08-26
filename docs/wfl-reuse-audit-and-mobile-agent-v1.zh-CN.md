@@ -107,15 +107,18 @@ Android 前台服务只负责在手机进程仍然存活时提高任务存活概
 为保持第一版实现小而可控，当前边界固定如下：
 
 - Agent 每轮最多 64 个模型步骤和 128 次工具调用。模型或网络在已执行远端操作后出错，或者达到上限，任务显示 `unknown`，提示人工检查，不自动重放；
-- AI 请求严格使用 Responses API，并启用官方 server-side compaction。手机不猜测模型 token 窗口，也不按 1 MiB 或字符数硬截断响应；供应商不支持 `/responses` 或 compaction 参数时直接报错，不自动改走 Chat Completions；
-- Responses 返回的 reasoning、function call 和加密 compaction output item 原样保存到任务事件；出现 compaction 后，下一次请求和重启恢复保留最新 compaction item，并按官方建议丢弃它之前的旧输入；手机不自行生成摘要、解密或修改 opaque item；
+- 供应商协议由用户明确选择 Responses 或 Chat Completions。Responses 按官方示例显式发送 `context_management` 和 `compact_threshold: 200000` 来启用 server-side compaction；供应商不支持 `/responses` 或 compaction 参数时直接报错，不自动改走 Chat Completions。Chat Completions 也不会伪装支持 Responses compaction；
+- 手机不猜测模型 token 窗口，不按 Base64 字节数、字符数或固定几 MiB 推断上下文。Responses、Chat Completions 和生图接口的正常响应默认都不设本地字节上限；64 KiB 只用于截取供应商 HTTP 错误正文，不影响正常模型响应和图片；
+- Responses 返回的 reasoning、function call 和加密 compaction output item 原样保存到任务事件；出现 compaction 后，下一次请求和重启恢复保留最新 compaction item，并按官方建议让它之前的旧输入退出当前模型窗口。手机不自行生成摘要、解密或修改 opaque item，也不会因此删除本地完整事件和附件原文件；
+- 每轮上传的图片和文字仍属于同一条用户消息。原始附件保存在应用私有文件目录，SQLite 事件只保存附件 ID、名称、MIME 和大小；构建下一次模型请求时，再把当前有效模型上下文需要的附件恢复成 Responses `input_image`/`input_file` 或 Chat Completions 对应的多模态内容。附件物理独立存储不代表从 AI 上下文移除；
+- 应用启动只读取对话任务摘要，不再读取所有任务的完整事件和图片。打开对话时从 SQLite 读取最近 40 条事件，“加载更早记录”继续做数据库分页；这只是 UI 和内存加载策略，不改变发送给模型的有效上下文。历史附件点击后才读取预览，完成 compaction 的旧图片仍保留在本地；
 - `terminal.exec` 最多运行 2 分钟；长命令使用 `terminal.start` 系列工具，并且必须在当前任务结束前完成或停止。任务结束会停止仍由手机托管的进程并释放 SSH；确需持续运行的服务由服务器自身的服务管理器接管；
 - 多个手机 Agent 任务可以并发运行，每个任务独立持有模型请求、SSH 连接和取消状态；同一服务器和工作目录的远端写入工具按顺序执行，读操作和不同工作目录仍可并发；逐项确认请求按顺序显示并标明任务名称；Android 前台服务按 `taskId` 跟踪活动任务，最后一个任务结束后才停止；
 - `terminal.exec` 和 `terminal.poll` 不再静默丢弃固定大小的 stdout/stderr；长进程继续通过偏移增量读取，任务释放时清理手机端进程缓存；
 - `file.read` 使用字节 `offset`/`length` 分页，单页最多 1 MiB，并返回 `next_offset`、`eof` 和可用的总字节数；文件本身没有 4 MiB 硬上限。文件写入先写同目录临时文件，再用 SFTP rename 替换目标，网络中断不会把目标文件截断成半文件；
 - 服务器仪表盘默认使用手机 SSH 按需读取基础信息；用户点击后可把 `mobile-agent-status` 安装到自己的 `~/.local/bin`，脚本只在刷新时执行，不安装服务、不形成服务器端持久 Agent；
 - 文件管理器通过 SFTP 浏览目录和读写 UTF-8 文本文件，不能把手机保存的 SSH 密码、私钥或 API Key 交给服务器脚本；
-- 任务事件不再截断长输出、文件内容、工具参数和 Responses 原始 output item；SQLite 仍受设备剩余存储空间约束；
+- 任务事件不再截断长输出、文件内容、工具参数和 Responses 原始 output item；AI 生图结果先保存为附件，工具事件只记录引用，不写入完整 `data_url`。SQLite 和附件文件仍受设备剩余存储空间约束；
 - Agent 的步骤数和工具调用数仍是任务控制边界，不是供应商协议回退或权限模型。Agent 仍可按工具定义执行服务器命令和文件操作，确认模式由任务设置决定。
 - 项目文件读取、写入和下载会解析现有路径中的符号链接；指向项目根外部的链接被拒绝。
 - 项目外手机路径必须经过用户确认，读授权和读写授权分开；授权不写入数据库，应用重启、删除对话或切换对话目标后失效。

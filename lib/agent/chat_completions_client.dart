@@ -6,7 +6,6 @@ import 'package:http/http.dart' as http;
 import 'ai_protocol.dart';
 import 'openai_compatible_client.dart';
 
-const int _defaultMaxResponseBytes = 4 * 1024 * 1024;
 const int _maxProviderErrorBytes = 64 * 1024;
 const int _maxProviderErrorCharacters = 2_000;
 
@@ -56,7 +55,7 @@ class ChatCompletionsClient implements AiChatClient {
     bool stream = true,
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
-    int? maxResponseBytes = _defaultMaxResponseBytes,
+    int? maxResponseBytes,
   }) {
     final normalizedBaseUrl = baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
     if (normalizedBaseUrl.isEmpty) {

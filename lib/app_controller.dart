@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path_util;
@@ -25,6 +26,7 @@ import 'providers/provider_usage_client.dart';
 import 'server_status_script.dart';
 import 'ssh/ssh_connection.dart';
 import 'storage/app_database.dart';
+import 'storage/attachment_store.dart';
 
 class ServerTerminalSession {
   ServerTerminalSession(this.connection, this.stream);
@@ -46,6 +48,7 @@ class AppController extends ChangeNotifier {
     ProviderUsageClient? providerUsageClient,
     SshConnector? sshConnector,
     AndroidTaskService? taskService,
+    AttachmentStore? attachmentStore,
     this.previewMode = false,
   }) : _database = database ?? AppDatabase(),
        // Keep the public parameter name; a private named initializing formal
@@ -55,7 +58,8 @@ class AppController extends ChangeNotifier {
        _providerTester = providerTester ?? ProviderConnectionTester(),
        _providerUsageClient = providerUsageClient ?? ProviderUsageClient(),
        _sshConnector = sshConnector ?? DartSshConnector(),
-       _taskService = taskService ?? const AndroidTaskService();
+       _taskService = taskService ?? const AndroidTaskService(),
+       _attachmentStore = attachmentStore ?? AttachmentStore();
 
   final AppDatabase _database;
   final CredentialStore _credentials;
@@ -63,13 +67,13 @@ class AppController extends ChangeNotifier {
   final ProviderUsageClient _providerUsageClient;
   final SshConnector _sshConnector;
   final AndroidTaskService _taskService;
+  final AttachmentStore _attachmentStore;
   final bool previewMode;
   final ProjectFileStore _projectFiles = const ProjectFileStore();
   final LocalPreviewServer _localPreview = LocalPreviewServer();
   final TaskSshConnectionPool _sshPool = TaskSshConnectionPool();
   final Map<String, AgentCancellation> _runningTasks = {};
   final Map<String, Future<AgentResult>> _taskRuns = {};
-  final Map<String, List<AiMessage>> _taskHistories = {};
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
@@ -78,6 +82,10 @@ class AppController extends ChangeNotifier {
   final Map<String, Future<List<ProjectFileEntry>>> _projectDirectoryLoads = {};
   final Map<String, Future<void>> _remoteWriteTails = {};
   final Map<String, Future<void>> _taskEventTails = {};
+  final Map<String, Future<void>> _eventLoads = {};
+  final Map<String, Future<void>> _attachmentMigrations = {};
+  final Set<String> _loadedTaskEvents = {};
+  final Map<String, bool> _hasEarlierTaskEvents = {};
   final Map<String, String> _streamingAssistantText = {};
   final Map<String, ProviderUsageSnapshot> _providerUsages = {};
   final Map<String, Future<ProviderUsageSnapshot>> _providerUsageLoads = {};
@@ -132,6 +140,71 @@ class AppController extends ChangeNotifier {
     return List.unmodifiable(_events[taskId] ?? const <TaskEvent>[]);
   }
 
+  bool taskEventsLoaded(String taskId) => _loadedTaskEvents.contains(taskId);
+
+  bool hasEarlierTaskEvents(String taskId) =>
+      _hasEarlierTaskEvents[taskId] ?? false;
+
+  Future<Uint8List> loadAttachmentBytes(String attachmentId) async {
+    final record = await _database.loadAttachment(attachmentId);
+    if (record == null) throw StateError('附件记录不存在');
+    return _attachmentStore.read(record);
+  }
+
+  Future<void> ensureTaskEventsLoaded(String taskId) {
+    if (_loadedTaskEvents.contains(taskId)) return Future.value();
+    final pending = _eventLoads[taskId];
+    if (pending != null) return pending;
+    final load = _loadRecentTaskEvents(taskId);
+    _eventLoads[taskId] = load;
+    return load.whenComplete(() {
+      if (identical(_eventLoads[taskId], load)) _eventLoads.remove(taskId);
+    });
+  }
+
+  Future<void> _loadRecentTaskEvents(String taskId) async {
+    await _migrateLegacyAttachments(taskId);
+    final page = await _database.loadRecentEvents(taskId);
+    if (!_tasks.any((task) => task.id == taskId)) return;
+    _events = {
+      ..._events,
+      taskId: List.unmodifiable(_mergeEvents(page.events, eventsFor(taskId))),
+    };
+    _hasEarlierTaskEvents[taskId] = page.hasEarlier;
+    _loadedTaskEvents.add(taskId);
+    _notify();
+  }
+
+  Future<void> loadEarlierTaskEvents(String taskId) async {
+    await ensureTaskEventsLoaded(taskId);
+    final current = eventsFor(taskId);
+    if (current.isEmpty || !hasEarlierTaskEvents(taskId)) return;
+    final page = await _database.loadEventsBefore(
+      taskId,
+      beforeSequence: current.first.sequence,
+    );
+    if (!_tasks.any((task) => task.id == taskId)) return;
+    _events = {
+      ..._events,
+      taskId: List.unmodifiable(_mergeEvents(page.events, current)),
+    };
+    _hasEarlierTaskEvents[taskId] = page.hasEarlier;
+    _notify();
+  }
+
+  static List<TaskEvent> _mergeEvents(
+    List<TaskEvent> earlier,
+    List<TaskEvent> later,
+  ) {
+    final byId = <String, TaskEvent>{
+      for (final event in earlier) event.eventId: event,
+      for (final event in later) event.eventId: event,
+    };
+    final events = byId.values.toList()
+      ..sort((left, right) => left.sequence.compareTo(right.sequence));
+    return events;
+  }
+
   String streamingAssistantText(String taskId) {
     return _streamingAssistantText[taskId] ?? '';
   }
@@ -181,25 +254,20 @@ class AppController extends ChangeNotifier {
             .clamp(0.85, 1.15)
             .toDouble();
     final storedTasks = await _database.loadTasks();
-    final storedEvents = await _database.loadAllEvents();
     final eventsByTask = <String, List<TaskEvent>>{};
-    for (final event in storedEvents) {
-      eventsByTask.putIfAbsent(event.taskId, () => <TaskEvent>[]).add(event);
-    }
 
     final recoveredTasks = <Task>[];
     for (final task in storedTasks) {
       if ((task.status == 'running' || task.status == 'waiting') &&
           !_runningTasks.containsKey(task.id)) {
-        final previous = eventsByTask[task.id] ?? const <TaskEvent>[];
-        String? terminalStatus;
-        for (final event in previous.reversed) {
-          terminalStatus = _statusForTerminalEvent(event.type);
-          if (terminalStatus != null) break;
-        }
+        final terminalEvent = await _database.loadLatestTerminalEvent(task.id);
+        final terminalStatus = terminalEvent == null
+            ? null
+            : _statusForTerminalEvent(terminalEvent.type);
         if (terminalStatus != null) {
           final recovered = task.copyWith(status: terminalStatus);
           await _database.saveTask(recovered);
+          eventsByTask[task.id] = [terminalEvent!];
           recoveredTasks.add(recovered);
         } else {
           final recovered = task.copyWith(status: 'unknown');
@@ -207,13 +275,13 @@ class AppController extends ChangeNotifier {
           final recovery = TaskEvent(
             eventId: _newId('event'),
             taskId: task.id,
-            sequence: previous.isEmpty ? 1 : previous.last.sequence + 1,
+            sequence: await _database.nextEventSequence(task.id),
             type: 'task.recovered',
             timestamp: DateTime.now().toUtc(),
             payload: {'previousStatus': task.status},
           );
           await _database.saveEvent(recovery);
-          eventsByTask.putIfAbsent(task.id, () => <TaskEvent>[]).add(recovery);
+          eventsByTask[task.id] = [recovery];
           recoveredTasks.add(recovered);
         }
       } else {
@@ -226,6 +294,8 @@ class AppController extends ChangeNotifier {
       (taskId, values) =>
           MapEntry(taskId, List<TaskEvent>.unmodifiable(values)),
     );
+    _loadedTaskEvents.clear();
+    _hasEarlierTaskEvents.clear();
     _loading = false;
     _notify();
   }
@@ -423,6 +493,9 @@ class AppController extends ChangeNotifier {
     );
     await _database.saveTask(task);
     _tasks = [task, ..._tasks];
+    _events = {..._events, task.id: const <TaskEvent>[]};
+    _loadedTaskEvents.add(task.id);
+    _hasEarlierTaskEvents[task.id] = false;
     _notify();
     return task;
   }
@@ -590,7 +663,6 @@ class AppController extends ChangeNotifier {
     ];
 
     if (contextChanged) {
-      _taskHistories.remove(taskId);
       _localAccess.remove(taskId);
       await appendTaskEvent(
         taskId: taskId,
@@ -652,11 +724,10 @@ class AppController extends ChangeNotifier {
     required String type,
     required Map<String, Object?> payload,
   }) async {
-    final previous = eventsFor(taskId);
     final event = TaskEvent(
       eventId: _newId('event'),
       taskId: taskId,
-      sequence: previous.isEmpty ? 1 : previous.last.sequence + 1,
+      sequence: await _database.nextEventSequence(taskId),
       type: type,
       timestamp: DateTime.now().toUtc(),
       payload: _eventPayload(payload),
@@ -690,10 +761,19 @@ class AppController extends ChangeNotifier {
     }
     final eventTail = _taskEventTails[task.id];
     if (eventTail != null) await eventTail;
-    _taskHistories.remove(task.id);
+    final eventLoad = _eventLoads[task.id];
+    if (eventLoad != null) await eventLoad;
+    final migration = _attachmentMigrations[task.id];
+    if (migration != null) await migration;
     _localAccess.remove(task.id);
     _streamingAssistantText.remove(task.id);
     await _database.deleteTask(task.id);
+    try {
+      await _attachmentStore.deleteTask(task.id);
+    } catch (_) {
+      // A private orphan is safer than deleting files before the database
+      // transaction succeeds.
+    }
     _tasks = [
       for (final item in _tasks)
         if (item.id != task.id) item,
@@ -702,6 +782,10 @@ class AppController extends ChangeNotifier {
       for (final entry in _events.entries)
         if (entry.key != task.id) entry.key: entry.value,
     };
+    _loadedTaskEvents.remove(task.id);
+    _hasEarlierTaskEvents.remove(task.id);
+    _eventLoads.remove(task.id);
+    _attachmentMigrations.remove(task.id);
     _notify();
   }
 
@@ -758,22 +842,20 @@ class AppController extends ChangeNotifier {
       } catch (_) {
         // Keep the original invalid-task error when old data is incomplete.
       }
-      return AgentResult(
-        status: 'failed',
-        messages: _taskHistories[task.id] ?? const [],
-        error: error,
-      );
+      return AgentResult(status: 'failed', messages: const [], error: error);
     }
     final cancellation = AgentCancellation();
     _runningTasks[task.id] = cancellation;
     _streamingAssistantText.remove(task.id);
     _notify();
-    final previousEvents = eventsFor(task.id);
+    var previousEvents = const <TaskEvent>[];
+    var requestAttachments = attachments;
     SshConnection? connection;
     RemoteAgentTools? remoteTools;
     ProjectAgentTools? projectTools;
     LocalAgentTools? localTools;
     Project? taskProject;
+    ProviderProfile? provider;
     AiChatClient? client;
     var remoteOperationStarted = false;
     var serviceStarted = false;
@@ -837,23 +919,38 @@ class AppController extends ChangeNotifier {
     }
 
     try {
+      await _migrateLegacyAttachments(task.id);
+      provider = previewMode ? null : _providerForTask(task);
+      final useResponsesHistory = provider?.wireApi != 'chat-completions';
+      previousEvents = await _database.loadModelEvents(
+        task.id,
+        useCompactionBoundary: useResponsesHistory,
+      );
+      if (provider != null) {
+        _validateHistoryProtocol(previousEvents, provider.wireApi);
+      }
+      requestAttachments = await _persistAttachments(task.id, attachments);
       await appendTaskEvent(
         taskId: task.id,
         type: 'user.message',
         payload: {
           'text': prompt,
-          if (attachments.isNotEmpty)
-            'attachments': attachments.map((item) => item.toJson()).toList(),
+          if (requestAttachments.isNotEmpty)
+            'attachments': requestAttachments
+                .map((item) => item.toJson())
+                .toList(),
         },
       );
       if (previewMode) {
         return await _runPreviewTask(
           task,
           prompt: prompt,
-          attachments: attachments,
-          initialHistory:
-              _taskHistories[task.id] ??
-              _localHistory(_systemPrompt(task), previousEvents),
+          attachments: requestAttachments,
+          initialHistory: await _localHistory(
+            _systemPrompt(task),
+            previousEvents,
+            useResponsesCompaction: true,
+          ),
           cancellation: cancellation,
         );
       }
@@ -868,9 +965,9 @@ class AppController extends ChangeNotifier {
         serviceStarted = true;
       }
 
-      final provider = _providerForTask(task);
+      final activeProvider = provider!;
       final apiKey = await _readCredential(
-        provider.apiKeyRef,
+        activeProvider.apiKeyRef,
         '供应商 API Key 不可用',
       );
       final tools = <AgentTool>[];
@@ -962,25 +1059,27 @@ class AppController extends ChangeNotifier {
 
       final imageProvider = imageProviderFor(task);
       if (imageProvider != null) {
-        tools.add(_imageGenerationTool(imageProvider, taskProject));
+        tools.add(_imageGenerationTool(imageProvider, taskProject, task.id));
       }
 
       client = createAiClient(
-        wireApi: provider.wireApi,
-        baseUrl: provider.baseUrl,
+        wireApi: activeProvider.wireApi,
+        baseUrl: activeProvider.baseUrl,
         apiKey: apiKey,
-        model: task.modelOverride ?? provider.model,
+        model: task.modelOverride ?? activeProvider.model,
         reasoningEffort:
-            task.reasoningEffortOverride ?? provider.reasoningEffort,
+            task.reasoningEffortOverride ?? activeProvider.reasoningEffort,
       );
       final loop = AgentLoop(client: client, tools: tools);
-      final history = _taskHistories[task.id];
-      final initialMessages =
-          history ?? _localHistory(systemPrompt, previousEvents);
+      final initialMessages = await _localHistory(
+        systemPrompt,
+        previousEvents,
+        useResponsesCompaction: activeProvider.wireApi == 'responses',
+      );
       var eventQueue = Future<void>.value();
       final result = await loop.run(
         prompt: prompt,
-        attachments: attachments,
+        attachments: requestAttachments,
         initialMessages: initialMessages,
         executionMode: task.executionMode,
         cancellation: cancellation,
@@ -1017,13 +1116,11 @@ class AppController extends ChangeNotifier {
           return eventQueue;
         },
       );
-      _taskHistories[task.id] = result.messages;
       await updateTaskStatus(task.id, result.status);
       return result;
     } catch (error) {
       // A setup or persistence failure may happen before AgentLoop can return
       // its complete message list. Rebuild from durable events on retry.
-      _taskHistories.remove(task.id);
       final status = remoteOperationStarted
           ? 'unknown'
           : cancellation.isCancelled
@@ -1040,11 +1137,7 @@ class AppController extends ChangeNotifier {
         payload: {'error': '$error'},
       );
       await updateTaskStatus(task.id, status);
-      return AgentResult(
-        status: status,
-        messages: _taskHistories[task.id] ?? const [],
-        error: error,
-      );
+      return AgentResult(status: status, messages: const [], error: error);
     } finally {
       _streamingAssistantText.remove(task.id);
       if (client != null) closeAiClient(client);
@@ -1983,7 +2076,6 @@ class AppController extends ChangeNotifier {
       AiMessage.user(prompt, attachments: attachments),
       AiMessage(role: 'assistant', content: text),
     ];
-    _taskHistories[task.id] = messages;
     await appendTaskEvent(
       taskId: task.id,
       type: 'assistant.completed',
@@ -2002,7 +2094,11 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  List<AiMessage> _localHistory(String systemPrompt, List<TaskEvent> events) {
+  Future<List<AiMessage>> _localHistory(
+    String systemPrompt,
+    List<TaskEvent> events, {
+    required bool useResponsesCompaction,
+  }) async {
     final messages = <AiMessage>[
       AiMessage(role: 'system', content: systemPrompt),
     ];
@@ -2164,7 +2260,28 @@ class AppController extends ChangeNotifier {
           }
       }
     }
-    _dropHistoryBeforeLatestCompaction(messages);
+    if (useResponsesCompaction) {
+      _dropHistoryBeforeLatestCompaction(messages);
+    }
+    for (var index = 0; index < messages.length; index++) {
+      final message = messages[index];
+      if (message.attachments.isEmpty) continue;
+      final resolved = <AiAttachment>[];
+      for (final attachment in message.attachments) {
+        resolved.add(await _resolveAttachment(attachment));
+      }
+      messages[index] = AiMessage(
+        role: message.role,
+        content: message.content,
+        toolCalls: message.toolCalls,
+        toolCallId: message.toolCallId,
+        name: message.name,
+        finishReason: message.finishReason,
+        responsesOutputItems: message.responsesOutputItems,
+        usage: message.usage,
+        attachments: resolved,
+      );
+    }
     return messages;
   }
 
@@ -2214,12 +2331,262 @@ class AppController extends ChangeNotifier {
     return calls;
   }
 
+  static void _validateHistoryProtocol(List<TaskEvent> events, String wireApi) {
+    for (final event in events) {
+      if (event.type != 'assistant.completed') continue;
+      final storedWireApi = event.payload['wire_api'];
+      if (storedWireApi is String && storedWireApi != wireApi) {
+        throw StateError('对话历史协议与当前供应商协议不一致，请新建对话或重新选择供应商');
+      }
+    }
+  }
+
   static List<AiAttachment> _readAttachments(Object? value) {
     if (value is! List) return const [];
     return [
       for (final item in value)
         if (item is Map) AiAttachment.fromJson(Map<String, Object?>.from(item)),
     ];
+  }
+
+  Future<List<AiAttachment>> _persistAttachments(
+    String taskId,
+    List<AiAttachment> attachments,
+  ) async {
+    if (attachments.isEmpty) return const [];
+    final records = <AttachmentRecord>[];
+    final persisted = <AiAttachment>[];
+    try {
+      for (final attachment in attachments) {
+        if (attachment.id != null) {
+          persisted.add(attachment);
+          continue;
+        }
+        final stored = await _writeAttachment(taskId, attachment);
+        records.add(stored.$1);
+        persisted.add(stored.$2);
+      }
+      await _database.saveAttachments(records);
+      return List.unmodifiable(persisted);
+    } catch (_) {
+      for (final record in records) {
+        await _attachmentStore.delete(record);
+      }
+      rethrow;
+    }
+  }
+
+  Future<(AttachmentRecord, AiAttachment)> _writeAttachment(
+    String taskId,
+    AiAttachment attachment,
+  ) async {
+    final encoded = attachment.base64Data;
+    if (encoded == null) throw StateError('附件内容不可用：${attachment.name}');
+    final bytes = Uint8List.fromList(base64Decode(encoded));
+    return _writeAttachmentBytes(
+      taskId,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      bytes: bytes,
+      base64Data: encoded,
+    );
+  }
+
+  Future<(AttachmentRecord, AiAttachment)> _writeAttachmentBytes(
+    String taskId, {
+    required String name,
+    required String mimeType,
+    required Uint8List bytes,
+    String? base64Data,
+  }) async {
+    final id = _newId('attachment');
+    final extension = path_util.extension(name);
+    final safeExtension = RegExp(r'^\.[A-Za-z0-9]{1,10}$').hasMatch(extension)
+        ? extension.toLowerCase()
+        : '';
+    final record = AttachmentRecord(
+      id: id,
+      taskId: taskId,
+      name: name,
+      mimeType: mimeType,
+      byteLength: bytes.length,
+      storagePath: path_util.join(taskId, '$id$safeExtension'),
+      createdAt: DateTime.now().toUtc(),
+    );
+    await _attachmentStore.write(record, bytes);
+    return (
+      record,
+      AiAttachment(
+        id: id,
+        name: name,
+        mimeType: mimeType,
+        byteLength: bytes.length,
+        base64Data: base64Data,
+      ),
+    );
+  }
+
+  Future<AiAttachment> _persistAttachmentBytes(
+    String taskId, {
+    required String name,
+    required String mimeType,
+    required Uint8List bytes,
+  }) async {
+    final stored = await _writeAttachmentBytes(
+      taskId,
+      name: name,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+    try {
+      await _database.saveAttachments([stored.$1]);
+      return stored.$2;
+    } catch (_) {
+      await _attachmentStore.delete(stored.$1);
+      rethrow;
+    }
+  }
+
+  Future<AiAttachment> _resolveAttachment(AiAttachment attachment) async {
+    if (attachment.base64Data != null) return attachment;
+    final id = attachment.id;
+    if (id == null || id.isEmpty) {
+      throw StateError('附件引用无效：${attachment.name}');
+    }
+    final record = await _database.loadAttachment(id);
+    if (record == null) throw StateError('附件记录不存在：${attachment.name}');
+    try {
+      final bytes = await _attachmentStore.read(record);
+      return AiAttachment(
+        id: record.id,
+        name: record.name,
+        mimeType: record.mimeType,
+        byteLength: record.byteLength,
+        base64Data: base64Encode(bytes),
+      );
+    } on FileSystemException {
+      throw StateError('附件文件不可用：${attachment.name}');
+    }
+  }
+
+  Future<void> _migrateLegacyAttachments(String taskId) {
+    final pending = _attachmentMigrations[taskId];
+    if (pending != null) return pending;
+    final migration = _migrateLegacyAttachmentsNow(taskId);
+    _attachmentMigrations[taskId] = migration;
+    return migration.whenComplete(() {
+      if (identical(_attachmentMigrations[taskId], migration)) {
+        _attachmentMigrations.remove(taskId);
+      }
+    });
+  }
+
+  Future<void> _migrateLegacyAttachmentsNow(String taskId) async {
+    final events = await _database.loadLegacyAttachmentEvents(taskId);
+    for (final event in events) {
+      if (event.type == 'tool.completed') {
+        await _migrateLegacyGeneratedImage(event);
+        continue;
+      }
+      final source = event.payload['attachments'];
+      if (source is! List) continue;
+      final records = <AttachmentRecord>[];
+      final migrated = <Map<String, Object?>>[];
+      try {
+        for (final value in source) {
+          if (value is! Map) continue;
+          final attachment = AiAttachment.fromJson(
+            Map<String, Object?>.from(value),
+          );
+          if (attachment.id != null) {
+            migrated.add(attachment.toJson());
+            continue;
+          }
+          final stored = await _writeAttachment(taskId, attachment);
+          records.add(stored.$1);
+          migrated.add(stored.$2.toJson());
+        }
+        final replacement = TaskEvent(
+          eventId: event.eventId,
+          taskId: event.taskId,
+          sequence: event.sequence,
+          type: event.type,
+          timestamp: event.timestamp,
+          payload: {...event.payload, 'attachments': migrated},
+        );
+        await _database.replaceEventAttachments(replacement, records);
+        _replaceLoadedEvent(replacement);
+      } catch (_) {
+        for (final record in records) {
+          await _attachmentStore.delete(record);
+        }
+      }
+    }
+  }
+
+  Future<void> _migrateLegacyGeneratedImage(TaskEvent event) async {
+    final value = event.payload['result'];
+    if (value is! Map || value['data_url'] is! String) return;
+    final dataUrl = value['data_url'] as String;
+    final separator = dataUrl.indexOf(',');
+    final marker = dataUrl.indexOf(';base64');
+    if (!dataUrl.startsWith('data:image/') ||
+        marker <= 5 ||
+        separator <= marker) {
+      return;
+    }
+    final mimeType = dataUrl.substring(5, marker);
+    final extension = switch (mimeType.toLowerCase()) {
+      'image/jpeg' => 'jpg',
+      'image/webp' => 'webp',
+      'image/gif' => 'gif',
+      _ => 'png',
+    };
+    final records = <AttachmentRecord>[];
+    try {
+      final stored = await _writeAttachment(
+        event.taskId,
+        AiAttachment(
+          name: 'generated-${event.sequence}.$extension',
+          mimeType: mimeType,
+          base64Data: dataUrl.substring(separator + 1),
+        ),
+      );
+      records.add(stored.$1);
+      final result = Map<String, Object?>.from(value)..remove('data_url');
+      result.addAll({
+        'attachment_id': stored.$2.id,
+        'name': stored.$2.name,
+        'mime_type': stored.$2.mimeType,
+        'bytes': stored.$2.byteLength,
+      });
+      final replacement = TaskEvent(
+        eventId: event.eventId,
+        taskId: event.taskId,
+        sequence: event.sequence,
+        type: event.type,
+        timestamp: event.timestamp,
+        payload: {...event.payload, 'result': result},
+      );
+      await _database.replaceEventAttachments(replacement, records);
+      _replaceLoadedEvent(replacement);
+    } catch (_) {
+      for (final record in records) {
+        await _attachmentStore.delete(record);
+      }
+    }
+  }
+
+  void _replaceLoadedEvent(TaskEvent replacement) {
+    final loaded = _events[replacement.taskId];
+    if (loaded == null) return;
+    _events = {
+      ..._events,
+      replacement.taskId: List.unmodifiable([
+        for (final item in loaded)
+          if (item.eventId == replacement.eventId) replacement else item,
+      ]),
+    };
   }
 
   static List<Map<String, Object?>> _readResponsesOutputItems(Object? value) {
@@ -2312,7 +2679,11 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  AgentTool _imageGenerationTool(ProviderProfile provider, Project? project) {
+  AgentTool _imageGenerationTool(
+    ProviderProfile provider,
+    Project? project,
+    String taskId,
+  ) {
     return AgentTool(
       definition: const AiToolDefinition(
         name: 'image.generate',
@@ -2334,13 +2705,14 @@ class AppController extends ChangeNotifier {
         },
       ),
       requiresConfirmation: true,
-      call: (arguments) => _generateImage(provider, project, arguments),
+      call: (arguments) => _generateImage(provider, project, taskId, arguments),
     );
   }
 
   Future<Object?> _generateImage(
     ProviderProfile provider,
     Project? project,
+    String taskId,
     Map<String, Object?> arguments,
   ) async {
     final prompt = arguments['prompt'];
@@ -2372,54 +2744,61 @@ class AppController extends ChangeNotifier {
         size: size,
         responseFormat: 'b64_json',
       );
+      Uint8List bytes;
+      String mimeType;
       final encoded = generated.b64Json;
       if (encoded != null) {
-        final bytes = Uint8List.fromList(base64Decode(encoded));
-        if (project != null) {
-          final relativePath = _generatedImagePath(arguments['filename']);
-          await _projectFiles.writeBytes(project, relativePath, bytes);
-          _invalidateProjectDirectoryCache(project.id);
-          return {
-            'generated': true,
-            'project_path': relativePath,
-            'bytes': bytes.length,
-            if (generated.revisedPrompt != null)
-              'revised_prompt': generated.revisedPrompt,
-          };
-        }
-        return {
-          'generated': true,
-          'mime_type': 'image/png',
-          'data_url': 'data:image/png;base64,$encoded',
-          if (generated.revisedPrompt != null)
-            'revised_prompt': generated.revisedPrompt,
-        };
+        bytes = Uint8List.fromList(base64Decode(encoded));
+        mimeType = 'image/png';
+      } else if (generated.url != null) {
+        final downloaded = await client.download(generated.url!);
+        bytes = downloaded.bytes;
+        mimeType = downloaded.mimeType;
+      } else {
+        throw const ImageGenerationInvalidResponseException('图片供应商没有返回图片');
       }
-      if (generated.url != null) {
-        return {
-          'generated': true,
-          'url': generated.url,
-          if (generated.revisedPrompt != null)
-            'revised_prompt': generated.revisedPrompt,
-        };
+
+      final relativePath = _generatedImagePath(arguments['filename'], mimeType);
+      final attachment = await _persistAttachmentBytes(
+        taskId,
+        name: path_util.basename(relativePath),
+        mimeType: mimeType,
+        bytes: bytes,
+      );
+      if (project != null) {
+        await _projectFiles.writeBytes(project, relativePath, bytes);
+        _invalidateProjectDirectoryCache(project.id);
       }
-      throw const ImageGenerationInvalidResponseException('图片供应商没有返回图片');
+      return {
+        'generated': true,
+        'attachment_id': attachment.id,
+        'name': attachment.name,
+        'mime_type': mimeType,
+        'bytes': bytes.length,
+        if (project != null) 'project_path': relativePath,
+        if (generated.revisedPrompt != null)
+          'revised_prompt': generated.revisedPrompt,
+      };
     } finally {
       client.close();
     }
   }
 
-  static String _generatedImagePath(Object? value) {
+  static String _generatedImagePath(Object? value, String mimeType) {
     final raw = value is String ? value.trim() : '';
     final safe = raw
         .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')
         .replaceFirst(RegExp(r'^\.+'), '');
-    final name = safe.isEmpty
-        ? 'generated-${DateTime.now().millisecondsSinceEpoch}.png'
-        : safe;
-    return name.toLowerCase().endsWith('.png')
-        ? 'generated/$name'
-        : 'generated/$name.png';
+    final extension = switch (mimeType.toLowerCase()) {
+      'image/jpeg' => 'jpg',
+      'image/webp' => 'webp',
+      'image/gif' => 'gif',
+      _ => 'png',
+    };
+    final baseName = safe.isEmpty
+        ? 'generated-${DateTime.now().millisecondsSinceEpoch}'
+        : path_util.basenameWithoutExtension(safe);
+    return 'generated/$baseName.$extension';
   }
 
   Future<String> _readCredential(String? ref, String message) async {

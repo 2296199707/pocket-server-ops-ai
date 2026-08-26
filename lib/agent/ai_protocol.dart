@@ -2,33 +2,66 @@ import 'dart:convert';
 
 class AiAttachment {
   const AiAttachment({
+    this.id,
     required this.name,
     required this.mimeType,
-    required this.base64Data,
+    this.byteLength,
+    this.base64Data,
   });
 
+  final String? id;
   final String name;
   final String mimeType;
-  final String base64Data;
+  final int? byteLength;
+
+  /// Present only while an attachment is being sent to the provider. Durable
+  /// events store [id] and metadata instead of retaining the encoded file.
+  final String? base64Data;
 
   bool get isImage => mimeType.toLowerCase().startsWith('image/');
 
-  String get dataUrl => 'data:$mimeType;base64,$base64Data';
+  String get dataUrl {
+    final encoded = base64Data;
+    if (encoded == null) throw StateError('附件尚未载入：$name');
+    return 'data:$mimeType;base64,$encoded';
+  }
 
-  Map<String, Object?> toJson() => {
-    'name': name,
-    'mime_type': mimeType,
-    'base64': base64Data,
-  };
+  Map<String, Object?> toJson() {
+    final attachmentId = id;
+    if (attachmentId != null && attachmentId.isNotEmpty) {
+      return {
+        'attachment_id': attachmentId,
+        'name': name,
+        'mime_type': mimeType,
+        if (byteLength != null) 'size': byteLength,
+      };
+    }
+    return {
+      'name': name,
+      'mime_type': mimeType,
+      if (byteLength != null) 'size': byteLength,
+      if (base64Data != null) 'base64': base64Data,
+    };
+  }
 
   factory AiAttachment.fromJson(Map<String, Object?> json) {
+    final id = json['attachment_id'];
     final name = json['name'];
     final mimeType = json['mime_type'];
     final base64Data = json['base64'];
-    if (name is! String || mimeType is! String || base64Data is! String) {
+    final byteLength = json['size'];
+    if (name is! String ||
+        mimeType is! String ||
+        (id is! String && base64Data is! String)) {
       throw const FormatException('附件格式无效');
     }
-    return AiAttachment(name: name, mimeType: mimeType, base64Data: base64Data);
+    return AiAttachment(
+      id: id is String ? id : null,
+      name: name,
+      mimeType: mimeType,
+      byteLength: byteLength is int ? byteLength : null,
+      base64Data: base64Data is String ? base64Data : null,
+    );
   }
 }
 

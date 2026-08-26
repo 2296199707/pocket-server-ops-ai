@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -18,6 +19,13 @@ class ImageGenerationResult {
   bool get hasBase64 => b64Json != null;
 
   bool get hasUrl => url != null;
+}
+
+class DownloadedImage {
+  const DownloadedImage({required this.bytes, required this.mimeType});
+
+  final Uint8List bytes;
+  final String mimeType;
 }
 
 class ImageGenerationException implements Exception {
@@ -64,7 +72,7 @@ class ImageGenerationClient {
     required String apiKey,
     http.Client? client,
     Duration timeout = const Duration(minutes: 2),
-    int maxResponseBytes = defaultMaxResponseBytes,
+    int? maxResponseBytes,
   }) {
     return ImageGenerationClient._(
       _normalizeBaseUrl(baseUrl),
@@ -85,16 +93,16 @@ class ImageGenerationClient {
     if (timeout <= Duration.zero) {
       throw ArgumentError.value(timeout, 'timeout', 'must be positive');
     }
-    if (maxResponseBytes <= 0) {
+    final responseLimit = maxResponseBytes;
+    if (responseLimit != null && responseLimit <= 0) {
       throw ArgumentError.value(
-        maxResponseBytes,
+        responseLimit,
         'maxResponseBytes',
         'must be positive',
       );
     }
   }
 
-  static const defaultMaxResponseBytes = 16 * 1024 * 1024;
   static const _maxErrorBodyBytes = 64 * 1024;
   static const _maxErrorMessageCharacters = 2_000;
 
@@ -102,7 +110,7 @@ class ImageGenerationClient {
   final String _apiKey;
   final http.Client _client;
   final Duration timeout;
-  final int maxResponseBytes;
+  final int? maxResponseBytes;
 
   Future<ImageGenerationResult> generate({
     required String prompt,
@@ -132,9 +140,7 @@ class ImageGenerationClient {
       cancellation,
     );
     final isError = response.statusCode < 200 || response.statusCode >= 300;
-    final bodyLimit = isError && maxResponseBytes > _maxErrorBodyBytes
-        ? _maxErrorBodyBytes
-        : maxResponseBytes;
+    final bodyLimit = isError ? _maxErrorBodyBytes : maxResponseBytes;
     final body = await _awaitCancellation(
       _readLimitedText(response.stream, maxBytes: bodyLimit).timeout(timeout),
       cancellation,
@@ -147,6 +153,52 @@ class ImageGenerationClient {
       );
     }
     return _parseResult(body);
+  }
+
+  Future<DownloadedImage> download(
+    String url, {
+    Future<void>? cancellation,
+  }) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        (uri.scheme != 'https' && uri.scheme != 'http') ||
+        uri.host.isEmpty) {
+      throw const ImageGenerationInvalidResponseException('图片供应商返回的 URL 无效');
+    }
+    final response = await _awaitCancellation(
+      _client.send(http.Request('GET', uri)).timeout(timeout),
+      cancellation,
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final body = await _awaitCancellation(
+        _readLimitedText(
+          response.stream,
+          maxBytes: _maxErrorBodyBytes,
+        ).timeout(timeout),
+        cancellation,
+      );
+      throw ImageGenerationHttpException(
+        statusCode: response.statusCode,
+        body: _redactAndLimitError(body),
+      );
+    }
+    final bytes = await _awaitCancellation(
+      _readLimitedBytes(
+        response.stream,
+        maxBytes: maxResponseBytes,
+      ).timeout(timeout),
+      cancellation,
+    );
+    final contentType = response.headers['content-type']
+        ?.split(';')
+        .first
+        .trim();
+    return DownloadedImage(
+      bytes: bytes,
+      mimeType: contentType?.startsWith('image/') == true
+          ? contentType!
+          : 'image/png',
+    );
   }
 
   static Uri generationsEndpoint(String baseUrl) {
@@ -233,7 +285,7 @@ class ImageGenerationClient {
 
   static Future<String> _readLimitedText(
     Stream<List<int>> stream, {
-    required int maxBytes,
+    required int? maxBytes,
   }) async {
     final result = StringBuffer();
     await for (final chunk in _limitedBytes(
@@ -245,14 +297,25 @@ class ImageGenerationClient {
     return result.toString();
   }
 
+  static Future<Uint8List> _readLimitedBytes(
+    Stream<List<int>> stream, {
+    required int? maxBytes,
+  }) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in _limitedBytes(stream, maxBytes: maxBytes)) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
   static Stream<List<int>> _limitedBytes(
     Stream<List<int>> stream, {
-    required int maxBytes,
+    required int? maxBytes,
   }) async* {
     var received = 0;
     await for (final chunk in stream) {
       received += chunk.length;
-      if (received > maxBytes) {
+      if (maxBytes != null && received > maxBytes) {
         throw ImageGenerationResponseTooLarge(maxBytes);
       }
       yield chunk;

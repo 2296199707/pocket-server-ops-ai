@@ -3,11 +3,13 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
 import 'package:mobile_agent/domain/models.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 import 'package:mobile_agent/storage/memory_app_database.dart';
+import 'package:mobile_agent/storage/attachment_store.dart';
 
 void main() {
   test('a phone task left running is restored as unknown', () async {
@@ -407,6 +409,388 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'attachments are referenced in events and restored after restart',
+    () async {
+      final root = await Directory.systemTemp.createTemp('mobile-agent-files-');
+      addTearDown(() async {
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final database = MemoryAppDatabase();
+      final store = AttachmentStore(rootProvider: () async => root);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        attachmentStore: store,
+        previewMode: true,
+      );
+      await controller.load();
+      final task = await controller.createTask(title: '图片对话');
+
+      await controller.runTask(
+        task,
+        prompt: '查看图片',
+        attachments: const [
+          AiAttachment(
+            name: 'screen.png',
+            mimeType: 'image/png',
+            byteLength: 5,
+            base64Data: 'aW1hZ2U=',
+          ),
+        ],
+      );
+
+      final userEvent = controller
+          .eventsFor(task.id)
+          .firstWhere((event) => event.type == 'user.message');
+      final eventJson = jsonEncode(userEvent.payload);
+      expect(eventJson, isNot(contains('aW1hZ2U=')));
+      final attachment = AiAttachment.fromJson(
+        Map<String, Object?>.from(
+          (userEvent.payload['attachments'] as List).single as Map,
+        ),
+      );
+      expect(attachment.id, isNotEmpty);
+      expect(
+        await controller.loadAttachmentBytes(attachment.id!),
+        utf8.encode('image'),
+      );
+      controller.dispose();
+
+      final restored = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        attachmentStore: store,
+        previewMode: true,
+      );
+      await restored.load();
+      final result = await restored.runTask(
+        restored.tasks.single,
+        prompt: '继续',
+      );
+      expect(result.status, 'completed');
+      restored.dispose();
+    },
+  );
+
+  test(
+    'legacy Base64 attachments migrate when a conversation is opened',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'mobile-agent-legacy-',
+      );
+      addTearDown(() async {
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final database = MemoryAppDatabase();
+      final timestamp = DateTime.utc(2026, 8, 26);
+      await database.saveTask(
+        Task(
+          id: 'task-legacy',
+          mode: 'chat',
+          serverId: null,
+          providerId: null,
+          title: '旧图片',
+          workingDirectory: null,
+          executionMode: 'confirm',
+          status: 'completed',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'event-legacy',
+          taskId: 'task-legacy',
+          sequence: 1,
+          type: 'user.message',
+          timestamp: timestamp,
+          payload: const {
+            'text': '旧附件',
+            'attachments': [
+              {'name': 'old.png', 'mime_type': 'image/png', 'base64': 'b2xk'},
+            ],
+          },
+        ),
+      );
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        attachmentStore: AttachmentStore(rootProvider: () async => root),
+      );
+      await controller.load();
+      await controller.ensureTaskEventsLoaded('task-legacy');
+
+      final migrated = controller.eventsFor('task-legacy').single;
+      expect(jsonEncode(migrated.payload), isNot(contains('"base64"')));
+      final attachment = AiAttachment.fromJson(
+        Map<String, Object?>.from(
+          (migrated.payload['attachments'] as List).single as Map,
+        ),
+      );
+      expect(
+        await controller.loadAttachmentBytes(attachment.id!),
+        utf8.encode('old'),
+      );
+      controller.dispose();
+    },
+  );
+
+  test(
+    '100 cumulative image messages load from the database in pages',
+    () async {
+      final database = MemoryAppDatabase();
+      final timestamp = DateTime.utc(2026, 8, 26);
+      await database.saveTask(
+        Task(
+          id: 'task-pages',
+          mode: 'chat',
+          serverId: null,
+          providerId: null,
+          title: '长对话',
+          workingDirectory: null,
+          executionMode: 'confirm',
+          status: 'completed',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        ),
+      );
+      for (var sequence = 1; sequence <= 100; sequence++) {
+        await database.saveEvent(
+          TaskEvent(
+            eventId: 'event-$sequence',
+            taskId: 'task-pages',
+            sequence: sequence,
+            type: 'user.message',
+            timestamp: timestamp,
+            payload: {
+              'text': 'image $sequence',
+              'attachments': [
+                {
+                  'attachment_id': 'attachment-$sequence',
+                  'name': 'image-$sequence.png',
+                  'mime_type': 'image/png',
+                  'size': 1024,
+                },
+              ],
+            },
+          ),
+        );
+      }
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+
+      await controller.load();
+      expect(controller.eventsFor('task-pages'), isEmpty);
+      await controller.ensureTaskEventsLoaded('task-pages');
+      expect(controller.eventsFor('task-pages'), hasLength(40));
+      expect(
+        controller
+            .eventsFor('task-pages')
+            .every((event) => !jsonEncode(event.payload).contains('"base64"')),
+        isTrue,
+      );
+      expect(controller.hasEarlierTaskEvents('task-pages'), isTrue);
+      await controller.loadEarlierTaskEvents('task-pages');
+      expect(controller.eventsFor('task-pages'), hasLength(80));
+      await controller.loadEarlierTaskEvents('task-pages');
+      expect(controller.eventsFor('task-pages'), hasLength(100));
+      expect(controller.hasEarlierTaskEvents('task-pages'), isFalse);
+      controller.dispose();
+    },
+  );
+
+  test('attachments before the latest compaction are not read again', () async {
+    final root = await Directory.systemTemp.createTemp('mobile-agent-compact-');
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final database = MemoryAppDatabase();
+    final timestamp = DateTime.utc(2026, 8, 26);
+    await database.saveTask(
+      Task(
+        id: 'task-compact',
+        mode: 'chat',
+        serverId: null,
+        providerId: null,
+        title: '压缩对话',
+        workingDirectory: null,
+        executionMode: 'confirm',
+        status: 'completed',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      ),
+    );
+    await database.saveAttachments([
+      AttachmentRecord(
+        id: 'missing-image',
+        taskId: 'task-compact',
+        name: 'missing.png',
+        mimeType: 'image/png',
+        byteLength: 10,
+        storagePath: 'task-compact/missing.png',
+        createdAt: timestamp,
+      ),
+    ]);
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'event-user',
+        taskId: 'task-compact',
+        sequence: 1,
+        type: 'user.message',
+        timestamp: timestamp,
+        payload: const {
+          'text': '旧图片',
+          'attachments': [
+            {
+              'attachment_id': 'missing-image',
+              'name': 'missing.png',
+              'mime_type': 'image/png',
+              'size': 10,
+            },
+          ],
+        },
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'event-compaction',
+        taskId: 'task-compact',
+        sequence: 2,
+        type: 'assistant.completed',
+        timestamp: timestamp,
+        payload: const {
+          'text': '',
+          'responses_output_items': [
+            {'type': 'compaction', 'encrypted_content': 'opaque'},
+          ],
+        },
+      ),
+    );
+    expect(
+      (await database.loadModelEvents('task-compact'))
+          .map((event) => event.eventId),
+      ['event-compaction'],
+    );
+    expect(
+      (await database.loadModelEvents(
+        'task-compact',
+        useCompactionBoundary: false,
+      )).map((event) => event.eventId),
+      ['event-user', 'event-compaction'],
+    );
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      attachmentStore: AttachmentStore(rootProvider: () async => root),
+      previewMode: true,
+    );
+    await controller.load();
+
+    final result = await controller.runTask(
+      controller.tasks.single,
+      prompt: '继续',
+    );
+    expect(result.status, 'completed');
+    expect(await database.loadAttachment('missing-image'), isNotNull);
+    controller.dispose();
+  });
+
+  test('failed task deletion keeps attachment files intact', () async {
+    final root = await Directory.systemTemp.createTemp('mobile-agent-delete-');
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final database = _FailingDeleteDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      attachmentStore: AttachmentStore(rootProvider: () async => root),
+      previewMode: true,
+    );
+    await controller.load();
+    final task = await controller.createTask(title: '保留附件');
+    await controller.runTask(
+      task,
+      prompt: '保存',
+      attachments: const [
+        AiAttachment(
+          name: 'keep.png',
+          mimeType: 'image/png',
+          base64Data: 'a2VlcA==',
+        ),
+      ],
+    );
+    final attachment = AiAttachment.fromJson(
+      Map<String, Object?>.from(
+        (controller
+                        .eventsFor(task.id)
+                        .firstWhere((event) => event.type == 'user.message')
+                        .payload['attachments']
+                    as List)
+                .single
+            as Map,
+      ),
+    );
+
+    database.failDelete = true;
+    await expectLater(controller.deleteTask(task), throwsStateError);
+
+    expect(
+      await controller.loadAttachmentBytes(attachment.id!),
+      utf8.encode('keep'),
+    );
+    controller.dispose();
+  });
+
+  test(
+    'persisted user event keeps its attachment after task update fails',
+    () async {
+      final root = await Directory.systemTemp.createTemp('mobile-agent-event-');
+      addTearDown(() async {
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final database = _FailingTaskSaveDatabase();
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        attachmentStore: AttachmentStore(rootProvider: () async => root),
+        previewMode: true,
+      );
+      await controller.load();
+      final task = await controller.createTask(title: '事件附件');
+
+      database.failNextSave = true;
+      final result = await controller.runTask(
+        task,
+        prompt: '保存',
+        attachments: const [
+          AiAttachment(
+            name: 'event.png',
+            mimeType: 'image/png',
+            base64Data: 'ZXZlbnQ=',
+          ),
+        ],
+      );
+
+      expect(result.status, 'failed');
+      final userEvent = (await database.loadEvents(task.id))
+          .firstWhere((event) => event.type == 'user.message');
+      final attachment = AiAttachment.fromJson(
+        Map<String, Object?>.from(
+          (userEvent.payload['attachments'] as List).single as Map,
+        ),
+      );
+      expect(
+        await controller.loadAttachmentBytes(attachment.id!),
+        utf8.encode('event'),
+      );
+      controller.dispose();
+    },
+  );
+
   test('dashboard and file APIs use the direct SSH connection', () async {
     final database = MemoryAppDatabase();
     final credentials = MemoryCredentialStore();
@@ -473,6 +857,29 @@ void main() {
     );
     controller.dispose();
   });
+}
+
+class _FailingDeleteDatabase extends MemoryAppDatabase {
+  bool failDelete = false;
+
+  @override
+  Future<void> deleteTask(String id) {
+    if (failDelete) throw StateError('delete failed');
+    return super.deleteTask(id);
+  }
+}
+
+class _FailingTaskSaveDatabase extends MemoryAppDatabase {
+  bool failNextSave = false;
+
+  @override
+  Future<void> saveTask(Task task) {
+    if (failNextSave) {
+      failNextSave = false;
+      throw StateError('save failed');
+    }
+    return super.saveTask(task);
+  }
 }
 
 class _FakeConnector implements SshConnector {

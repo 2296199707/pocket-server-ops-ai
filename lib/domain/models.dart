@@ -507,6 +507,48 @@ class TaskEvent {
   };
 }
 
+class AttachmentRecord {
+  const AttachmentRecord({
+    required this.id,
+    required this.taskId,
+    required this.name,
+    required this.mimeType,
+    required this.byteLength,
+    required this.storagePath,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String taskId;
+  final String name;
+  final String mimeType;
+  final int byteLength;
+  final String storagePath;
+  final DateTime createdAt;
+
+  factory AttachmentRecord.fromMap(Map<String, Object?> map) {
+    return AttachmentRecord(
+      id: map['id'] as String,
+      taskId: map['taskId'] as String,
+      name: map['name'] as String,
+      mimeType: map['mimeType'] as String,
+      byteLength: map['byteLength'] as int,
+      storagePath: map['storagePath'] as String,
+      createdAt: _readTime(map['createdAt']),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'taskId': taskId,
+    'name': name,
+    'mimeType': mimeType,
+    'byteLength': byteLength,
+    'storagePath': storagePath,
+    'createdAt': _writeTime(createdAt),
+  };
+}
+
 DateTime _readTime(Object? value) => DateTime.parse(value as String);
 
 String _writeTime(DateTime value) => value.toUtc().toIso8601String();
