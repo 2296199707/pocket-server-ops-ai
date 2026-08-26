@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../domain/models.dart';
 import '../local/project_files.dart';
+import 'local_preview_page.dart';
 
 class ProjectFileManagerPage extends StatefulWidget {
   const ProjectFileManagerPage({
@@ -60,6 +61,11 @@ class _ProjectFileManagerPageState extends State<ProjectFileManagerPage> {
       appBar: AppBar(
         title: Text('${widget.project.name} · 文件'),
         actions: [
+          IconButton(
+            tooltip: '本地网页预览',
+            onPressed: _openPreview,
+            icon: const Icon(Icons.preview_outlined),
+          ),
           IconButton(
             tooltip: '新建文件',
             onPressed: _loading ? null : _createFile,
@@ -227,6 +233,17 @@ class _ProjectFileManagerPageState extends State<ProjectFileManagerPage> {
     );
     if (saved != null) _textCache[entry.path] = saved;
     if (mounted) unawaited(_load(forceRefresh: true));
+  }
+
+  Future<void> _openPreview() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LocalPreviewPage(
+          controller: widget.controller,
+          project: widget.project,
+        ),
+      ),
+    );
   }
 
   void _goParent() {

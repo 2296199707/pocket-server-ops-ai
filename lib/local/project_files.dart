@@ -6,6 +6,7 @@ import 'package:path/path.dart' as path_util;
 import 'package:path_provider/path_provider.dart';
 
 import '../domain/models.dart';
+import 'local_file_access.dart';
 
 class ProjectFileEntry {
   const ProjectFileEntry({
@@ -58,12 +59,13 @@ class ProjectFileStore {
     Project project,
     String relativePath,
   ) async {
-    final directory = Directory(resolve(project, relativePath));
+    final root = await _canonicalProjectRoot(project);
+    final directory = Directory(await _resolveForIo(project, relativePath));
     final entries = <ProjectFileEntry>[];
     await for (final entity in directory.list(followLinks: false)) {
       final type = await FileSystemEntity.type(entity.path, followLinks: false);
       final name = path_util.basename(entity.path);
-      final childPath = _relativePath(project, entity.path);
+      final childPath = _relativePath(root, entity.path);
       int? size;
       if (type == FileSystemEntityType.file) {
         try {
@@ -101,7 +103,7 @@ class ProjectFileStore {
   }) async {
     if (offset < 0) throw ArgumentError.value(offset, 'offset');
     if (length <= 0) throw ArgumentError.value(length, 'length');
-    final file = await File(resolve(project, relativePath)).open();
+    final file = await File(await _resolveForIo(project, relativePath)).open();
     try {
       final totalBytes = await file.length();
       if (offset >= totalBytes) {
@@ -138,14 +140,10 @@ class ProjectFileStore {
   }
 
   Future<String> readText(Project project, String relativePath) async {
-    return File(resolve(project, relativePath)).readAsString();
+    return File(await _resolveForIo(project, relativePath)).readAsString();
   }
 
-  Future<void> writeText(
-    Project project,
-    String relativePath,
-    String content,
-  ) {
+  Future<void> writeText(Project project, String relativePath, String content) {
     return writeBytes(
       project,
       relativePath,
@@ -158,7 +156,7 @@ class ProjectFileStore {
     String relativePath,
     Uint8List bytes,
   ) async {
-    final target = File(resolve(project, relativePath));
+    final target = File(await _resolveForIo(project, relativePath));
     await target.parent.create(recursive: true);
     await target.writeAsBytes(bytes, flush: true);
   }
@@ -176,17 +174,30 @@ class ProjectFileStore {
     if (_countOccurrences(current, oldText) != 1) {
       throw StateError('replaceText requires exactly one matching block');
     }
-    await writeText(project, relativePath, current.replaceFirst(oldText, newText));
+    await writeText(
+      project,
+      relativePath,
+      current.replaceFirst(oldText, newText),
+    );
   }
 
   Future<void> createFile(Project project, String relativePath) async {
-    final target = File(resolve(project, relativePath));
+    final target = File(await _resolveForIo(project, relativePath));
     await target.parent.create(recursive: true);
     if (!await target.exists()) await target.writeAsString('');
   }
 
   Future<void> createDirectory(Project project, String relativePath) {
-    return Directory(resolve(project, relativePath)).create(recursive: true);
+    return _resolveForIo(
+      project,
+      relativePath,
+    ).then((resolved) => Directory(resolved).create(recursive: true));
+  }
+
+  Future<bool> exists(Project project, String relativePath) async {
+    final resolved = await _resolveForIo(project, relativePath);
+    return await FileSystemEntity.type(resolved, followLinks: false) !=
+        FileSystemEntityType.notFound;
   }
 
   String resolve(Project project, String relativePath) {
@@ -196,12 +207,55 @@ class ProjectFileStore {
         : path_util.joinAll([project.localPath, ...normalized.split('/')]);
   }
 
-  String _relativePath(Project project, String absolutePath) {
-    final relative = path_util.relative(
-      absolutePath,
-      from: project.localPath,
-    );
+  /// Resolve a project path after checking every existing path component.
+  ///
+  /// Local preview uses this instead of joining paths directly so a symbolic
+  /// link inside a project cannot expose a file outside the project root.
+  Future<String> resolveForIo(Project project, String relativePath) {
+    return _resolveForIo(project, relativePath);
+  }
+
+  static String normalizeRelativePath(String value) {
+    return _normalizeRelativePath(value);
+  }
+
+  String _relativePath(String rootPath, String absolutePath) {
+    final relative = path_util.relative(absolutePath, from: rootPath);
     return relative == '.' ? '' : relative.replaceAll(path_util.separator, '/');
+  }
+
+  Future<String> _canonicalProjectRoot(Project project) {
+    return LocalFileAccessStore.canonicalExistingPath(project.localPath);
+  }
+
+  Future<String> _resolveForIo(Project project, String relativePath) async {
+    final root = await _canonicalProjectRoot(project);
+    final normalized = _normalizeRelativePath(relativePath);
+    if (normalized.isEmpty) return root;
+
+    var current = root;
+    final parts = normalized.split('/');
+    for (var index = 0; index < parts.length; index++) {
+      final candidate = path_util.join(current, parts[index]);
+      final type = await FileSystemEntity.type(candidate, followLinks: false);
+      if (type == FileSystemEntityType.notFound) {
+        return path_util.joinAll([current, ...parts.sublist(index)]);
+      }
+
+      final resolved = await LocalFileAccessStore.canonicalExistingPath(
+        candidate,
+      );
+      if (!LocalFileAccessStore.isWithinCanonical(resolved, root)) {
+        throw StateError('项目文件路径不能通过符号链接离开项目文件夹');
+      }
+      if (index < parts.length - 1 &&
+          await FileSystemEntity.type(resolved, followLinks: false) !=
+              FileSystemEntityType.directory) {
+        throw StateError('项目路径中的目录组件不是目录');
+      }
+      current = resolved;
+    }
+    return current;
   }
 
   static String _normalizeRelativePath(String value) {

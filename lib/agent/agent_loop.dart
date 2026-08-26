@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'agent_tools.dart';
+import 'auto_review.dart';
 import 'ai_protocol.dart';
 import 'chat_completions_client.dart';
 import 'openai_compatible_client.dart';
@@ -51,6 +52,11 @@ class AgentLoop {
     int? maxContextCharacters,
     Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
     confirm,
+    Future<AgentReviewDecision> Function(
+      AgentTool tool,
+      Map<String, Object?> arguments,
+    )?
+    review,
     Future<void> Function(String type, Map<String, Object?> payload)? onEvent,
   }) async {
     final messages = <AiMessage>[
@@ -285,13 +291,73 @@ class AgentLoop {
           'name': tool.definition.name,
           'arguments': arguments,
         });
-        if (executionMode != 'auto' && tool.requiresConfirmation) {
-          final allowed = confirm == null
-              ? false
-              : await Future.any<bool>([
+        Future<bool> askUser() {
+          return confirm == null
+              ? Future.value(false)
+              : Future.any<bool>([
                   confirm(tool, arguments),
                   stop.whenCancelled.then((_) => false),
                 ]);
+        }
+
+        var allowed = true;
+        String? deniedReason;
+        if (tool.requiresUserApproval) {
+          // A permission grant changes the technical boundary. It always
+          // requires the person using the app, even in automatic modes.
+          allowed = await askUser();
+        } else if (tool.requiresConfirmation) {
+          if (executionMode == 'auto') {
+            allowed = true;
+          } else if (executionMode == 'auto_review') {
+            AgentReviewDecision decision;
+            await _emit(onEvent, 'review.started', {
+              'id': call.id,
+              'call_id': toolResultId(call),
+              'name': tool.definition.name,
+            });
+            try {
+              final reviewFuture = review == null
+                  ? Future.value(AgentReviewDecision.askUser('未配置自动审查模型'))
+                  : review(tool, arguments);
+              decision = await Future.any<AgentReviewDecision>([
+                reviewFuture,
+                stop.whenCancelled.then(
+                  (_) => AgentReviewDecision.deny('任务已取消'),
+                ),
+              ]);
+              await _emit(onEvent, 'review.completed', {
+                'id': call.id,
+                'call_id': toolResultId(call),
+                'name': tool.definition.name,
+                'decision': decision.decision,
+                'reason': decision.reason,
+              });
+            } catch (error) {
+              decision = AgentReviewDecision.askUser('自动审查失败：$error');
+              await _emit(onEvent, 'review.failed', {
+                'id': call.id,
+                'call_id': toolResultId(call),
+                'name': tool.definition.name,
+                'error': '$error',
+              });
+            }
+            if (decision.isAllow) {
+              allowed = true;
+            } else if (decision.isAskUser) {
+              allowed = await askUser();
+              if (!allowed && decision.reason.isNotEmpty) {
+                deniedReason = decision.reason;
+              }
+            } else {
+              allowed = false;
+              deniedReason = decision.reason;
+            }
+          } else {
+            allowed = await askUser();
+          }
+        }
+        if (tool.requiresConfirmation || tool.requiresUserApproval) {
           if (stop.isCancelled) {
             const message = 'Tool call cancelled before execution.';
             await _emit(onEvent, 'tool.failed', {
@@ -304,7 +370,9 @@ class AgentLoop {
             break;
           }
           if (!allowed) {
-            const message = 'User declined this tool call.';
+            final message = deniedReason == null
+                ? 'User declined this tool call.'
+                : 'Tool call declined: $deniedReason';
             await _emit(onEvent, 'tool.failed', {
               'id': call.id,
               'call_id': toolResultId(call),

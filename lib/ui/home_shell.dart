@@ -384,11 +384,15 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   String _taskLabel(Task task) {
-    if (task.mode == 'chat') return '普通对话';
-    for (final server in widget.controller.servers) {
-      if (server.id == task.serverId) return 'Agent · ${server.name}';
+    final workMode = task.effectiveWorkMode;
+    if (workModeUsesServer(workMode)) {
+      for (final server in widget.controller.servers) {
+        if (server.id == task.serverId) {
+          return '${workModeLabel(workMode)} · ${server.name}';
+        }
+      }
     }
-    return '手机 Agent';
+    return workModeLabel(workMode);
   }
 
   int get _runningAgentCount => widget.controller.tasks
@@ -405,6 +409,9 @@ class _HomeShellState extends State<HomeShell> {
   ) {
     return _queueAgentConfirmation(() async {
       if (!mounted || !widget.controller.isTaskRunning(task.id)) return false;
+      if (tool.definition.name == 'local.request_access') {
+        return _requestLocalAccess(task, arguments);
+      }
       final value = jsonEncode(arguments);
       final preview = value.length <= _maxToolPreviewCharacters
           ? value
@@ -430,6 +437,85 @@ class _HomeShellState extends State<HomeShell> {
           ) ??
           false;
     });
+  }
+
+  Future<bool> _requestLocalAccess(
+    Task task,
+    Map<String, Object?> arguments,
+  ) async {
+    final requestedPath = arguments['path'];
+    if (requestedPath is! String || requestedPath.trim().isEmpty) return false;
+    final path = requestedPath.trim();
+    final requestedWrite = arguments['write'] == true;
+    if (await widget.controller.hasLocalAccess(
+      task.id,
+      path,
+      write: requestedWrite,
+    )) {
+      return true;
+    }
+    if (!mounted) return false;
+    final reason = arguments['reason'] is String
+        ? (arguments['reason'] as String).trim()
+        : '';
+    final access = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('允许 Agent 访问手机文件？'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('请求路径：'),
+              SelectableText(path),
+              if (reason.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Text('请求原因：'),
+                Text(reason),
+              ],
+              const SizedBox(height: 12),
+              Text(
+                requestedWrite
+                    ? '读写授权只对当前对话有效，任务结束后不会保存为永久权限。'
+                    : '读取授权只对当前对话有效，任务结束后不会保存为永久权限。',
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'deny'),
+            child: const Text('拒绝'),
+          ),
+          if (requestedWrite)
+            OutlinedButton(
+              onPressed: () => Navigator.pop(context, 'read'),
+              child: const Text('仅允许读取'),
+            ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'write'),
+            child: Text(requestedWrite ? '允许读写' : '允许读取'),
+          ),
+        ],
+      ),
+    );
+    if (access == null || access == 'deny' || !mounted) return false;
+    try {
+      await widget.controller.grantLocalAccess(
+        task.id,
+        path,
+        canWrite: access == 'write',
+      );
+      return true;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('无法授权该路径：$error')));
+      }
+      return false;
+    }
   }
 
   Future<bool> _confirmAgentHostKey(Task task, SshHostKey key) {

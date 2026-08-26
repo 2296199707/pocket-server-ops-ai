@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:path/path.dart' as path_util;
 
 import '../domain/models.dart';
+import '../local/local_file_access.dart';
+import '../local/local_preview.dart';
 import '../local/project_files.dart';
 import '../ssh/ssh_connection.dart';
 import 'ai_protocol.dart';
@@ -14,12 +16,16 @@ class AgentTool {
     required this.definition,
     required this.call,
     this.requiresConfirmation = true,
+    this.requiresUserApproval = false,
     this.writesRemoteState = false,
   });
 
   final AiToolDefinition definition;
   final Future<Object?> Function(Map<String, Object?> arguments) call;
   final bool requiresConfirmation;
+
+  /// Requests that change the app's technical boundary always need the user.
+  final bool requiresUserApproval;
   final bool writesRemoteState;
 }
 
@@ -336,13 +342,8 @@ class RemoteAgentTools {
     final remotePath = _requiredString(arguments, 'remote_path');
     final projectPath = _requiredString(arguments, 'project_path');
     final overwrite = arguments['overwrite'] != false;
-    if (!overwrite) {
-      try {
-        await File(resolveProjectPath(targetProject, projectPath)).stat();
-        throw StateError('项目目标文件已存在：$projectPath');
-      } on FileSystemException {
-        // The destination does not exist, so the download can continue.
-      }
+    if (!overwrite && await files.exists(targetProject, projectPath)) {
+      throw StateError('项目目标文件已存在：$projectPath');
     }
     final bytes = await _connection.readFileBytes(
       _resolveRemotePath(remotePath),
@@ -411,15 +412,12 @@ class RemoteAgentTools {
   }
 }
 
-String resolveProjectPath(Project project, String relativePath) {
-  return const ProjectFileStore().resolve(project, relativePath);
-}
-
 class ProjectAgentTools {
-  ProjectAgentTools(this._project, this._files);
+  ProjectAgentTools(this._project, this._files, {this._preview});
 
   final Project _project;
   final ProjectFileStore _files;
+  LocalPreviewServer? _preview;
 
   List<AgentTool> get tools => [
     AgentTool(
@@ -496,6 +494,88 @@ class ProjectAgentTools {
       call: _replace,
       writesRemoteState: true,
     ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'local.test_web',
+        description:
+            'Check the current phone project web entrypoint and its local '
+            'HTML, CSS, image, script, and media references. This is a '
+            'static resource check, not a full JavaScript test runner.',
+        parameters: {
+          'type': 'object',
+          'properties': {
+            'entrypoint': {'type': 'string'},
+          },
+        },
+      ),
+      call: _testWeb,
+      requiresConfirmation: false,
+    ),
+    if (_preview != null) ...[
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'preview.start',
+          description:
+              'Start a loopback-only local web preview for the current phone '
+              'project. The default entrypoint is index.html.',
+          parameters: {
+            'type': 'object',
+            'properties': {
+              'entrypoint': {'type': 'string'},
+            },
+          },
+        ),
+        call: _startPreview,
+      ),
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'preview.status',
+          description:
+              'Read the current local web preview status, URL, request count, '
+              'and reload marker for the current phone project.',
+          parameters: {'type': 'object'},
+        ),
+        call: _previewStatus,
+        requiresConfirmation: false,
+      ),
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'preview.reload',
+          description:
+              'Request the open local preview page to reload after project '
+              'files have changed.',
+          parameters: {'type': 'object'},
+        ),
+        call: _reloadPreview,
+        requiresConfirmation: false,
+      ),
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'preview.logs',
+          description:
+              'Read console, JavaScript error, resource error, HTTP, and '
+              'preview server logs. Use after as the last sequence received '
+              'to fetch only newer entries.',
+          parameters: {
+            'type': 'object',
+            'properties': {
+              'after': {'type': 'integer', 'minimum': 0},
+              'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+            },
+          },
+        ),
+        call: _previewLogs,
+        requiresConfirmation: false,
+      ),
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'preview.stop',
+          description: 'Stop the local web preview for the current project.',
+          parameters: {'type': 'object'},
+        ),
+        call: _stopPreview,
+      ),
+    ],
   ];
 
   Future<Object?> _list(Map<String, Object?> arguments) async {
@@ -564,6 +644,61 @@ class ProjectAgentTools {
     return {'path': path, 'replaced': true};
   }
 
+  Future<Object?> _testWeb(Map<String, Object?> arguments) {
+    return _previewOrFiles
+        .testWeb(
+          _project,
+          entrypoint: _optionalString(arguments, 'entrypoint') ?? 'index.html',
+        )
+        .then((result) => result.toJson());
+  }
+
+  Future<Object?> _startPreview(Map<String, Object?> arguments) async {
+    final preview = _previewOrThrow;
+    final status = await preview.start(
+      _project,
+      entrypoint: _optionalString(arguments, 'entrypoint') ?? 'index.html',
+    );
+    return status.toJson();
+  }
+
+  Future<Object?> _previewStatus(Map<String, Object?> arguments) {
+    return Future.value(_previewOrThrow.status(_project).toJson());
+  }
+
+  Future<Object?> _reloadPreview(Map<String, Object?> arguments) {
+    return Future.value(_previewOrThrow.reload(_project).toJson());
+  }
+
+  Future<Object?> _previewLogs(Map<String, Object?> arguments) {
+    final after = _optionalNonNegativeInt(arguments, 'after') ?? 0;
+    final limit = _optionalNonNegativeInt(arguments, 'limit') ?? 100;
+    if (limit <= 0 || limit > 200) {
+      throw ArgumentError.value(limit, 'limit', 'must be between 1 and 200');
+    }
+    final preview = _previewOrThrow;
+    return Future.value({
+      'project': _project.name,
+      'after': after,
+      'logs': [
+        for (final log in preview.logs(_project, after: after, limit: limit))
+          log.toJson(),
+      ],
+      'next_sequence': preview.status(_project).logSequence,
+    });
+  }
+
+  Future<Object?> _stopPreview(Map<String, Object?> arguments) async {
+    await _previewOrThrow.stop(_project);
+    return {'project': _project.name, 'stopped': true};
+  }
+
+  LocalPreviewServer get _previewOrThrow {
+    return _preview ??= LocalPreviewServer(files: _files);
+  }
+
+  LocalPreviewServer get _previewOrFiles => _previewOrThrow;
+
   static String _requiredString(Map<String, Object?> arguments, String key) {
     final value = arguments[key];
     if (value is! String || value.isEmpty) {
@@ -593,6 +728,273 @@ class ProjectAgentTools {
       throw ArgumentError('$key must be a non-negative integer');
     }
     return value;
+  }
+}
+
+/// Tools for files outside the current project. The grant store is kept in
+/// memory by AppController and is never persisted with the conversation.
+class LocalAgentTools {
+  LocalAgentTools(this._access);
+
+  final LocalFileAccessStore _access;
+
+  List<AgentTool> get tools => [
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'local.request_access',
+        description:
+            'Request user permission to access an absolute phone path outside '
+            'the current project. The user must approve the exact scope.',
+        parameters: {
+          'type': 'object',
+          'required': ['path', 'reason'],
+          'properties': {
+            'path': {'type': 'string'},
+            'write': {'type': 'boolean'},
+            'reason': {'type': 'string'},
+          },
+        },
+      ),
+      call: _requestAccess,
+      requiresConfirmation: false,
+      requiresUserApproval: true,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'local.list',
+        description:
+            'List files and folders under a user-authorized phone path. '
+            'Use the absolute path returned by local.request_access.',
+        parameters: {
+          'type': 'object',
+          'required': ['path'],
+          'properties': {
+            'path': {'type': 'string'},
+          },
+        },
+      ),
+      call: _list,
+      requiresConfirmation: false,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'local.read',
+        description: 'Read a UTF-8 text file under a user-authorized path.',
+        parameters: {
+          'type': 'object',
+          'required': ['path'],
+          'properties': {
+            'path': {'type': 'string'},
+            'offset': {'type': 'integer', 'minimum': 0},
+            'length': {
+              'type': 'integer',
+              'minimum': 1,
+              'maximum': _maxFileChunkBytes,
+            },
+          },
+        },
+      ),
+      call: _read,
+      requiresConfirmation: false,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'local.write',
+        description: 'Write a UTF-8 text file under a user-authorized path.',
+        parameters: {
+          'type': 'object',
+          'required': ['path', 'content'],
+          'properties': {
+            'path': {'type': 'string'},
+            'content': {'type': 'string'},
+          },
+        },
+      ),
+      call: _write,
+    ),
+    AgentTool(
+      definition: const AiToolDefinition(
+        name: 'local.replace',
+        description:
+            'Replace exactly one text block in a user-authorized phone file.',
+        parameters: {
+          'type': 'object',
+          'required': ['path', 'old', 'new'],
+          'properties': {
+            'path': {'type': 'string'},
+            'old': {'type': 'string'},
+            'new': {'type': 'string'},
+          },
+        },
+      ),
+      call: _replace,
+    ),
+  ];
+
+  Future<Object?> _requestAccess(Map<String, Object?> arguments) async {
+    final requestedPath = _requiredString(arguments, 'path');
+    final grant = await _access.find(requestedPath);
+    if (grant == null) {
+      throw StateError('本地文件授权未生效，请等待用户确认后重试');
+    }
+    return {
+      'granted': true,
+      'path': requestedPath,
+      'scope': grant.rootPath,
+      'can_write': grant.canWrite,
+      'expires': 'current_conversation',
+    };
+  }
+
+  Future<Object?> _list(Map<String, Object?> arguments) async {
+    final requestedPath = _requiredString(arguments, 'path');
+    final resolved = await _access.resolve(requestedPath);
+    final directory = Directory(resolved);
+    final entries = <Map<String, Object?>>[];
+    await for (final entity in directory.list(followLinks: false)) {
+      final type = await FileSystemEntity.type(entity.path, followLinks: false);
+      if (type != FileSystemEntityType.file &&
+          type != FileSystemEntityType.directory) {
+        continue;
+      }
+      int? size;
+      if (type == FileSystemEntityType.file) {
+        try {
+          size = await File(entity.path).length();
+        } on FileSystemException {
+          size = null;
+        }
+      }
+      entries.add({
+        'name': path_util.basename(entity.path),
+        'path': path_util.join(requestedPath, path_util.basename(entity.path)),
+        'directory': type == FileSystemEntityType.directory,
+        'size': size,
+      });
+    }
+    entries.sort((left, right) {
+      final leftDirectory = left['directory'] == true;
+      final rightDirectory = right['directory'] == true;
+      if (leftDirectory != rightDirectory) return leftDirectory ? -1 : 1;
+      return (left['name'] as String).compareTo(right['name'] as String);
+    });
+    return {'path': requestedPath, 'entries': entries};
+  }
+
+  Future<Object?> _read(Map<String, Object?> arguments) async {
+    final requestedPath = _requiredString(arguments, 'path');
+    final offset = _optionalNonNegativeInt(arguments, 'offset') ?? 0;
+    final length =
+        _optionalNonNegativeInt(arguments, 'length') ?? _maxFileChunkBytes;
+    if (length > _maxFileChunkBytes) {
+      throw ArgumentError.value(
+        length,
+        'length',
+        'must not exceed $_maxFileChunkBytes bytes',
+      );
+    }
+    final file = await File(await _access.resolve(requestedPath)).open();
+    try {
+      final totalBytes = await file.length();
+      if (offset >= totalBytes) {
+        return {
+          'path': requestedPath,
+          'offset': offset,
+          'next_offset': offset,
+          'eof': true,
+          'total_bytes': totalBytes,
+          'content': '',
+        };
+      }
+      await file.setPosition(offset);
+      final bytes = await file.read(length + 3);
+      var end = bytes.length;
+      while (end > 0) {
+        try {
+          utf8.decode(bytes.sublist(0, end));
+          break;
+        } on FormatException {
+          end--;
+        }
+      }
+      final nextOffset = offset + end;
+      return {
+        'path': requestedPath,
+        'offset': offset,
+        'next_offset': nextOffset,
+        'eof': nextOffset >= totalBytes,
+        'total_bytes': totalBytes,
+        'content': utf8.decode(bytes.sublist(0, end)),
+      };
+    } finally {
+      await file.close();
+    }
+  }
+
+  Future<Object?> _write(Map<String, Object?> arguments) async {
+    final requestedPath = _requiredString(arguments, 'path');
+    final resolved = await _access.resolve(requestedPath, write: true);
+    final target = File(resolved);
+    await target.writeAsString(
+      _requiredText(arguments, 'content'),
+      flush: true,
+    );
+    return {'path': requestedPath, 'written': true};
+  }
+
+  Future<Object?> _replace(Map<String, Object?> arguments) async {
+    final requestedPath = _requiredString(arguments, 'path');
+    final resolved = await _access.resolve(requestedPath, write: true);
+    final oldText = _requiredString(arguments, 'old');
+    final newText = _requiredText(arguments, 'new');
+    final target = File(resolved);
+    final current = await target.readAsString();
+    if (_countOccurrences(current, oldText) != 1) {
+      throw StateError('replace requires exactly one matching block');
+    }
+    await target.writeAsString(
+      current.replaceFirst(oldText, newText),
+      flush: true,
+    );
+    return {'path': requestedPath, 'replaced': true};
+  }
+
+  static String _requiredString(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    if (value is! String || value.trim().isEmpty) {
+      throw ArgumentError('$key is required');
+    }
+    return value.trim();
+  }
+
+  static String _requiredText(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    if (value is! String) throw ArgumentError('$key is required');
+    return value;
+  }
+
+  static int? _optionalNonNegativeInt(
+    Map<String, Object?> arguments,
+    String key,
+  ) {
+    final value = arguments[key];
+    if (value == null) return null;
+    if (value is! int || value < 0) {
+      throw ArgumentError('$key must be a non-negative integer');
+    }
+    return value;
+  }
+
+  static int _countOccurrences(String value, String needle) {
+    if (needle.isEmpty) throw ArgumentError.value(needle, 'old');
+    var count = 0;
+    var offset = 0;
+    while (true) {
+      final index = value.indexOf(needle, offset);
+      if (index < 0) return count;
+      count++;
+      offset = index + needle.length;
+    }
   }
 }
 

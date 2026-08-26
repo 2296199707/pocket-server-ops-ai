@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_agent/agent/agent_loop.dart';
 import 'package:mobile_agent/agent/agent_tools.dart';
 import 'package:mobile_agent/agent/ai_protocol.dart';
+import 'package:mobile_agent/agent/auto_review.dart';
 import 'package:mobile_agent/agent/openai_compatible_client.dart';
 
 void main() {
@@ -297,6 +298,83 @@ void main() {
     expect(confirmations, 0);
   });
 
+  test(
+    'automatic review can allow a gated tool without user confirmation',
+    () async {
+      var reviews = 0;
+      var confirmations = 0;
+      var executions = 0;
+      final result =
+          await AgentLoop(
+            client: _ToolThenTextClient(),
+            tools: [
+              AgentTool(
+                definition: const AiToolDefinition(
+                  name: 'test.tool',
+                  description: 'test',
+                  parameters: {'type': 'object'},
+                ),
+                call: (_) async {
+                  executions++;
+                  return const {'ok': true};
+                },
+              ),
+            ],
+          ).run(
+            prompt: '执行',
+            executionMode: 'auto_review',
+            review: (_, _) async {
+              reviews++;
+              return AgentReviewDecision.allow('范围内');
+            },
+            confirm: (_, _) async {
+              confirmations++;
+              return false;
+            },
+          );
+
+      expect(result.status, 'completed');
+      expect(reviews, 1);
+      expect(confirmations, 0);
+      expect(executions, 1);
+    },
+  );
+
+  test('boundary permission requests always require the user', () async {
+    var confirmations = 0;
+    var executions = 0;
+    final result =
+        await AgentLoop(
+          client: _ToolThenTextClient(toolName: 'local.request_access'),
+          tools: [
+            AgentTool(
+              definition: const AiToolDefinition(
+                name: 'local.request_access',
+                description: 'permission',
+                parameters: {'type': 'object'},
+              ),
+              requiresConfirmation: false,
+              requiresUserApproval: true,
+              call: (_) async {
+                executions++;
+                return const {'granted': true};
+              },
+            ),
+          ],
+        ).run(
+          prompt: '请求权限',
+          executionMode: 'auto',
+          confirm: (_, _) async {
+            confirmations++;
+            return true;
+          },
+        );
+
+    expect(result.status, 'completed');
+    expect(confirmations, 1);
+    expect(executions, 1);
+  });
+
   test('length finish reason is not reported as success', () async {
     final events = <String>[];
     final result = await AgentLoop(client: _LengthClient(), tools: const [])
@@ -435,6 +513,9 @@ class _RepeatingClient implements AiChatClient {
 }
 
 class _ToolThenTextClient implements AiChatClient {
+  _ToolThenTextClient({this.toolName = 'test.tool'});
+
+  final String toolName;
   var calls = 0;
   List<AiMessage> messages = const [];
 
@@ -447,13 +528,13 @@ class _ToolThenTextClient implements AiChatClient {
   }) async {
     this.messages = List.unmodifiable(messages);
     if (calls++ == 0) {
-      return const AiMessage(
+      return AiMessage(
         role: 'assistant',
         toolCalls: [
           AiToolCall(
             id: 'fc-1',
             callId: 'call-1',
-            name: 'test.tool',
+            name: toolName,
             arguments: '{}',
           ),
         ],

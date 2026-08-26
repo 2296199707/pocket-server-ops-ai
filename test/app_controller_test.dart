@@ -137,6 +137,53 @@ void main() {
     restored.dispose();
   });
 
+  test('explicit work modes are persisted with their task bindings', () async {
+    final database = MemoryAppDatabase(demoData: true);
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+
+    final collaborative = await controller.createTask(
+      workMode: 'collaborative',
+      projectId: 'project-1',
+      serverId: 'demo-server',
+      title: '协同任务',
+    );
+    final local = await controller.createTask(workMode: 'local', title: '本地任务');
+    final server = await controller.createTask(
+      workMode: 'server',
+      serverId: 'demo-server',
+      title: '服务器任务',
+    );
+    final chat = await controller.createTask(
+      workMode: 'chat',
+      serverId: 'demo-server',
+      title: '对话任务',
+    );
+
+    expect(collaborative.mode, 'agent');
+    expect(collaborative.effectiveWorkMode, 'collaborative');
+    expect(local.mode, 'agent');
+    expect(local.serverId, isNull);
+    expect(server.effectiveWorkMode, 'server');
+    expect(chat.mode, 'chat');
+    expect(chat.serverId, isNull);
+
+    final restored = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await restored.load();
+    expect(
+      restored.tasks.map((task) => task.effectiveWorkMode),
+      containsAll(['collaborative', 'local', 'server', 'chat']),
+    );
+    controller.dispose();
+    restored.dispose();
+  });
+
   test('project-only Agent can be created without a server', () async {
     final root = Directory(
       '/www/mobile-agent-test-project-${DateTime.now().microsecondsSinceEpoch}',

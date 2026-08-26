@@ -48,6 +48,64 @@ String reasoningEffortLabel(String value) {
   }
 }
 
+const workModeOptions = <String>['collaborative', 'local', 'server', 'chat'];
+
+String workModeLabel(String value) {
+  switch (value) {
+    case 'collaborative':
+      return '协同';
+    case 'local':
+      return '本地';
+    case 'server':
+      return '服务器';
+    case 'chat':
+      return '对话';
+    default:
+      return value;
+  }
+}
+
+String workModeDescription(String value) {
+  switch (value) {
+    case 'collaborative':
+      return '手机本地 Agent 与目标服务器一起工作';
+    case 'local':
+      return '仅使用手机本地 Agent 和项目文件';
+    case 'server':
+      return '仅使用目标服务器工具';
+    case 'chat':
+      return '仅进行 AI 对话，不调用运维工具';
+    default:
+      return '';
+  }
+}
+
+bool workModeUsesLocal(String value) =>
+    value == 'collaborative' || value == 'local';
+
+bool workModeUsesServer(String value) =>
+    value == 'collaborative' || value == 'server';
+
+String taskModeForWorkMode(String value) => value == 'chat' ? 'chat' : 'agent';
+
+/// Old tasks did not persist a work mode. Infer one from their existing
+/// project/server bindings while new tasks store the explicit selection.
+String resolveWorkMode({
+  String? workMode,
+  required String mode,
+  String? projectId,
+  String? serverId,
+}) {
+  final selected = workMode?.trim();
+  if (selected != null && workModeOptions.contains(selected)) return selected;
+  if (mode == 'chat') return 'chat';
+  final hasProject = projectId?.isNotEmpty == true;
+  final hasServer = serverId?.isNotEmpty == true;
+  if (hasProject && hasServer) return 'collaborative';
+  if (hasServer) return 'server';
+  return 'local';
+}
+
 class ServerProfile {
   final String id;
   final String name;
@@ -276,9 +334,12 @@ class Project {
 class Task {
   final String id;
   final String mode;
+  final String? workMode;
   final String? projectId;
   final String? serverId;
   final String? providerId;
+  final String? reviewProviderId;
+  final String? reviewModelOverride;
   final String? modelOverride;
   final String? reasoningEffortOverride;
   final String title;
@@ -291,9 +352,12 @@ class Task {
   const Task({
     required this.id,
     required this.mode,
+    this.workMode,
     this.projectId,
     required this.serverId,
     required this.providerId,
+    this.reviewProviderId,
+    this.reviewModelOverride,
     this.modelOverride,
     this.reasoningEffortOverride,
     required this.title,
@@ -309,14 +373,21 @@ class Task {
     return Task(
       id: map['id'] as String,
       mode: map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent'),
+      workMode: map['workMode'] as String?,
       projectId: map['projectId'] as String?,
       serverId: serverId,
       providerId: map['providerId'] as String?,
+      reviewProviderId: map['reviewProviderId'] as String?,
+      reviewModelOverride: map['reviewModelOverride'] as String?,
       modelOverride: map['modelOverride'] as String?,
       reasoningEffortOverride: map['reasoningEffortOverride'] as String?,
       title: map['title'] as String,
       workingDirectory: map['workingDirectory'] as String?,
-      executionMode: map['executionMode'] == 'auto' ? 'auto' : 'confirm',
+      executionMode: map['executionMode'] == 'auto_review'
+          ? 'auto_review'
+          : map['executionMode'] == 'auto'
+          ? 'auto'
+          : 'confirm',
       status: map['status'] as String,
       createdAt: _readTime(map['createdAt']),
       updatedAt: _readTime(map['updatedAt']),
@@ -326,9 +397,12 @@ class Task {
   Map<String, Object?> toMap() => {
     'id': id,
     'mode': mode,
+    'workMode': workMode,
     'projectId': projectId,
     'serverId': serverId,
     'providerId': providerId,
+    'reviewProviderId': reviewProviderId,
+    'reviewModelOverride': reviewModelOverride,
     'modelOverride': modelOverride,
     'reasoningEffortOverride': reasoningEffortOverride,
     'title': title,
@@ -341,9 +415,12 @@ class Task {
 
   Task copyWith({
     String? mode,
+    Object? workMode = _taskFieldUnset,
     Object? projectId = _taskFieldUnset,
     String? serverId,
     String? providerId,
+    Object? reviewProviderId = _taskFieldUnset,
+    Object? reviewModelOverride = _taskFieldUnset,
     String? modelOverride,
     String? reasoningEffortOverride,
     String? title,
@@ -356,11 +433,20 @@ class Task {
     return Task(
       id: id,
       mode: mode ?? this.mode,
+      workMode: identical(workMode, _taskFieldUnset)
+          ? this.workMode
+          : workMode as String?,
       projectId: identical(projectId, _taskFieldUnset)
           ? this.projectId
           : projectId as String?,
       serverId: serverId ?? this.serverId,
       providerId: providerId ?? this.providerId,
+      reviewProviderId: identical(reviewProviderId, _taskFieldUnset)
+          ? this.reviewProviderId
+          : reviewProviderId as String?,
+      reviewModelOverride: identical(reviewModelOverride, _taskFieldUnset)
+          ? this.reviewModelOverride
+          : reviewModelOverride as String?,
       modelOverride: modelOverride ?? this.modelOverride,
       reasoningEffortOverride:
           reasoningEffortOverride ?? this.reasoningEffortOverride,
@@ -372,6 +458,13 @@ class Task {
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
+
+  String get effectiveWorkMode => resolveWorkMode(
+    workMode: workMode,
+    mode: mode,
+    projectId: projectId,
+    serverId: serverId,
+  );
 }
 
 const _taskFieldUnset = Object();

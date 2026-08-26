@@ -2,15 +2,21 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as path_util;
+import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
 
 import 'agent/agent_loop.dart';
 import 'agent/agent_tools.dart';
 import 'agent/ai_client_factory.dart';
 import 'agent/ai_protocol.dart';
+import 'agent/auto_review.dart';
 import 'agent/openai_compatible_client.dart';
 import 'credentials/credential_store.dart';
 import 'domain/models.dart';
+import 'local/local_preview.dart';
 import 'local/project_files.dart';
+import 'local/local_file_access.dart';
 import 'platform/android_task_service.dart';
 import 'platform/android_storage_access.dart';
 import 'providers/provider_connection_tester.dart';
@@ -59,10 +65,12 @@ class AppController extends ChangeNotifier {
   final AndroidTaskService _taskService;
   final bool previewMode;
   final ProjectFileStore _projectFiles = const ProjectFileStore();
+  final LocalPreviewServer _localPreview = LocalPreviewServer();
   final TaskSshConnectionPool _sshPool = TaskSshConnectionPool();
   final Map<String, AgentCancellation> _runningTasks = {};
   final Map<String, Future<AgentResult>> _taskRuns = {};
   final Map<String, List<AiMessage>> _taskHistories = {};
+  final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
   final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
@@ -230,6 +238,70 @@ class AppController extends ChangeNotifier {
     return null;
   }
 
+  int localAccessCount(String taskId) =>
+      _localAccess[taskId]?.grants.length ?? 0;
+
+  Future<bool> hasLocalAccess(
+    String taskId,
+    String path, {
+    bool write = false,
+  }) async {
+    return await _localAccess[taskId]?.hasAccess(path, write: write) ?? false;
+  }
+
+  Future<LocalFileGrant> grantLocalAccess(
+    String taskId,
+    String path, {
+    required bool canWrite,
+  }) async {
+    final canonical = await LocalFileAccessStore.canonicalExistingPath(path);
+    if (await _isProtectedLocalPath(canonical)) {
+      throw StateError('应用凭据和内部数据不能授权给 AI');
+    }
+    await AndroidStorageAccess.ensureForPath(canonical);
+    final store = _localAccess.putIfAbsent(taskId, LocalFileAccessStore.new);
+    final grant = await store.add(canonical, canWrite: canWrite);
+    _notify();
+    return grant;
+  }
+
+  void revokeLocalAccess(String taskId) {
+    _localAccess.remove(taskId);
+    _notify();
+  }
+
+  Future<bool> _isProtectedLocalPath(String candidate) async {
+    final roots = <String>[];
+    try {
+      final databases = await getDatabasesPath();
+      roots.add(path_util.posix.dirname(databases));
+    } on Object {
+      // Some unit-test and desktop hosts do not expose an app database path.
+    }
+    try {
+      roots.add((await getApplicationSupportDirectory()).path);
+    } on Object {
+      // The secure credential store remains inaccessible through file tools.
+    }
+    try {
+      roots.add((await getApplicationDocumentsDirectory()).path);
+    } on Object {
+      // Some unit-test and desktop hosts do not expose an app documents path.
+    }
+    try {
+      roots.add((await getTemporaryDirectory()).path);
+    } on Object {
+      // Temporary app data is not a user-selected project scope.
+    }
+    // If the platform cannot identify any app-private root, do not grant a
+    // path that might contain the secure-storage integration's files.
+    if (roots.isEmpty) return true;
+    return roots.any((root) {
+      final normalized = path_util.posix.normalize(root);
+      return candidate == normalized || candidate.startsWith('$normalized/');
+    });
+  }
+
   Future<Project> createProject({
     required String name,
     String? localPath,
@@ -259,6 +331,9 @@ class AppController extends ChangeNotifier {
     final normalizedPath = localPath.trim();
     if (normalizedName.isEmpty) throw ArgumentError('项目名称不能为空');
     if (normalizedPath.isEmpty) throw ArgumentError('项目文件夹不能为空');
+    if (project.localPath != normalizedPath) {
+      await _localPreview.stop(project);
+    }
     await _ensureProjectStoragePath(normalizedPath);
     final updated = project.copyWith(
       name: normalizedName,
@@ -279,6 +354,7 @@ class AppController extends ChangeNotifier {
     if (_tasks.any((task) => task.projectId == project.id)) {
       throw StateError('项目仍有对话，不能删除');
     }
+    await _localPreview.stop(project);
     await _database.deleteProject(project.id);
     _invalidateProjectDirectoryCache(project.id);
     _projects = [
@@ -290,9 +366,12 @@ class AppController extends ChangeNotifier {
 
   Future<Task> createTask({
     String mode = 'chat',
+    String? workMode,
     String? projectId,
     String? serverId,
     String? providerId,
+    String? reviewProviderId,
+    String? reviewModelOverride,
     required String title,
     String? workingDirectory,
     String? executionMode,
@@ -302,28 +381,41 @@ class AppController extends ChangeNotifier {
     if (mode != 'chat' && mode != 'agent') {
       throw ArgumentError('不支持的任务模式：$mode');
     }
-    if (mode == 'agent' &&
-        (serverId == null || serverId.isEmpty) &&
-        (projectId == null || projectId.isEmpty)) {
-      throw ArgumentError('手机 Agent 需要选择项目或目标服务器');
+    final normalizedWorkMode = resolveWorkMode(
+      workMode: workMode,
+      mode: mode,
+      projectId: projectId,
+      serverId: serverId,
+    );
+    final normalizedMode = taskModeForWorkMode(normalizedWorkMode);
+    if (workModeUsesServer(normalizedWorkMode) &&
+        (serverId == null || serverId.isEmpty)) {
+      throw ArgumentError('服务器工作模式需要选择目标服务器');
     }
     final requestedExecutionMode =
         executionMode ??
-        (mode == 'agent' && _agentAutoExecute ? 'auto' : 'confirm');
-    final normalizedExecutionMode = requestedExecutionMode == 'auto'
-        ? 'auto'
-        : 'confirm';
+        (normalizedMode == 'agent' && _agentAutoExecute ? 'auto' : 'confirm');
+    final normalizedExecutionMode = _normalizeExecutionMode(
+      requestedExecutionMode,
+    );
     final now = DateTime.now().toUtc();
     final task = Task(
       id: _newId('task'),
-      mode: mode,
+      mode: normalizedMode,
+      workMode: normalizedWorkMode,
       projectId: projectId,
-      serverId: mode == 'agent' ? serverId : null,
+      serverId: normalizedMode == 'agent' ? serverId : null,
       providerId: providerId,
+      reviewProviderId: normalizedMode == 'agent'
+          ? _normalizeOptionalValue(reviewProviderId)
+          : null,
+      reviewModelOverride: normalizedMode == 'agent'
+          ? _normalizeOptionalValue(reviewModelOverride)
+          : null,
       modelOverride: _normalizeOptionalValue(modelOverride),
       reasoningEffortOverride: _normalizeOptionalValue(reasoningEffortOverride),
       title: title,
-      workingDirectory: workingDirectory,
+      workingDirectory: normalizedMode == 'agent' ? workingDirectory : null,
       executionMode: normalizedExecutionMode,
       status: 'queued',
       createdAt: now,
@@ -338,9 +430,12 @@ class AppController extends ChangeNotifier {
   Future<Task> createContinuationTask(Task source) {
     return createTask(
       mode: source.mode,
+      workMode: source.effectiveWorkMode,
       projectId: source.projectId,
       serverId: source.serverId,
       providerId: source.providerId,
+      reviewProviderId: source.reviewProviderId,
+      reviewModelOverride: source.reviewModelOverride,
       modelOverride: source.modelOverride,
       reasoningEffortOverride: source.reasoningEffortOverride,
       title: '${source.title}（继续）',
@@ -407,9 +502,12 @@ class AppController extends ChangeNotifier {
   Future<Task> updateTaskConfiguration({
     required String taskId,
     required String mode,
+    String? workMode,
     String? projectId,
     required String? serverId,
     required String? providerId,
+    String? reviewProviderId,
+    String? reviewModelOverride,
     required String? workingDirectory,
     required String executionMode,
     String? modelOverride,
@@ -424,17 +522,36 @@ class AppController extends ChangeNotifier {
 
     final current = _tasks.firstWhere((task) => task.id == taskId);
     final normalizedProjectId = projectId ?? current.projectId;
-    if (mode == 'agent' &&
-        (serverId == null || serverId.isEmpty) &&
-        (normalizedProjectId == null || normalizedProjectId.isEmpty)) {
-      throw ArgumentError('手机 Agent 需要选择项目或目标服务器');
+    // Keep the explicit work mode when the caller is only updating fields.
+    // Older callers only know about `mode`; when that value changes, infer a
+    // compatible work mode from the new bindings instead.
+    final requestedWorkMode =
+        workMode ?? (mode == current.mode ? current.workMode : null);
+    final normalizedWorkMode = resolveWorkMode(
+      workMode: requestedWorkMode,
+      mode: mode,
+      projectId: normalizedProjectId,
+      serverId: serverId,
+    );
+    final normalizedMode = taskModeForWorkMode(normalizedWorkMode);
+    if (workModeUsesServer(normalizedWorkMode) &&
+        (serverId == null || serverId.isEmpty)) {
+      throw ArgumentError('服务器工作模式需要选择目标服务器');
     }
-    final normalizedExecutionMode = executionMode == 'auto'
-        ? 'auto'
-        : 'confirm';
-    final normalizedServerId = mode == 'agent' ? serverId : null;
-    final normalizedWorkingDirectory = mode == 'agent'
+    final normalizedExecutionMode = _normalizeExecutionMode(executionMode);
+    final normalizedServerId = normalizedMode == 'agent' ? serverId : null;
+    final normalizedWorkingDirectory = normalizedMode == 'agent'
         ? workingDirectory
+        : null;
+    final normalizedReviewProviderId = normalizedMode == 'agent'
+        ? reviewProviderId == null
+              ? current.reviewProviderId
+              : _normalizeOptionalValue(reviewProviderId)
+        : null;
+    final normalizedReviewModelOverride = normalizedMode == 'agent'
+        ? reviewModelOverride == null
+              ? current.reviewModelOverride
+              : _normalizeOptionalValue(reviewModelOverride)
         : null;
     final normalizedModelOverride = modelOverride == null
         ? current.modelOverride
@@ -443,17 +560,21 @@ class AppController extends ChangeNotifier {
         ? current.reasoningEffortOverride
         : _normalizeOptionalValue(reasoningEffortOverride);
     final contextChanged =
-        current.mode != mode ||
+        current.mode != normalizedMode ||
+        current.effectiveWorkMode != normalizedWorkMode ||
         current.projectId != normalizedProjectId ||
         current.serverId != normalizedServerId ||
         current.providerId != providerId;
     final now = DateTime.now().toUtc();
     final updated = Task(
       id: current.id,
-      mode: mode,
+      mode: normalizedMode,
+      workMode: normalizedWorkMode,
       projectId: normalizedProjectId,
       serverId: normalizedServerId,
       providerId: providerId,
+      reviewProviderId: normalizedReviewProviderId,
+      reviewModelOverride: normalizedReviewModelOverride,
       modelOverride: normalizedModelOverride,
       reasoningEffortOverride: normalizedReasoningEffortOverride,
       title: current.title,
@@ -470,12 +591,14 @@ class AppController extends ChangeNotifier {
 
     if (contextChanged) {
       _taskHistories.remove(taskId);
+      _localAccess.remove(taskId);
       await appendTaskEvent(
         taskId: taskId,
         type: 'task.context_changed',
         payload: {
           'history_boundary': true,
-          'mode': mode,
+          'mode': normalizedMode,
+          'work_mode': normalizedWorkMode,
           'project_id': normalizedProjectId,
           'server_id': normalizedServerId,
           'provider_id': providerId,
@@ -568,6 +691,7 @@ class AppController extends ChangeNotifier {
     final eventTail = _taskEventTails[task.id];
     if (eventTail != null) await eventTail;
     _taskHistories.remove(task.id);
+    _localAccess.remove(task.id);
     _streamingAssistantText.remove(task.id);
     await _database.deleteTask(task.id);
     _tasks = [
@@ -648,10 +772,14 @@ class AppController extends ChangeNotifier {
     SshConnection? connection;
     RemoteAgentTools? remoteTools;
     ProjectAgentTools? projectTools;
+    LocalAgentTools? localTools;
     Project? taskProject;
     AiChatClient? client;
     var remoteOperationStarted = false;
     var serviceStarted = false;
+    final workMode = task.effectiveWorkMode;
+    final useLocalTools = workModeUsesLocal(workMode);
+    final useServerTools = workModeUsesServer(workMode);
 
     Future<void> markTaskWaiting() async {
       if (cancellation.isCancelled) return;
@@ -748,25 +876,38 @@ class AppController extends ChangeNotifier {
       final tools = <AgentTool>[];
       var systemPrompt = _systemPrompt(task);
       if (task.mode == 'agent') {
-        final project = projectFor(task.projectId);
-        taskProject = project;
-        if (task.projectId != null && project == null) {
-          throw StateError('对话绑定的项目不存在');
-        }
-        if (project != null) {
-          await _ensureProjectStoragePath(project.localPath);
-          await _projectFiles.ensureRoot(project);
-          projectTools = ProjectAgentTools(project, _projectFiles);
-          tools.addAll(
-            _serializeRemoteWrites(
-              projectTools.tools,
-              'project\u0000${project.id}',
-            ),
+        Project? project;
+        String? workingDirectory;
+        if (useLocalTools) {
+          final access = _localAccess.putIfAbsent(
+            task.id,
+            LocalFileAccessStore.new,
           );
-          systemPrompt = _systemPrompt(task, project: project);
+          localTools = LocalAgentTools(access);
+          tools.addAll(localTools.tools);
+          project = projectFor(task.projectId);
+          taskProject = project;
+          if (task.projectId != null && project == null) {
+            throw StateError('对话绑定的项目不存在');
+          }
+          if (project != null) {
+            await _ensureProjectStoragePath(project.localPath);
+            await _projectFiles.ensureRoot(project);
+            projectTools = ProjectAgentTools(
+              project,
+              _projectFiles,
+              preview: _localPreview,
+            );
+            tools.addAll(
+              _serializeRemoteWrites(
+                projectTools.tools,
+                'project\u0000${project.id}',
+              ),
+            );
+          }
         }
         final serverId = task.serverId;
-        if (serverId != null && serverId.isNotEmpty) {
+        if (useServerTools && serverId != null && serverId.isNotEmpty) {
           final server = _servers.firstWhere((value) => value.id == serverId);
           final pendingConnection = _sshPool.acquire(
             task.id,
@@ -783,7 +924,7 @@ class AppController extends ChangeNotifier {
             ),
           ]);
           await _saveObservedHostKey(server, connection.hostKey);
-          final workingDirectory =
+          workingDirectory =
               task.workingDirectory ?? server.defaultWorkingDirectory;
           remoteTools = _phoneTools[task.id];
           if (remoteTools == null || remoteTools.isClosed) {
@@ -791,8 +932,11 @@ class AppController extends ChangeNotifier {
             remoteTools = RemoteAgentTools(
               connection,
               workingDirectory: workingDirectory,
-              project: project,
-              projectFiles: project == null ? null : _projectFiles,
+              // Server-only mode must not expose a local project download
+              // tool even when the conversation still carries a project
+              // binding for its sidebar placement.
+              project: useLocalTools ? project : null,
+              projectFiles: useLocalTools ? _projectFiles : null,
             );
             _phoneTools[task.id] = remoteTools;
           }
@@ -802,12 +946,15 @@ class AppController extends ChangeNotifier {
               '${server.id}\u0000$workingDirectory',
             ),
           );
-          systemPrompt = _systemPrompt(
-            task,
-            project: project,
-            workingDirectory: workingDirectory,
-          );
         }
+        if (useServerTools && (serverId == null || serverId.isEmpty)) {
+          throw StateError('服务器工作模式没有目标服务器');
+        }
+        systemPrompt = _systemPrompt(
+          task,
+          project: useLocalTools ? project : null,
+          workingDirectory: useServerTools ? workingDirectory : null,
+        );
         if (tools.isEmpty) {
           throw StateError('Agent 没有可用的项目或服务器工具');
         }
@@ -838,6 +985,10 @@ class AppController extends ChangeNotifier {
         executionMode: task.executionMode,
         cancellation: cancellation,
         confirm: waitingConfirm,
+        review: task.executionMode == 'auto_review'
+            ? (tool, arguments) =>
+                  _reviewTool(task, tool, arguments, cancellation: cancellation)
+            : null,
         onEvent: (type, payload) {
           if (type == 'assistant.delta') {
             final delta = payload['text'];
@@ -933,6 +1084,7 @@ class AppController extends ChangeNotifier {
           AgentTool(
             definition: tool.definition,
             requiresConfirmation: tool.requiresConfirmation,
+            requiresUserApproval: tool.requiresUserApproval,
             writesRemoteState: true,
             call: (arguments) =>
                 _withRemoteWriteLease(leaseKey, () => tool.call(arguments)),
@@ -1181,6 +1333,68 @@ class AppController extends ChangeNotifier {
       _normalizeProjectUiPath(relativePath),
     );
     _invalidateProjectDirectoryCache(project.id);
+  }
+
+  LocalPreviewStatus localPreviewStatus(Project project) {
+    return _localPreview.status(project);
+  }
+
+  List<LocalPreviewLog> localPreviewLogs(
+    Project project, {
+    int after = 0,
+    int limit = 100,
+  }) {
+    return _localPreview.logs(project, after: after, limit: limit);
+  }
+
+  Future<LocalPreviewStatus> startLocalPreview(
+    Project project, {
+    String entrypoint = 'index.html',
+  }) async {
+    await _ensureProjectStoragePath(project.localPath);
+    final status = await _localPreview.start(project, entrypoint: entrypoint);
+    _notify();
+    return status;
+  }
+
+  LocalPreviewStatus reloadLocalPreview(Project project) {
+    final status = _localPreview.reload(project);
+    _notify();
+    return status;
+  }
+
+  Future<void> stopLocalPreview(Project project) async {
+    await _localPreview.stop(project);
+    _notify();
+  }
+
+  void clearLocalPreviewLogs(Project project) {
+    _localPreview.clearLogs(project);
+    _notify();
+  }
+
+  void recordLocalPreviewLog(
+    Project project, {
+    required String level,
+    required String source,
+    required String message,
+    String? url,
+  }) {
+    _localPreview.recordLog(
+      project,
+      level: level,
+      source: source,
+      message: message,
+      url: url,
+    );
+    _notify();
+  }
+
+  Future<LocalWebTestResult> testLocalWeb(
+    Project project, {
+    String entrypoint = 'index.html',
+  }) async {
+    return _localPreview.testWeb(project, entrypoint: entrypoint);
   }
 
   Future<void> _ensureProjectStoragePath(String path) async {
@@ -1605,6 +1819,78 @@ class AppController extends ChangeNotifier {
     return _providerTester.listModels(profile, apiKey);
   }
 
+  Future<AgentReviewDecision> _reviewTool(
+    Task task,
+    AgentTool tool,
+    Map<String, Object?> arguments, {
+    required AgentCancellation cancellation,
+  }) async {
+    final reviewProviderId = task.reviewProviderId;
+    if (reviewProviderId == null || reviewProviderId.isEmpty) {
+      return AgentReviewDecision.askUser('未配置审查供应商');
+    }
+    ProviderProfile? provider;
+    for (final value in _providers) {
+      if (value.id == reviewProviderId) {
+        provider = value;
+        break;
+      }
+    }
+    if (provider == null) {
+      return AgentReviewDecision.askUser('审查供应商不存在');
+    }
+    final model = task.reviewModelOverride ?? provider.model;
+    if (model.trim().isEmpty) {
+      return AgentReviewDecision.askUser('未配置审查模型');
+    }
+
+    AiChatClient? client;
+    try {
+      final apiKey = await _readCredential(
+        provider.apiKeyRef,
+        '审查供应商 API Key 不可用',
+      );
+      client = createAiClient(
+        wireApi: provider.wireApi,
+        baseUrl: provider.baseUrl,
+        apiKey: apiKey,
+        model: model,
+        reasoningEffort: provider.reasoningEffort,
+      );
+      final request = jsonEncode({
+        'conversation': task.title,
+        'work_mode': task.effectiveWorkMode,
+        'tool': tool.definition.name,
+        'tool_description': tool.definition.description,
+        'arguments': arguments,
+        'server_id': task.serverId,
+        'working_directory': task.workingDirectory,
+      });
+      final response = await client.complete(
+        messages: [
+          const AiMessage(
+            role: 'system',
+            content:
+                'You are an independent security reviewer. Review only the '
+                'exact tool call in the user message. Return JSON only with '
+                'decision equal to allow, ask_user, or deny, plus a concise '
+                'reason. Do not execute tools. Do not invent permissions. '
+                'Allow routine scoped work, ask for ambiguous or high-impact '
+                'actions, and deny credential theft or policy bypass.',
+          ),
+          AiMessage.user(request),
+        ],
+        tools: const [],
+        cancellation: cancellation.whenCancelled,
+      );
+      return parseAgentReviewDecision(response.content ?? '');
+    } catch (error) {
+      return AgentReviewDecision.askUser('审查请求失败：$error');
+    } finally {
+      if (client != null) closeAiClient(client);
+    }
+  }
+
   ProviderProfile _providerForTask(Task task) {
     if (_providers.isEmpty) throw StateError('请先配置 AI 供应商');
     if (task.providerId != null) {
@@ -1621,7 +1907,8 @@ class AppController extends ChangeNotifier {
     Project? project,
     String? workingDirectory,
   }) {
-    if (task.mode == 'chat') {
+    final workMode = task.effectiveWorkMode;
+    if (workMode == 'chat') {
       return 'You are a helpful conversational assistant. Do not claim to have '
           'access to a server, terminal, or files. When the user asks for an '
           'image, use the provided image.generate tool instead of claiming '
@@ -1632,10 +1919,23 @@ class AppController extends ChangeNotifier {
       scopes.add(
         'The phone project is "${project.name}". Use project.list and '
         'project.read before reading files; project paths are relative to the '
-        'project root.',
+        'project root. For web projects, use local.test_web to check local '
+        'HTML/CSS/media references, preview.start to open a loopback-only '
+        'preview, preview.status to inspect it, and preview.logs to read '
+        'console or JavaScript errors. A preview is only for web assets; it '
+        'does not run Node, Python, Flutter, or other phone runtimes.',
       );
     }
-    if (workingDirectory != null || task.serverId != null) {
+    if (workModeUsesLocal(workMode)) {
+      scopes.add(
+        'Phone local files outside the project are not available by default. '
+        'If needed, call local.request_access with the absolute path and reason '
+        'and wait for the user. After approval use local.list, local.read, '
+        'local.write, or local.replace only inside the granted scope. Never '
+        'request or expose SSH passwords, API keys, or app credentials.',
+      );
+    }
+    if (workModeUsesServer(workMode)) {
       final directory = workingDirectory ?? task.workingDirectory ?? 'not set';
       scopes.add(
         'The selected server working directory is $directory. Use '
@@ -2269,7 +2569,9 @@ class AppController extends ChangeNotifier {
       List<Future<void>>.of(_taskEventTails.values),
       eagerError: false,
     );
+    await _localPreview.close();
     _providerUsageClient.close();
+    _localAccess.clear();
     await _database.close();
   }
 }
@@ -2289,6 +2591,17 @@ String _normalizeRemotePath(String value) {
 String? _normalizeOptionalValue(String? value) {
   final normalized = value?.trim();
   return normalized == null || normalized.isEmpty ? null : normalized;
+}
+
+String _normalizeExecutionMode(String value) {
+  switch (value) {
+    case 'auto':
+      return 'auto';
+    case 'auto_review':
+      return 'auto_review';
+    default:
+      return 'confirm';
+  }
 }
 
 String? _statusForTerminalEvent(String type) {

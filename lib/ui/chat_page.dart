@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter/services.dart';
 
 import '../agent/agent_tools.dart';
 import '../agent/ai_protocol.dart';
@@ -11,6 +12,7 @@ import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
 import 'file_manager_page.dart';
+import 'local_preview_page.dart';
 import 'project_file_manager_page.dart';
 import 'server_dashboard_page.dart';
 import 'terminal_page.dart';
@@ -56,8 +58,11 @@ class _ChatPageState extends State<ChatPage> {
   String? _taskId;
   String? _projectId;
   String? _providerId;
+  String? _reviewProviderId;
+  String? _reviewModelOverride;
   String? _serverId;
   String _mode = 'chat';
+  String _workMode = 'chat';
   String _executionMode = 'confirm';
   String? _workingDirectory;
   String? _modelOverride;
@@ -85,6 +90,10 @@ class _ChatPageState extends State<ChatPage> {
       setState(() {
         _taskId = widget.taskId;
         _projectId = widget.initialProjectId;
+        _reviewProviderId = null;
+        _reviewModelOverride = null;
+        _workMode = 'chat';
+        _mode = 'chat';
         _modelOverride = null;
         _reasoningEffortOverride = null;
         _visiblePresentationCount = _historyPageSize;
@@ -134,8 +143,21 @@ class _ChatPageState extends State<ChatPage> {
         if (mounted) unawaited(widget.controller.loadProviderUsage(provider));
       });
     }
-    final project = widget.controller.projectFor(task?.projectId ?? _projectId);
-    final boundServer = task == null ? null : _serverFor(task.serverId);
+    final workMode =
+        task?.effectiveWorkMode ??
+        resolveWorkMode(
+          workMode: _workMode,
+          mode: _mode,
+          projectId: _projectId,
+          serverId: _serverId,
+        );
+    final usesLocal = workModeUsesLocal(workMode);
+    final usesServer = workModeUsesServer(workMode);
+    final projectId = task == null ? _projectId : task.projectId;
+    final serverId = task == null ? _serverId : task.serverId;
+    final project = widget.controller.projectFor(projectId);
+    final activeProject = usesLocal ? project : null;
+    final boundServer = usesServer ? _serverFor(serverId) : null;
     if (_lastEventCount != events.length) {
       _lastEventCount = events.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -144,15 +166,16 @@ class _ChatPageState extends State<ChatPage> {
     return Column(
       children: [
         _ContextBar(
-          project: project,
-          server: _serverFor(task?.serverId ?? _serverId),
-          mode: task?.mode ?? _mode,
+          project: activeProject,
+          server: boundServer,
+          workMode: workMode,
           executionMode: task?.executionMode ?? _executionMode,
           provider: provider,
           usage: provider == null
               ? null
               : widget.controller.providerUsageFor(provider.id),
           onProviderTap: running ? null : _selectProvider,
+          onWorkModeTap: running ? null : _selectWorkMode,
           onEdit: running ? null : _editContext,
           onShowContext: () => _showContextStatus(events),
         ),
@@ -286,15 +309,19 @@ class _ChatPageState extends State<ChatPage> {
                             ),
                           ),
                           _ChatUtilityBar(
-                            hasProject: project != null,
-                            hasServers: widget.controller.servers.isNotEmpty,
-                            onProjectFiles: project == null
+                            hasProject: activeProject != null,
+                            hasServers:
+                                usesServer &&
+                                widget.controller.servers.isNotEmpty,
+                            onProjectFiles: activeProject == null
                                 ? null
                                 : _openProjectFiles,
-                            onServerFiles: widget.controller.servers.isEmpty
+                            onServerFiles:
+                                !usesServer || widget.controller.servers.isEmpty
                                 ? null
                                 : _openFilesFromTools,
-                            onTerminal: widget.controller.servers.isEmpty
+                            onTerminal:
+                                !usesServer || widget.controller.servers.isEmpty
                                 ? null
                                 : _openTerminalFromTools,
                           ),
@@ -408,9 +435,21 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   ServerProfile? get _toolServer {
-    final taskServer = _serverFor(_currentTask?.serverId);
+    final task = _currentTask;
+    final taskServer =
+        task != null && workModeUsesServer(task.effectiveWorkMode)
+        ? _serverFor(task.serverId)
+        : null;
     if (taskServer != null) return taskServer;
-    final selectedServer = _serverFor(_serverId);
+    final selectedWorkMode = resolveWorkMode(
+      workMode: _workMode,
+      mode: _mode,
+      projectId: _projectId,
+      serverId: _serverId,
+    );
+    final selectedServer = workModeUsesServer(selectedWorkMode)
+        ? _serverFor(_serverId)
+        : null;
     if (selectedServer != null) return selectedServer;
     return widget.controller.servers.length == 1
         ? widget.controller.servers.single
@@ -491,6 +530,19 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  Future<void> _openLocalPreview() async {
+    final project = widget.controller.projectFor(
+      _currentTask?.projectId ?? _projectId,
+    );
+    if (project == null || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            LocalPreviewPage(controller: widget.controller, project: project),
+      ),
+    );
+  }
+
   void _openServerDashboard(ServerProfile server) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -532,6 +584,16 @@ class _ChatPageState extends State<ChatPage> {
                 title: const Text('选择手机项目文件'),
                 onTap: () => Navigator.pop(context, 'project'),
               ),
+            if (widget.controller.projectFor(
+                  _currentTask?.projectId ?? _projectId,
+                ) !=
+                null)
+              ListTile(
+                leading: const Icon(Icons.preview_outlined),
+                title: const Text('打开本地网页预览'),
+                subtitle: const Text('查看页面、控制台日志并检查本地资源'),
+                onTap: () => Navigator.pop(context, 'preview'),
+              ),
           ],
         ),
       ),
@@ -543,6 +605,8 @@ class _ChatPageState extends State<ChatPage> {
       await _openProjectFiles();
     } else if (action == 'image') {
       await _requestImagePrompt();
+    } else if (action == 'preview') {
+      await _openLocalPreview();
     }
   }
 
@@ -634,6 +698,7 @@ class _ChatPageState extends State<ChatPage> {
         final updated = await widget.controller.updateTaskConfiguration(
           taskId: task.id,
           mode: task.mode,
+          workMode: task.effectiveWorkMode,
           serverId: task.serverId,
           providerId: selected,
           workingDirectory: task.workingDirectory,
@@ -657,8 +722,98 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  Future<void> _editContext() async {
+  Future<void> _selectWorkMode() async {
     final task = _currentTask;
+    final current =
+        task?.effectiveWorkMode ??
+        resolveWorkMode(
+          workMode: _workMode,
+          mode: _mode,
+          projectId: _projectId,
+          serverId: _serverId,
+        );
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('切换工作模式'),
+              subtitle: Text('决定当前对话可以使用哪些 Agent 工具'),
+            ),
+            for (final mode in workModeOptions)
+              ListTile(
+                leading: Icon(_workModeIcon(mode)),
+                title: Text(workModeLabel(mode)),
+                subtitle: Text(workModeDescription(mode)),
+                trailing: mode == current
+                    ? const Icon(Icons.check_circle_outline)
+                    : null,
+                onTap: () => Navigator.pop(context, mode),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || selected == current || !mounted) return;
+
+    final serverId = task == null ? _serverId : task.serverId;
+    if (workModeUsesServer(selected) &&
+        (serverId == null || serverId.isEmpty)) {
+      await _editContext(workModeOverride: selected);
+      return;
+    }
+
+    if (task == null) {
+      setState(() {
+        _workMode = selected;
+        _mode = taskModeForWorkMode(selected);
+      });
+      return;
+    }
+
+    try {
+      final updated = await widget.controller.updateTaskConfiguration(
+        taskId: task.id,
+        mode: taskModeForWorkMode(selected),
+        workMode: selected,
+        projectId: task.projectId,
+        serverId: task.serverId,
+        providerId: task.providerId,
+        reviewProviderId: task.reviewProviderId,
+        reviewModelOverride: task.reviewModelOverride,
+        workingDirectory: task.workingDirectory,
+        executionMode: task.executionMode,
+      );
+      if (!mounted) return;
+      setState(() {
+        _workMode = updated.effectiveWorkMode;
+        _mode = updated.mode;
+        _serverId = updated.serverId;
+        _executionMode = updated.executionMode;
+        _workingDirectory = updated.workingDirectory;
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换工作模式失败：$error')));
+      }
+    }
+  }
+
+  Future<void> _editContext({String? workModeOverride}) async {
+    final task = _currentTask;
+    final initialWorkMode =
+        workModeOverride ??
+        task?.effectiveWorkMode ??
+        resolveWorkMode(
+          workMode: _workMode,
+          mode: _mode,
+          projectId: _projectId,
+          serverId: _serverId,
+        );
     final result = await showModalBottomSheet<_ConversationConfig>(
       context: context,
       isScrollControlled: true,
@@ -666,12 +821,19 @@ class _ChatPageState extends State<ChatPage> {
       builder: (_) => _ConversationSetupSheet(
         controller: widget.controller,
         initial: _ConversationConfig(
+          taskId: task?.id,
           providerId: task?.providerId ?? _effectiveProviderId,
-          serverId: task?.serverId ?? _serverId,
-          mode: task?.mode ?? _mode,
+          serverId: task == null ? _serverId : task.serverId,
+          reviewProviderId: task?.reviewProviderId,
+          reviewModelOverride: task?.reviewModelOverride,
+          mode: taskModeForWorkMode(initialWorkMode),
+          workMode: initialWorkMode,
           executionMode: task?.executionMode ?? _executionMode,
           workingDirectory: task?.workingDirectory ?? _workingDirectory,
           hasProject: task?.projectId != null || _projectId != null,
+          localAccessCount: task == null
+              ? 0
+              : widget.controller.localAccessCount(task.id),
         ),
       ),
     );
@@ -683,8 +845,12 @@ class _ChatPageState extends State<ChatPage> {
         final updated = await widget.controller.updateTaskConfiguration(
           taskId: task.id,
           mode: result.mode,
+          workMode: result.workMode,
+          projectId: task.projectId,
           serverId: result.serverId,
           providerId: result.providerId,
+          reviewProviderId: result.reviewProviderId ?? '',
+          reviewModelOverride: result.reviewModelOverride ?? '',
           workingDirectory: result.workingDirectory,
           executionMode: result.executionMode,
           modelOverride: providerChanged ? '' : null,
@@ -693,8 +859,11 @@ class _ChatPageState extends State<ChatPage> {
         if (!mounted) return;
         setState(() {
           _providerId = updated.providerId;
+          _reviewProviderId = updated.reviewProviderId;
+          _reviewModelOverride = updated.reviewModelOverride;
           _serverId = updated.serverId;
           _mode = updated.mode;
+          _workMode = updated.effectiveWorkMode;
           _executionMode = updated.executionMode;
           _workingDirectory = updated.workingDirectory;
           _modelOverride = null;
@@ -705,7 +874,8 @@ class _ChatPageState extends State<ChatPage> {
             content: Text(
               updated.providerId != task.providerId ||
                       updated.serverId != task.serverId ||
-                      updated.mode != task.mode
+                      updated.mode != task.mode ||
+                      updated.effectiveWorkMode != task.effectiveWorkMode
                   ? '对话配置已更新，后续任务将使用新的上下文'
                   : '对话配置已更新',
             ),
@@ -723,8 +893,11 @@ class _ChatPageState extends State<ChatPage> {
     final providerChanged = result.providerId != _providerId;
     setState(() {
       _providerId = result.providerId;
+      _reviewProviderId = result.reviewProviderId;
+      _reviewModelOverride = result.reviewModelOverride;
       _serverId = result.serverId;
       _mode = result.mode;
+      _workMode = result.workMode;
       _executionMode = result.executionMode;
       _workingDirectory = result.workingDirectory;
       if (providerChanged) {
@@ -880,6 +1053,7 @@ class _ChatPageState extends State<ChatPage> {
       await widget.controller.updateTaskConfiguration(
         taskId: task.id,
         mode: task.mode,
+        workMode: task.effectiveWorkMode,
         serverId: task.serverId,
         providerId: task.providerId,
         workingDirectory: task.workingDirectory,
@@ -904,9 +1078,30 @@ class _ChatPageState extends State<ChatPage> {
       widget.onOpenSettings();
       return;
     }
-    if (_mode == 'agent' && _serverId == null && _projectId == null) {
-      await _editContext();
-      if (_serverId == null || !mounted) return;
+    var workMode =
+        _currentTask?.effectiveWorkMode ??
+        resolveWorkMode(
+          workMode: _workMode,
+          mode: _mode,
+          projectId: _projectId,
+          serverId: _serverId,
+        );
+    if (workModeUsesServer(workMode) &&
+        (_currentTask?.serverId ?? _serverId) == null) {
+      await _editContext(workModeOverride: workMode);
+      if (!mounted) return;
+      workMode =
+          _currentTask?.effectiveWorkMode ??
+          resolveWorkMode(
+            workMode: _workMode,
+            mode: _mode,
+            projectId: _projectId,
+            serverId: _serverId,
+          );
+      if (workModeUsesServer(workMode) &&
+          (_currentTask?.serverId ?? _serverId) == null) {
+        return;
+      }
     }
     _prompt.clear();
     setState(() => _pendingAttachments = const []);
@@ -916,10 +1111,13 @@ class _ChatPageState extends State<ChatPage> {
       var task = _currentTask;
       if (task == null) {
         task = await widget.controller.createTask(
-          mode: _mode,
+          mode: taskModeForWorkMode(workMode),
+          workMode: workMode,
           projectId: _projectId,
           serverId: _serverId,
           providerId: providerId,
+          reviewProviderId: _reviewProviderId,
+          reviewModelOverride: _reviewModelOverride,
           modelOverride: _modelOverride,
           reasoningEffortOverride: _reasoningEffortOverride,
           title: _titleFromPrompt(prompt),
@@ -997,20 +1195,30 @@ class _ChatPageState extends State<ChatPage> {
 
 class _ConversationConfig {
   const _ConversationConfig({
+    required this.taskId,
     required this.providerId,
     required this.serverId,
+    required this.reviewProviderId,
+    required this.reviewModelOverride,
     required this.mode,
+    required this.workMode,
     required this.executionMode,
     required this.workingDirectory,
     required this.hasProject,
+    required this.localAccessCount,
   });
 
+  final String? taskId;
   final String? providerId;
   final String? serverId;
+  final String? reviewProviderId;
+  final String? reviewModelOverride;
   final String mode;
+  final String workMode;
   final String executionMode;
   final String? workingDirectory;
   final bool hasProject;
+  final int localAccessCount;
 }
 
 class _ConversationSetupSheet extends StatefulWidget {
@@ -1028,22 +1236,83 @@ class _ConversationSetupSheet extends StatefulWidget {
 }
 
 class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
+  late final ScrollController _scroll = ScrollController();
   late String? _providerId = widget.initial.providerId;
   late String? _serverId = widget.initial.serverId;
-  late String _mode = widget.initial.mode;
+  late String? _reviewProviderId = widget.initial.reviewProviderId;
+  late String _reviewModelOverride = widget.initial.reviewModelOverride ?? '';
+  late String _workMode = widget.initial.workMode;
   late String _executionMode = widget.initial.executionMode;
+  late int _localAccessCount = widget.initial.localAccessCount;
   late final TextEditingController _directory = TextEditingController(
     text: widget.initial.workingDirectory,
   );
+  List<String> _reviewModels = const [];
+  bool _loadingReviewModels = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadReviewModels());
+  }
 
   @override
   void dispose() {
+    _scroll.dispose();
     _directory.dispose();
     super.dispose();
   }
 
+  ProviderProfile? _reviewProvider() {
+    final id = _reviewProviderId;
+    if (id == null || id.isEmpty) return null;
+    for (final provider in widget.controller.providers) {
+      if (provider.id == id) return provider;
+    }
+    return null;
+  }
+
+  Future<void> _loadReviewModels() async {
+    final provider = _reviewProvider();
+    if (provider == null) {
+      if (mounted) setState(() => _reviewModels = const []);
+      return;
+    }
+    final providerId = provider.id;
+    setState(() => _loadingReviewModels = true);
+    try {
+      final loaded = await widget.controller.loadProviderModels(provider);
+      if (!mounted || _reviewProviderId != providerId) return;
+      final models = <String>[
+        if (_reviewModelOverride.isNotEmpty) _reviewModelOverride,
+        provider.model,
+        for (final model in loaded)
+          if (model != provider.model && model != _reviewModelOverride) model,
+      ];
+      setState(() => _reviewModels = models);
+    } catch (_) {
+      if (mounted && _reviewProviderId == providerId) {
+        setState(
+          () => _reviewModels = [
+            if (_reviewModelOverride.isNotEmpty) _reviewModelOverride,
+            provider.model,
+          ],
+        );
+      }
+    } finally {
+      if (mounted && _reviewProviderId == providerId) {
+        setState(() => _loadingReviewModels = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.of(context);
+    final availableHeight =
+        (mediaQuery.size.height - mediaQuery.viewInsets.bottom - 36)
+            .clamp(0.0, mediaQuery.size.height * 0.82)
+            .toDouble();
     return Padding(
       padding: EdgeInsets.only(
         left: 20,
@@ -1051,91 +1320,233 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
         top: 16,
         bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
       ),
-      child: ListView(
-        shrinkWrap: true,
-        children: [
-          Text('对话设置', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 16),
-          DropdownButtonFormField<String>(
-            initialValue: _providerId,
-            decoration: const InputDecoration(labelText: 'AI 供应商'),
-            items: [
-              for (final provider in widget.controller.providers)
-                DropdownMenuItem(
-                  value: provider.id,
-                  child: Text(provider.name),
-                ),
-            ],
-            onChanged: (value) => setState(() => _providerId = value),
-          ),
-          DropdownButtonFormField<String>(
-            initialValue: _mode,
-            decoration: const InputDecoration(labelText: '对话类型'),
-            items: const [
-              DropdownMenuItem(value: 'chat', child: Text('普通对话')),
-              DropdownMenuItem(value: 'agent', child: Text('手机 Agent')),
-            ],
-            onChanged: (value) {
-              if (value != null) setState(() => _mode = value);
-            },
-          ),
-          if (_mode == 'agent') ...[
-            DropdownButtonFormField<String>(
-              initialValue: _serverId ?? '',
-              decoration: const InputDecoration(labelText: '目标服务器'),
-              items: [
-                const DropdownMenuItem(value: '', child: Text('不连接服务器')),
-                for (final server in widget.controller.servers)
-                  DropdownMenuItem(value: server.id, child: Text(server.name)),
-              ],
-              onChanged: (value) => setState(
-                () => _serverId = value == null || value.isEmpty ? null : value,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: availableHeight),
+        child: Scrollbar(
+          controller: _scroll,
+          thumbVisibility: true,
+          child: ListView(
+            controller: _scroll,
+            children: [
+              Text('对话设置', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                initialValue: _providerId,
+                decoration: const InputDecoration(labelText: 'AI 供应商'),
+                items: [
+                  for (final provider in widget.controller.providers)
+                    DropdownMenuItem(
+                      value: provider.id,
+                      child: Text(provider.name),
+                    ),
+                ],
+                onChanged: (value) => setState(() => _providerId = value),
               ),
-            ),
-            TextField(
-              controller: _directory,
-              decoration: const InputDecoration(labelText: '工作目录（可选）'),
-            ),
-            DropdownButtonFormField<String>(
-              initialValue: _executionMode,
-              decoration: const InputDecoration(labelText: '工具执行'),
-              items: const [
-                DropdownMenuItem(value: 'confirm', child: Text('每次执行前确认')),
-                DropdownMenuItem(value: 'auto', child: Text('自动执行工具')),
-              ],
-              onChanged: (value) {
-                if (value != null) setState(() => _executionMode = value);
-              },
-            ),
-          ],
-          const SizedBox(height: 20),
-          FilledButton(
-            onPressed: () {
-              if (_mode == 'agent' &&
-                  _serverId == null &&
-                  !widget.initial.hasProject) {
-                return;
-              }
-              Navigator.pop(
-                context,
-                _ConversationConfig(
-                  providerId: _providerId,
-                  serverId: _mode == 'agent' ? _serverId : null,
-                  mode: _mode,
-                  executionMode: _executionMode,
-                  workingDirectory:
-                      _mode != 'agent' || _directory.text.trim().isEmpty
-                      ? null
-                      : _directory.text.trim(),
-                  hasProject: widget.initial.hasProject,
+              DropdownButtonFormField<String>(
+                initialValue: _workMode,
+                decoration: const InputDecoration(labelText: '工作模式'),
+                items: [
+                  for (final mode in workModeOptions)
+                    DropdownMenuItem(
+                      value: mode,
+                      child: Text(workModeLabel(mode)),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() {
+                      _workMode = value;
+                    });
+                  }
+                },
+              ),
+              if (_workMode != 'chat') ...[
+                const SizedBox(height: 8),
+                Text(
+                  '${workModeLabel(_workMode)} Agent',
+                  style: Theme.of(context).textTheme.titleMedium,
                 ),
-              );
-            },
-            child: const Text('应用'),
+                if (workModeUsesServer(_workMode)) ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: _serverId ?? '',
+                    decoration: const InputDecoration(labelText: '目标服务器'),
+                    items: [
+                      const DropdownMenuItem(value: '', child: Text('选择目标服务器')),
+                      for (final server in widget.controller.servers)
+                        DropdownMenuItem(
+                          value: server.id,
+                          child: Text(server.name),
+                        ),
+                    ],
+                    onChanged: (value) => setState(
+                      () => _serverId = value == null || value.isEmpty
+                          ? null
+                          : value,
+                    ),
+                  ),
+                  TextField(
+                    controller: _directory,
+                    decoration: const InputDecoration(labelText: '工作目录（可选）'),
+                  ),
+                ],
+                DropdownButtonFormField<String>(
+                  initialValue: _executionMode,
+                  decoration: const InputDecoration(labelText: '工具审批'),
+                  items: const [
+                    DropdownMenuItem(value: 'confirm', child: Text('每次执行前确认')),
+                    DropdownMenuItem(
+                      value: 'auto_review',
+                      child: Text('自动审查后执行'),
+                    ),
+                    DropdownMenuItem(value: 'auto', child: Text('自由执行（不询问）')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setState(() => _executionMode = value);
+                    }
+                  },
+                ),
+                if (_executionMode == 'auto_review') ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: _reviewProviderId ?? '',
+                    decoration: const InputDecoration(labelText: '审查供应商'),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('未选择（转人工确认）'),
+                      ),
+                      for (final provider in widget.controller.providers)
+                        DropdownMenuItem(
+                          value: provider.id,
+                          child: Text(provider.name),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      setState(() {
+                        _reviewProviderId = value == null || value.isEmpty
+                            ? null
+                            : value;
+                        _reviewModelOverride = '';
+                        _reviewModels = const [];
+                      });
+                      unawaited(_loadReviewModels());
+                    },
+                  ),
+                  if (_reviewProvider() != null)
+                    DropdownButtonFormField<String>(
+                      initialValue: _reviewModelOverride.isEmpty
+                          ? null
+                          : _reviewModelOverride,
+                      decoration: InputDecoration(
+                        labelText: '审查模型',
+                        suffixIcon: _loadingReviewModels
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: SizedBox.square(
+                                  dimension: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                              )
+                            : null,
+                      ),
+                      items: [
+                        for (final model in _reviewModels)
+                          DropdownMenuItem(value: model, child: Text(model)),
+                      ],
+                      onChanged: (value) =>
+                          setState(() => _reviewModelOverride = value ?? ''),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '自动审查只处理需要审批的工具；审查失败会转为人工确认，不会更换协议或供应商。',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                if (workModeUsesLocal(_workMode))
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.folder_shared_outlined),
+                    title: const Text('项目外手机文件'),
+                    subtitle: Text(
+                      _localAccessCount == 0
+                          ? '默认禁止，Agent 请求时由你临时授权'
+                          : '当前对话已授权 $_localAccessCount 个范围',
+                    ),
+                    trailing: _localAccessCount == 0
+                        ? null
+                        : TextButton(
+                            onPressed: widget.initial.taskId == null
+                                ? null
+                                : () {
+                                    widget.controller.revokeLocalAccess(
+                                      widget.initial.taskId!,
+                                    );
+                                    setState(() => _localAccessCount = 0);
+                                  },
+                            child: const Text('清除'),
+                          ),
+                  ),
+              ],
+              const SizedBox(height: 20),
+              FilledButton(
+                onPressed: () {
+                  if (workModeUsesServer(_workMode) && _serverId == null) {
+                    return;
+                  }
+                  Navigator.pop(
+                    context,
+                    _ConversationConfig(
+                      taskId: widget.initial.taskId,
+                      providerId: _providerId,
+                      serverId: _serverId,
+                      reviewProviderId: _workMode != 'chat'
+                          ? _reviewProviderId
+                          : null,
+                      reviewModelOverride:
+                          _workMode != 'chat' &&
+                              _reviewModelOverride.trim().isNotEmpty
+                          ? _reviewModelOverride.trim()
+                          : null,
+                      mode: taskModeForWorkMode(_workMode),
+                      workMode: _workMode,
+                      executionMode: _executionMode,
+                      workingDirectory:
+                          !workModeUsesServer(_workMode) ||
+                              _directory.text.trim().isEmpty
+                          ? null
+                          : _directory.text.trim(),
+                      hasProject: widget.initial.hasProject,
+                      localAccessCount: _localAccessCount,
+                    ),
+                  );
+                },
+                child: const Text('应用'),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
+  }
+}
+
+IconData _workModeIcon(String value) {
+  switch (value) {
+    case 'collaborative':
+      return Icons.sync_alt_rounded;
+    case 'local':
+      return Icons.phone_android_outlined;
+    case 'server':
+      return Icons.dns_outlined;
+    case 'chat':
+      return Icons.chat_rounded;
+    default:
+      return Icons.swap_horiz_rounded;
   }
 }
 
@@ -1143,22 +1554,24 @@ class _ContextBar extends StatelessWidget {
   const _ContextBar({
     required this.project,
     required this.server,
-    required this.mode,
+    required this.workMode,
     required this.executionMode,
     required this.provider,
     required this.usage,
     required this.onProviderTap,
+    required this.onWorkModeTap,
     required this.onEdit,
     required this.onShowContext,
   });
 
   final Project? project;
   final ServerProfile? server;
-  final String mode;
+  final String workMode;
   final String executionMode;
   final ProviderProfile? provider;
   final ProviderUsageSnapshot? usage;
   final VoidCallback? onProviderTap;
+  final VoidCallback? onWorkModeTap;
   final VoidCallback? onEdit;
   final VoidCallback onShowContext;
 
@@ -1171,18 +1584,18 @@ class _ContextBar extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(
-                mode == 'agent' ? Icons.terminal_rounded : Icons.chat_rounded,
-                size: 20,
-                color: colors.primary,
-              ),
+              Icon(_workModeIcon(workMode), size: 20, color: colors.primary),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      mode == 'agent' ? (server?.name ?? '未选择服务器') : '普通对话',
+                      workModeUsesServer(workMode)
+                          ? (server?.name ?? '未选择服务器')
+                          : workMode == 'chat'
+                          ? '普通对话'
+                          : '手机 Agent',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelLarge,
@@ -1196,39 +1609,59 @@ class _ContextBar extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 148),
-                    child: provider != null
-                        ? _ContextPill(
-                            icon: Icons.hub_outlined,
-                            label: provider!.name,
-                            onTap: onProviderTap,
-                          )
-                        : _ContextPill(
-                            icon: Icons.hub_outlined,
-                            label: '配置供应商',
-                            onTap: onProviderTap,
-                          ),
-                  ),
-                  IconButton(
-                    tooltip: '上下文状态',
-                    onPressed: onShowContext,
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.data_usage_outlined, size: 19),
-                  ),
-                  IconButton(
-                    tooltip: '对话设置',
-                    onPressed: onEdit,
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.tune_outlined, size: 19),
-                  ),
-                ],
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 82),
+                child: _ContextPill(
+                  icon: _workModeIcon(workMode),
+                  label: workModeLabel(workMode),
+                  onTap: onWorkModeTap,
+                ),
               ),
             ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 28, top: 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: provider != null
+                      ? _ContextPill(
+                          icon: Icons.hub_outlined,
+                          label: provider!.name,
+                          onTap: onProviderTap,
+                        )
+                      : _ContextPill(
+                          icon: Icons.hub_outlined,
+                          label: '配置供应商',
+                          onTap: onProviderTap,
+                        ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: '上下文状态',
+                  onPressed: onShowContext,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.data_usage_outlined, size: 19),
+                ),
+                IconButton(
+                  tooltip: '对话设置',
+                  onPressed: onEdit,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.tune_outlined, size: 19),
+                ),
+              ],
+            ),
           ),
           Align(
             alignment: Alignment.centerLeft,
@@ -1240,15 +1673,23 @@ class _ContextBar extends StatelessWidget {
                   Icon(
                     executionMode == 'auto'
                         ? Icons.bolt_outlined
+                        : executionMode == 'auto_review'
+                        ? Icons.policy_outlined
                         : Icons.verified_user_outlined,
                     size: 14,
                     color: executionMode == 'auto'
                         ? colors.primary
+                        : executionMode == 'auto_review'
+                        ? colors.secondary
                         : colors.outline,
                   ),
                   const SizedBox(width: 4),
                   Text(
-                    executionMode == 'auto' ? '自动执行' : '执行前确认',
+                    executionMode == 'auto'
+                        ? '自由执行'
+                        : executionMode == 'auto_review'
+                        ? '自动审查'
+                        : '执行前确认',
                     style: Theme.of(context).textTheme.labelSmall,
                   ),
                   if (usage != null &&
@@ -1592,8 +2033,8 @@ class _ChatUtilityBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 34,
-      width: 120,
+      height: 28,
+      width: 84,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1602,24 +2043,45 @@ class _ChatUtilityBar extends StatelessWidget {
             onPressed: onProjectFiles,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-            icon: const Icon(Icons.folder_special_outlined, size: 20),
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            style: IconButton.styleFrom(
+              fixedSize: const Size(28, 28),
+              minimumSize: Size.zero,
+              maximumSize: const Size(28, 28),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              padding: EdgeInsets.zero,
+            ),
+            icon: const Icon(Icons.folder_special_outlined, size: 17),
           ),
           IconButton(
             tooltip: hasServers ? '服务器文件夹' : '尚未添加服务器',
             onPressed: onServerFiles,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-            icon: const Icon(Icons.dns_outlined, size: 20),
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            style: IconButton.styleFrom(
+              fixedSize: const Size(28, 28),
+              minimumSize: Size.zero,
+              maximumSize: const Size(28, 28),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              padding: EdgeInsets.zero,
+            ),
+            icon: const Icon(Icons.dns_outlined, size: 17),
           ),
           IconButton(
             tooltip: hasServers ? '服务器终端' : '尚未添加服务器',
             onPressed: onTerminal,
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints.tightFor(width: 32, height: 32),
-            icon: const Icon(Icons.terminal_outlined, size: 20),
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            style: IconButton.styleFrom(
+              fixedSize: const Size(28, 28),
+              minimumSize: Size.zero,
+              maximumSize: const Size(28, 28),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              padding: EdgeInsets.zero,
+            ),
+            icon: const Icon(Icons.terminal_outlined, size: 14),
           ),
         ],
       ),
@@ -1771,10 +2233,10 @@ class _ServerStatusSummaryState extends State<_ServerStatusSummary> {
         color: Colors.transparent,
         child: InkWell(
           onTap: widget.onOpenDashboard,
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(3),
           child: SizedBox(
             width: double.infinity,
-            height: 20,
+            height: 16,
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -1783,7 +2245,7 @@ class _ServerStatusSummaryState extends State<_ServerStatusSummary> {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontSize: 9,
+                  fontSize: 8,
                   height: 1,
                   fontFamily: 'monospace',
                 ),
@@ -1875,8 +2337,8 @@ class _TaskStatusBarState extends State<_TaskStatusBar> {
             liveRegion: true,
             label: presentation.accessibleLabel,
             child: Container(
-              constraints: const BoxConstraints(minHeight: 22),
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              constraints: const BoxConstraints(minHeight: 20),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
               decoration: BoxDecoration(
                 color: color.withValues(alpha: 0.10),
                 border: Border.all(color: borderColor),
@@ -1893,17 +2355,17 @@ class _TaskStatusBarState extends State<_TaskStatusBar> {
                       shape: BoxShape.circle,
                     ),
                   ),
-                  const SizedBox(width: 5),
+                  const SizedBox(width: 4),
                   Text(
                     presentation.label,
                     style: TextStyle(
                       color: colors.onSurface,
                       fontWeight: FontWeight.w600,
-                      fontSize: 10,
+                      fontSize: 9,
                       height: 1,
                     ),
                   ),
-                  const SizedBox(width: 5),
+                  const SizedBox(width: 4),
                   ConstrainedBox(
                     constraints: BoxConstraints(maxWidth: maxDetailWidth),
                     child: Text(
@@ -1912,18 +2374,18 @@ class _TaskStatusBarState extends State<_TaskStatusBar> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: colors.onSurfaceVariant,
-                        fontSize: 10,
+                        fontSize: 9,
                         height: 1,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 5),
                   Text(
                     presentation.time,
                     style: TextStyle(
                       color: colors.onSurfaceVariant,
                       fontFamily: 'monospace',
-                      fontSize: 9,
+                      fontSize: 8,
                       height: 1,
                     ),
                   ),
@@ -2045,13 +2507,15 @@ String _toolStatusPhase(Object? value) {
 }
 
 String _taskStatusTime(Task task, String status, List<TaskEvent> events) {
+  // A conversation can contain several runs. The duration belongs to the
+  // latest run, not to the first run ever recorded for this conversation.
   final startedAt =
-      _firstTaskEventTime(events, 'task.started') ?? task.createdAt;
+      _lastTaskEventTime(events, 'task.started') ?? task.createdAt;
   if (status == 'queued') {
-    return '已排队 ${_formatTaskDuration(DateTime.now().difference(task.createdAt))}';
+    return '已排队 ${_formatTaskDuration(DateTime.now().toUtc().difference(task.createdAt))}';
   }
   if (_activeTaskStatus(status)) {
-    return '已运行 ${_formatTaskDuration(DateTime.now().difference(startedAt))}';
+    return '已运行 ${_formatTaskDuration(DateTime.now().toUtc().difference(startedAt))}';
   }
 
   final finishedAt = _lastTerminalTaskEventTime(events) ?? task.updatedAt;
@@ -2067,8 +2531,8 @@ String _taskStatusTime(Task task, String status, List<TaskEvent> events) {
   return '$prefix ${_formatTaskClock(finishedAt)}$duration';
 }
 
-DateTime? _firstTaskEventTime(List<TaskEvent> events, String type) {
-  for (final event in events) {
+DateTime? _lastTaskEventTime(List<TaskEvent> events, String type) {
+  for (final event in events.reversed) {
     if (event.type == type) return event.timestamp;
   }
   return null;
@@ -2260,6 +2724,30 @@ class _MessageBubble extends StatelessWidget {
             if (attachments.isNotEmpty && text.trim().isNotEmpty)
               const SizedBox(height: 6),
             if (text.trim().isNotEmpty) content,
+            if (text.trim().isNotEmpty)
+              Align(
+                alignment: Alignment.centerRight,
+                child: IconButton(
+                  tooltip: '复制整段消息',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 28,
+                    height: 28,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.copy_outlined, size: 16),
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: text));
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('已复制整段消息'),
+                        duration: Duration(milliseconds: 900),
+                      ),
+                    );
+                  },
+                ),
+              ),
           ],
         ),
       ),
@@ -2270,33 +2758,37 @@ class _MessageBubble extends StatelessWidget {
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 760),
-          child: Row(
-            mainAxisSize: isUser ? MainAxisSize.min : MainAxisSize.max,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (!isUser) ...[
-                _MessageAvatar(
-                  icon: streaming
-                      ? Icons.autorenew_rounded
-                      : Icons.auto_awesome_rounded,
-                  color: avatarColor,
-                  label: 'AI 回复',
-                ),
-                const SizedBox(width: 8),
-              ],
-              if (isUser)
-                bubble
-              else
+          child: SizedBox(
+            width: double.infinity,
+            child: Row(
+              mainAxisAlignment: isUser
+                  ? MainAxisAlignment.end
+                  : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!isUser) ...[
+                  _MessageAvatar(
+                    icon: streaming
+                        ? Icons.autorenew_rounded
+                        : Icons.auto_awesome_rounded,
+                    color: avatarColor,
+                    label: 'AI 回复',
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                // Both sides use a flexible child so long messages wrap
+                // inside the available width instead of leaving the screen.
                 Flexible(fit: FlexFit.loose, child: bubble),
-              if (isUser) ...[
-                const SizedBox(width: 8),
-                _MessageAvatar(
-                  icon: Icons.person_outline_rounded,
-                  color: avatarColor,
-                  label: '你的消息',
-                ),
+                if (isUser) ...[
+                  const SizedBox(width: 8),
+                  _MessageAvatar(
+                    icon: Icons.person_outline_rounded,
+                    color: avatarColor,
+                    label: '你的消息',
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -2360,26 +2852,26 @@ class _ToolEventTile extends StatelessWidget {
         ? result?.payload['error'] ?? '执行失败'
         : result?.payload['result'];
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+      margin: const EdgeInsets.only(bottom: 3),
       decoration: BoxDecoration(
         color: colors.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: colors.outlineVariant),
       ),
       child: Theme(
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
           dense: true,
-          minTileHeight: 52,
-          visualDensity: const VisualDensity(vertical: -3),
-          tilePadding: const EdgeInsets.symmetric(horizontal: 8),
-          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-          leading: Icon(icon, color: iconColor, size: 23),
+          minTileHeight: 32,
+          visualDensity: const VisualDensity(horizontal: -2, vertical: -4),
+          tilePadding: const EdgeInsets.symmetric(horizontal: 6),
+          childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 5),
+          leading: Icon(icon, color: iconColor, size: 17),
           title: Text(
             '$name · $status',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelLarge,
+            style: const TextStyle(fontSize: 11, height: 1),
           ),
           children: [
             if (arguments != null)
@@ -2432,25 +2924,25 @@ class _ToolDetail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.only(top: 5),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: Theme.of(context).textTheme.labelMedium),
-          const SizedBox(height: 4),
+          Text(title, style: const TextStyle(fontSize: 10, height: 1)),
+          const SizedBox(height: 3),
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(10),
+            padding: const EdgeInsets.all(6),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(6),
             ),
             child: SelectableText(
               value,
               style: const TextStyle(
                 fontFamily: 'monospace',
-                fontSize: 12,
-                height: 1.35,
+                fontSize: 10,
+                height: 1.15,
               ),
             ),
           ),

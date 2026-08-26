@@ -15,6 +15,7 @@
         android:label="PocketServerOps AI"
         android:name=".MobileAgentApplication"
         android:allowBackup="false"
+            android:usesCleartextTraffic="true"
             android:icon="@mipmap/ic_launcher">
         <service
             android:name=".AgentForegroundService"
