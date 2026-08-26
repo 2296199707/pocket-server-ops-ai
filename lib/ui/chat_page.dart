@@ -279,12 +279,9 @@ class _ChatPageState extends State<ChatPage> {
                                   _reasoningEffortOverride ??
                                   provider?.reasoningEffort ??
                                   'default',
-                              onModelTap: running || _loadingModels
+                              onTap: running || _loadingModels
                                   ? null
-                                  : _selectModel,
-                              onReasoningTap: running
-                                  ? null
-                                  : _selectReasoningEffort,
+                                  : _selectModelAndReasoning,
                             ),
                           ),
                           _ChatUtilityBar(
@@ -720,7 +717,7 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
-  Future<void> _selectModel() async {
+  Future<void> _selectModelAndReasoning() async {
     final task = _currentTask;
     final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
     if (provider == null) {
@@ -736,55 +733,120 @@ class _ChatPageState extends State<ChatPage> {
         for (final model in loaded)
           if (model != provider.model) model,
       ];
-      final current = task?.modelOverride ?? _modelOverride ?? provider.model;
-      final selected = await showModalBottomSheet<String>(
+      var selectedModel =
+          task?.modelOverride ?? _modelOverride ?? provider.model;
+      var selectedReasoningEffort =
+          task?.reasoningEffortOverride ??
+          _reasoningEffortOverride ??
+          provider.reasoningEffort;
+      final selected = await showModalBottomSheet<_ModelReasoningSelection>(
         context: context,
         showDragHandle: true,
-        builder: (context) => SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              ListTile(
-                title: const Text('切换 AI 模型'),
-                subtitle: Text('${provider.name} · ${models.length} 个模型'),
-              ),
-              for (final model in models)
-                ListTile(
-                  leading: Icon(
-                    model == current
-                        ? Icons.radio_button_checked
-                        : Icons.radio_button_unchecked,
+        isScrollControlled: true,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setSheetState) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('模型与推理强度'),
+                    subtitle: Text(
+                      '${_shortModelName(selectedModel)} '
+                      '$selectedReasoningEffort',
+                    ),
                   ),
-                  title: Text(model),
-                  subtitle: model == provider.model
-                      ? const Text('供应商默认模型')
-                      : null,
-                  onTap: () => Navigator.pop(context, model),
-                ),
-            ],
+                  const Divider(),
+                  const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text('AI 模型'),
+                  ),
+                  for (final model in models)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        model == selectedModel
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                      ),
+                      title: Text(model),
+                      subtitle: model == provider.model
+                          ? const Text('供应商默认模型')
+                          : null,
+                      onTap: () => setSheetState(() => selectedModel = model),
+                    ),
+                  const Divider(),
+                  const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text('推理强度'),
+                  ),
+                  for (final effort in reasoningEffortOptions)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        effort == selectedReasoningEffort
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                      ),
+                      title: Text('${reasoningEffortLabel(effort)}（$effort）'),
+                      subtitle: effort == provider.reasoningEffort
+                          ? const Text('供应商默认设置')
+                          : null,
+                      onTap: () =>
+                          setSheetState(() => selectedReasoningEffort = effort),
+                    ),
+                  const SizedBox(height: 8),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(
+                      context,
+                      _ModelReasoningSelection(
+                        model: selectedModel,
+                        reasoningEffort: selectedReasoningEffort,
+                      ),
+                    ),
+                    child: const Text('应用'),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       );
       if (selected == null || !mounted) return;
-      await _saveModelSelection(provider, selected);
+      await _saveModelAndReasoningSelection(provider, selected);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('读取模型失败：$error')));
+            .showSnackBar(SnackBar(content: Text('读取模型或推理设置失败：$error')));
       }
     } finally {
       if (mounted) setState(() => _loadingModels = false);
     }
   }
 
-  Future<void> _saveModelSelection(
+  Future<void> _saveModelAndReasoningSelection(
     ProviderProfile provider,
-    String selected,
+    _ModelReasoningSelection selected,
   ) async {
     final task = _currentTask;
-    final override = selected == provider.model ? '' : selected;
+    final modelOverride = selected.model == provider.model
+        ? ''
+        : selected.model;
+    final reasoningEffortOverride =
+        selected.reasoningEffort == provider.reasoningEffort
+        ? ''
+        : selected.reasoningEffort;
     if (task == null) {
-      setState(() => _modelOverride = override.isEmpty ? null : override);
+      setState(() {
+        _modelOverride = modelOverride.isEmpty ? null : modelOverride;
+        _reasoningEffortOverride = reasoningEffortOverride.isEmpty
+            ? null
+            : reasoningEffortOverride;
+      });
       return;
     }
     try {
@@ -795,77 +857,13 @@ class _ChatPageState extends State<ChatPage> {
         providerId: task.providerId,
         workingDirectory: task.workingDirectory,
         executionMode: task.executionMode,
-        modelOverride: override,
+        modelOverride: modelOverride,
+        reasoningEffortOverride: reasoningEffortOverride,
       );
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('切换模型失败：$error')));
-      }
-    }
-  }
-
-  Future<void> _selectReasoningEffort() async {
-    final task = _currentTask;
-    final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
-    if (provider == null) {
-      widget.onOpenSettings();
-      return;
-    }
-    final current =
-        task?.reasoningEffortOverride ??
-        _reasoningEffortOverride ??
-        provider.reasoningEffort;
-    final selected = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(
-              title: Text('切换推理强度'),
-              subtitle: Text('当前对话的设置会覆盖供应商默认值'),
-            ),
-            for (final effort in reasoningEffortOptions)
-              ListTile(
-                leading: Icon(
-                  effort == current
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                ),
-                title: Text('${reasoningEffortLabel(effort)}（$effort）'),
-                subtitle: effort == provider.reasoningEffort
-                    ? const Text('供应商默认设置')
-                    : null,
-                onTap: () => Navigator.pop(context, effort),
-              ),
-          ],
-        ),
-      ),
-    );
-    if (selected == null || !mounted) return;
-    final override = selected == provider.reasoningEffort ? '' : selected;
-    if (task == null) {
-      setState(
-        () => _reasoningEffortOverride = override.isEmpty ? null : override,
-      );
-      return;
-    }
-    try {
-      await widget.controller.updateTaskConfiguration(
-        taskId: task.id,
-        mode: task.mode,
-        serverId: task.serverId,
-        providerId: task.providerId,
-        workingDirectory: task.workingDirectory,
-        executionMode: task.executionMode,
-        reasoningEffortOverride: override,
-      );
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('切换推理强度失败：$error')));
+            .showSnackBar(SnackBar(content: Text('更新模型设置失败：$error')));
       }
     }
   }
@@ -1288,14 +1286,12 @@ class _ModelReasoningPill extends StatelessWidget {
   const _ModelReasoningPill({
     required this.model,
     required this.reasoningEffort,
-    required this.onModelTap,
-    required this.onReasoningTap,
+    required this.onTap,
   });
 
   final String? model;
   final String reasoningEffort;
-  final VoidCallback? onModelTap;
-  final VoidCallback? onReasoningTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1304,59 +1300,47 @@ class _ModelReasoningPill extends StatelessWidget {
     final effortText = reasoningEffort == 'default'
         ? 'default'
         : reasoningEffort;
-    return Container(
-      constraints: const BoxConstraints(minHeight: 30),
-      decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest,
+    return Material(
+      color: colors.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: InkWell(
-              onTap: onModelTap,
-              borderRadius: const BorderRadius.horizontal(
-                left: Radius.circular(10),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.auto_awesome_outlined, size: 14),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        modelText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
-                    ),
-                  ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.auto_awesome_outlined, size: 14),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  '$modelText $effortText',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall,
                 ),
               ),
-            ),
+              if (onTap != null) ...[
+                const SizedBox(width: 2),
+                const Icon(Icons.keyboard_arrow_down_rounded, size: 16),
+              ],
+            ],
           ),
-          Container(width: 1, height: 16, color: colors.outlineVariant),
-          InkWell(
-            onTap: onReasoningTap,
-            borderRadius: const BorderRadius.horizontal(
-              right: Radius.circular(10),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              child: Text(
-                effortText,
-                style: Theme.of(context).textTheme.labelSmall,
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
+}
+
+class _ModelReasoningSelection {
+  const _ModelReasoningSelection({
+    required this.model,
+    required this.reasoningEffort,
+  });
+
+  final String model;
+  final String reasoningEffort;
 }
 
 class _ContextStatusDialog extends StatelessWidget {
@@ -1468,8 +1452,18 @@ String _formatUsage(int? value) {
 
 String _shortModelName(String value) {
   final compact = value.trim();
-  if (compact.length <= 22) return compact;
-  return '${compact.substring(0, 19)}...';
+  if (compact.isEmpty) return '未配置模型';
+
+  // The supplier is already shown separately. Remove a namespace and make
+  // the common GPT identifier compact enough for the composer pill.
+  var short = compact.split('/').last;
+  if (short.toLowerCase().startsWith('gpt')) {
+    short = short.substring(3).replaceFirst(RegExp(r'^[-_]+'), '');
+    short = short.replaceAll(RegExp(r'[-_]+'), '');
+  }
+  if (short.isEmpty) short = compact;
+  if (short.length <= 16) return short;
+  return '${short.substring(0, 13)}...';
 }
 
 String _providerUsageText(ProviderUsageSnapshot? usage) {
