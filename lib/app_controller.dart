@@ -12,6 +12,7 @@ import 'credentials/credential_store.dart';
 import 'domain/models.dart';
 import 'local/project_files.dart';
 import 'platform/android_task_service.dart';
+import 'platform/android_storage_access.dart';
 import 'providers/provider_connection_tester.dart';
 import 'providers/image_generation_client.dart';
 import 'providers/provider_usage_client.dart';
@@ -83,6 +84,7 @@ class AppController extends ChangeNotifier {
   bool _agentAutoExecute = false;
   bool _betaUpdatesEnabled = false;
   String? _imageProviderId;
+  String? _lastDashboardServerId;
   double _fontScale = 1.0;
   bool _loading = true;
   String? _loadError;
@@ -94,6 +96,7 @@ class AppController extends ChangeNotifier {
   List<Task> get tasks => List.unmodifiable(_tasks);
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
+  String? get lastDashboardServerId => _lastDashboardServerId;
   double get fontScale => _fontScale;
   String? get imageProviderId => _imageProviderId;
   bool get isLoading => _loading;
@@ -156,6 +159,12 @@ class AppController extends ChangeNotifier {
     _imageProviderId = savedImageProviderId?.isEmpty == true
         ? null
         : savedImageProviderId;
+    final savedDashboardServerId = await _database.readSetting(
+      _lastDashboardServerSetting,
+    );
+    _lastDashboardServerId = savedDashboardServerId?.isEmpty == true
+        ? null
+        : savedDashboardServerId;
     _fontScale =
         (double.tryParse(
                   await _database.readSetting(_fontScaleSetting) ?? '',
@@ -172,7 +181,8 @@ class AppController extends ChangeNotifier {
 
     final recoveredTasks = <Task>[];
     for (final task in storedTasks) {
-      if (task.status == 'running' && !_runningTasks.containsKey(task.id)) {
+      if ((task.status == 'running' || task.status == 'waiting') &&
+          !_runningTasks.containsKey(task.id)) {
         final previous = eventsByTask[task.id] ?? const <TaskEvent>[];
         String? terminalStatus;
         for (final event in previous.reversed) {
@@ -192,7 +202,7 @@ class AppController extends ChangeNotifier {
             sequence: previous.isEmpty ? 1 : previous.last.sequence + 1,
             type: 'task.recovered',
             timestamp: DateTime.now().toUtc(),
-            payload: const {'previousStatus': 'running'},
+            payload: {'previousStatus': task.status},
           );
           await _database.saveEvent(recovery);
           eventsByTask.putIfAbsent(task.id, () => <TaskEvent>[]).add(recovery);
@@ -230,6 +240,7 @@ class AppController extends ChangeNotifier {
     final path =
         _normalizeOptionalValue(localPath) ??
         await ProjectFileStore.defaultProjectPath(id);
+    await _ensureProjectStoragePath(path);
     final project = Project(id: id, name: normalizedName, localPath: path);
     await _projectFiles.ensureRoot(project);
     await _database.saveProject(project);
@@ -248,6 +259,7 @@ class AppController extends ChangeNotifier {
     final normalizedPath = localPath.trim();
     if (normalizedName.isEmpty) throw ArgumentError('项目名称不能为空');
     if (normalizedPath.isEmpty) throw ArgumentError('项目文件夹不能为空');
+    await _ensureProjectStoragePath(normalizedPath);
     final updated = project.copyWith(
       name: normalizedName,
       localPath: normalizedPath,
@@ -372,6 +384,12 @@ class AppController extends ChangeNotifier {
     await _database.writeSetting(_imageProviderSetting, value ?? '');
     _imageProviderId = value == null || value.isEmpty ? null : value;
     _notify();
+  }
+
+  Future<void> setLastDashboardServer(String? serverId) async {
+    final value = serverId?.trim();
+    await _database.writeSetting(_lastDashboardServerSetting, value ?? '');
+    _lastDashboardServerId = value == null || value.isEmpty ? null : value;
   }
 
   Future<void> renameTask(Task task, String title) async {
@@ -634,6 +652,62 @@ class AppController extends ChangeNotifier {
     AiChatClient? client;
     var remoteOperationStarted = false;
     var serviceStarted = false;
+
+    Future<void> markTaskWaiting() async {
+      if (cancellation.isCancelled) return;
+      final current = _tasks.firstWhere((value) => value.id == task.id);
+      if (current.status != 'waiting') {
+        await updateTaskStatus(task.id, 'waiting');
+      }
+    }
+
+    Future<void> restoreTaskAfterWaiting() async {
+      if (cancellation.isCancelled) return;
+      final current = _tasks.firstWhere((value) => value.id == task.id);
+      if (current.status == 'waiting') {
+        await updateTaskStatus(task.id, 'running');
+      }
+    }
+
+    Future<bool> Function(AgentTool, Map<String, Object?>)? waitingConfirm;
+    if (confirm != null) {
+      waitingConfirm = (tool, arguments) async {
+        await markTaskWaiting();
+        try {
+          if (cancellation.isCancelled) return false;
+          return await confirm(tool, arguments);
+        } finally {
+          await restoreTaskAfterWaiting();
+        }
+      };
+    }
+
+    FutureOr<bool> Function(SshHostKey)? waitingHostKey;
+    if (onFirstHostKey != null) {
+      waitingHostKey = (key) async {
+        await markTaskWaiting();
+        try {
+          if (cancellation.isCancelled) return false;
+          return await onFirstHostKey(key);
+        } finally {
+          await restoreTaskAfterWaiting();
+        }
+      };
+    }
+
+    SshUserInfoHandler? waitingUserInfo;
+    if (onUserInfoRequest != null) {
+      waitingUserInfo = (request) async {
+        await markTaskWaiting();
+        try {
+          if (cancellation.isCancelled) return null;
+          return await onUserInfoRequest(request);
+        } finally {
+          await restoreTaskAfterWaiting();
+        }
+      };
+    }
+
     try {
       await appendTaskEvent(
         taskId: task.id,
@@ -680,6 +754,7 @@ class AppController extends ChangeNotifier {
           throw StateError('对话绑定的项目不存在');
         }
         if (project != null) {
+          await _ensureProjectStoragePath(project.localPath);
           await _projectFiles.ensureRoot(project);
           projectTools = ProjectAgentTools(project, _projectFiles);
           tools.addAll(
@@ -697,8 +772,8 @@ class AppController extends ChangeNotifier {
             task.id,
             () => _connectServer(
               server,
-              onFirstHostKey: onFirstHostKey,
-              onUserInfoRequest: onUserInfoRequest,
+              onFirstHostKey: waitingHostKey,
+              onUserInfoRequest: waitingUserInfo,
             ),
           );
           connection = await Future.any<SshConnection>([
@@ -762,7 +837,7 @@ class AppController extends ChangeNotifier {
         initialMessages: initialMessages,
         executionMode: task.executionMode,
         cancellation: cancellation,
-        confirm: confirm,
+        confirm: waitingConfirm,
         onEvent: (type, payload) {
           if (type == 'assistant.delta') {
             final delta = payload['text'];
@@ -1035,7 +1110,7 @@ class AppController extends ChangeNotifier {
       final cached = _projectDirectoryCache[cacheKey];
       if (cached != null) return cached;
     }
-    final request = _projectFiles.list(project, path);
+    final request = _listProjectDirectory(project, path);
     _projectDirectoryLoads[cacheKey] = request;
     try {
       final entries = List<ProjectFileEntry>.unmodifiable(await request);
@@ -1048,6 +1123,14 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<List<ProjectFileEntry>> _listProjectDirectory(
+    Project project,
+    String relativePath,
+  ) async {
+    await _ensureProjectStoragePath(project.localPath);
+    return _projectFiles.list(project, relativePath);
+  }
+
   List<ProjectFileEntry>? cachedProjectDirectory(
     Project project,
     String relativePath,
@@ -1057,10 +1140,12 @@ class AppController extends ChangeNotifier {
   }
 
   Future<String> readProjectFile(Project project, String relativePath) {
-    return _projectFiles.readText(
-      project,
-      _normalizeProjectUiPath(relativePath),
-    );
+    return _readProjectFile(project, _normalizeProjectUiPath(relativePath));
+  }
+
+  Future<String> _readProjectFile(Project project, String relativePath) async {
+    await _ensureProjectStoragePath(project.localPath);
+    return _projectFiles.readText(project, relativePath);
   }
 
   Future<void> writeProjectFile(
@@ -1068,6 +1153,7 @@ class AppController extends ChangeNotifier {
     String relativePath,
     String content,
   ) async {
+    await _ensureProjectStoragePath(project.localPath);
     await _projectFiles.writeText(
       project,
       _normalizeProjectUiPath(relativePath),
@@ -1077,6 +1163,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> createProjectFile(Project project, String relativePath) async {
+    await _ensureProjectStoragePath(project.localPath);
     await _projectFiles.createFile(
       project,
       _normalizeProjectUiPath(relativePath),
@@ -1088,11 +1175,17 @@ class AppController extends ChangeNotifier {
     Project project,
     String relativePath,
   ) async {
+    await _ensureProjectStoragePath(project.localPath);
     await _projectFiles.createDirectory(
       project,
       _normalizeProjectUiPath(relativePath),
     );
     _invalidateProjectDirectoryCache(project.id);
+  }
+
+  Future<void> _ensureProjectStoragePath(String path) async {
+    if (await AndroidStorageAccess.ensureForPath(path)) return;
+    throw StateError('手机共享存储目录没有写入权限，请授予文件访问权限后重试');
   }
 
   String _projectDirectoryCacheKey(Project project, String relativePath) {
@@ -1208,6 +1301,7 @@ class AppController extends ChangeNotifier {
         uptime: '2 days, 4 hours',
         load: '0.18 0.22 0.20',
         cpu: '4 cores',
+        cpuUsage: 5,
         memory: '38% (1.5 / 4 GiB)',
         disk: '12G / 50G (24%)',
         statusScriptInstalled: true,
@@ -1344,6 +1438,9 @@ class AppController extends ChangeNotifier {
       throw StateError('服务器仍被历史任务使用，请先删除相关任务');
     }
     await _database.deleteServer(profile.id);
+    if (_lastDashboardServerId == profile.id) {
+      await setLastDashboardServer(null);
+    }
     if (profile.credentialRef != null) {
       await _credentials.delete(profile.credentialRef!);
     }
@@ -2091,6 +2188,7 @@ class AppController extends ChangeNotifier {
       uptime: values['uptime'] ?? 'unknown',
       load: values['load'] ?? 'unknown',
       cpu: values['cpu'] ?? 'unknown',
+      cpuUsage: int.tryParse(values['cpu_usage']?.trim() ?? ''),
       memory: values['memory'] ?? 'unknown',
       disk: values['disk'] ?? 'unknown',
       statusScriptInstalled: values['script_version'] == '1',
@@ -2180,6 +2278,7 @@ const _agentAutoExecuteSetting = 'agent_auto_execute';
 const _betaUpdatesSetting = 'beta_updates_enabled';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';
+const _lastDashboardServerSetting = 'last_dashboard_server_id';
 
 String _normalizeRemotePath(String value) {
   final path = value.trim();

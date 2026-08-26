@@ -481,6 +481,7 @@ class ServerDashboard {
     required this.memory,
     required this.disk,
     required this.statusScriptInstalled,
+    this.cpuUsage,
     this.disks = const [],
     this.network,
     this.processCount,
@@ -492,6 +493,7 @@ class ServerDashboard {
   final String uptime;
   final String load;
   final String cpu;
+  final int? cpuUsage;
   final String memory;
   final String disk;
   final bool statusScriptInstalled;

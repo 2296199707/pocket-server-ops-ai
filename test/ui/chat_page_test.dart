@@ -24,9 +24,13 @@ void main() {
     expect(find.text('你好'), findsWidgets);
     expect(find.text('这是预览模式的普通对话回复。'), findsOneWidget);
 
-    await tester.tap(find.text('demo-model'));
+    await tester.tap(find.text('demo-model default'));
     await tester.pumpAndSettle();
-    expect(find.text('切换 AI 模型'), findsOneWidget);
+    expect(find.text('模型与推理强度'), findsOneWidget);
+    expect(find.text('demo-coder'), findsNothing);
+
+    await tester.tap(find.text('AI 模型'));
+    await tester.pumpAndSettle();
     expect(find.text('demo-coder'), findsOneWidget);
 
     controller.dispose();

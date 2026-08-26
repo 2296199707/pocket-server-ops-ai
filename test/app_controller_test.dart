@@ -411,6 +411,7 @@ void main() {
     await controller.installServerStatusScript(controller.servers.single);
 
     expect(dashboard.hostname, 'test-server');
+    expect(dashboard.cpuUsage, 5);
     expect(dashboard.statusScriptInstalled, isTrue);
     expect(entries.single.name, 'README.md');
     expect(cachedEntries.single.name, 'README.md');
@@ -504,6 +505,7 @@ class _FakeConnection implements SshConnection {
           'uptime=1 hour\n'
           'load=0.1 0.2 0.3\n'
           'cpu=2 cores\n'
+          'cpu_usage=5\n'
           'memory=20%\n'
           'disk=2G / 10G (20%)\n',
       stderr: '',

@@ -118,13 +118,6 @@ class _HomeShellState extends State<HomeShell> {
                     : '$_runningAgentCount 个 Agent 正在运行',
               ),
             ),
-            ListTile(
-              leading: const Icon(Icons.add_comment_outlined),
-              title: const Text('新对话'),
-              selected: _selectedIndex == 0 && _activeTaskId == null,
-              onTap: _openNewConversationPicker,
-            ),
-            const Divider(height: 1),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
               child: Row(
@@ -155,19 +148,32 @@ class _HomeShellState extends State<HomeShell> {
                 ],
               ),
             ),
+            ListTile(
+              leading: const Icon(Icons.add_comment_outlined),
+              title: const Text('新对话'),
+              selected: _selectedIndex == 0 && _activeTaskId == null,
+              onTap: _openNewConversationPicker,
+            ),
+            const Divider(height: 1),
             Expanded(
               child: ListView(
                 padding: EdgeInsets.zero,
                 children: [
-                  _drawerSectionTitle('其他对话'),
-                  if (otherTasks.isEmpty)
-                    const ListTile(
-                      dense: true,
-                      leading: Icon(Icons.chat_bubble_outline),
-                      title: Text('暂无对话'),
-                    )
-                  else
-                    for (final task in otherTasks) _taskTile(context, task),
+                  ExpansionTile(
+                    key: const PageStorageKey<String>('other-conversations'),
+                    leading: const Icon(Icons.chat_bubble_outline),
+                    title: const Text('其他对话'),
+                    children: [
+                      if (otherTasks.isEmpty)
+                        const ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.only(left: 56),
+                          title: Text('暂无对话'),
+                        )
+                      else
+                        for (final task in otherTasks) _taskTile(context, task),
+                    ],
+                  ),
                   _drawerSectionTitle('项目'),
                   if (widget.controller.projects.isEmpty)
                     const ListTile(
@@ -329,6 +335,15 @@ class _HomeShellState extends State<HomeShell> {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('请先在“服务器添加”中添加服务器')));
       return;
+    }
+    final lastServerId = widget.controller.lastDashboardServerId;
+    if (lastServerId != null) {
+      for (final server in servers) {
+        if (server.id == lastServerId) {
+          _openDashboard(context, server);
+          return;
+        }
+      }
     }
     final server = servers.length == 1
         ? servers.single

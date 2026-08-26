@@ -33,6 +33,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   void initState() {
     super.initState();
     _server = widget.server;
+    unawaited(widget.controller.setLastDashboardServer(_server.id));
     unawaited(_load());
   }
 
@@ -42,6 +43,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
     if (widget.server.id != oldWidget.server.id) {
       _server = widget.server;
       _dashboard = null;
+      unawaited(widget.controller.setLastDashboardServer(_server.id));
       unawaited(_load());
     }
   }
@@ -150,6 +152,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
       _dashboard = null;
       _error = null;
     });
+    unawaited(widget.controller.setLastDashboardServer(selected.id));
     unawaited(_load());
   }
 

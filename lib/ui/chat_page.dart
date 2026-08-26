@@ -12,6 +12,7 @@ import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
 import 'file_manager_page.dart';
 import 'project_file_manager_page.dart';
+import 'server_dashboard_page.dart';
 import 'terminal_page.dart';
 
 class ChatPage extends StatefulWidget {
@@ -134,6 +135,7 @@ class _ChatPageState extends State<ChatPage> {
       });
     }
     final project = widget.controller.projectFor(task?.projectId ?? _projectId);
+    final boundServer = task == null ? null : _serverFor(task.serverId);
     if (_lastEventCount != events.length) {
       _lastEventCount = events.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -154,8 +156,6 @@ class _ChatPageState extends State<ChatPage> {
           onEdit: running ? null : _editContext,
           onShowContext: () => _showContextStatus(events),
         ),
-        if (task != null && task.status != 'queued')
-          _TaskStatusBar(task: task, running: running),
         if (task?.status == 'unknown')
           const _Notice(
             icon: Icons.help_outline,
@@ -202,6 +202,7 @@ class _ChatPageState extends State<ChatPage> {
                   },
                 ),
         ),
+        if (task != null) _TaskStatusBar(task: task, events: events),
         const Divider(height: 1),
         SafeArea(
           top: false,
@@ -329,6 +330,13 @@ class _ChatPageState extends State<ChatPage> {
                     ],
                   ),
                 ),
+                if (boundServer != null && task != null)
+                  _ServerStatusSummary(
+                    controller: widget.controller,
+                    server: boundServer,
+                    onOpenDashboard: () => _openServerDashboard(boundServer),
+                    onFirstHostKey: (key) => widget.onConfirmHostKey(task, key),
+                  ),
               ],
             ),
           ),
@@ -479,6 +487,15 @@ class _ChatPageState extends State<ChatPage> {
           controller: widget.controller,
           project: project,
         ),
+      ),
+    );
+  }
+
+  void _openServerDashboard(ServerProfile server) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            ServerDashboardPage(controller: widget.controller, server: server),
       ),
     );
   }
@@ -759,25 +776,35 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                   ),
                   const Divider(),
-                  const ListTile(
-                    contentPadding: EdgeInsets.zero,
+                  ExpansionTile(
+                    initiallyExpanded: false,
+                    tilePadding: EdgeInsets.zero,
+                    childrenPadding: EdgeInsets.zero,
                     dense: true,
-                    title: Text('AI 模型'),
-                  ),
-                  for (final model in models)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        model == selectedModel
-                            ? Icons.radio_button_checked
-                            : Icons.radio_button_unchecked,
-                      ),
-                      title: Text(model),
-                      subtitle: model == provider.model
-                          ? const Text('供应商默认模型')
-                          : null,
-                      onTap: () => setSheetState(() => selectedModel = model),
+                    title: const Text('AI 模型'),
+                    subtitle: Text(
+                      _shortModelName(selectedModel),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
+                    children: [
+                      for (final model in models)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(
+                            model == selectedModel
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_unchecked,
+                          ),
+                          title: Text(model),
+                          subtitle: model == provider.model
+                              ? const Text('供应商默认模型')
+                              : null,
+                          onTap: () =>
+                              setSheetState(() => selectedModel = model),
+                        ),
+                    ],
+                  ),
                   const Divider(),
                   const ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -1169,31 +1196,37 @@ class _ContextBar extends StatelessWidget {
                   ],
                 ),
               ),
-              if (provider != null)
-                Flexible(
-                  child: _ContextPill(
-                    icon: Icons.hub_outlined,
-                    label: provider!.name,
-                    onTap: onProviderTap,
+              const SizedBox(width: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 148),
+                    child: provider != null
+                        ? _ContextPill(
+                            icon: Icons.hub_outlined,
+                            label: provider!.name,
+                            onTap: onProviderTap,
+                          )
+                        : _ContextPill(
+                            icon: Icons.hub_outlined,
+                            label: '配置供应商',
+                            onTap: onProviderTap,
+                          ),
                   ),
-                )
-              else
-                _ContextPill(
-                  icon: Icons.hub_outlined,
-                  label: '配置供应商',
-                  onTap: onProviderTap,
-                ),
-              IconButton(
-                tooltip: '上下文状态',
-                onPressed: onShowContext,
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.data_usage_outlined, size: 19),
-              ),
-              IconButton(
-                tooltip: '对话设置',
-                onPressed: onEdit,
-                visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.tune_outlined, size: 19),
+                  IconButton(
+                    tooltip: '上下文状态',
+                    onPressed: onShowContext,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.data_usage_outlined, size: 19),
+                  ),
+                  IconButton(
+                    tooltip: '对话设置',
+                    onPressed: onEdit,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.tune_outlined, size: 19),
+                  ),
+                ],
               ),
             ],
           ),
@@ -1257,11 +1290,13 @@ class _ContextPill extends StatelessWidget {
         children: [
           Icon(icon, size: 15),
           const SizedBox(width: 4),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelMedium,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
           ),
           if (onTap != null) ...[
             const SizedBox(width: 2),
@@ -1654,55 +1689,426 @@ class _Notice extends StatelessWidget {
   }
 }
 
-class _TaskStatusBar extends StatelessWidget {
-  const _TaskStatusBar({required this.task, required this.running});
+class _ServerStatusSummary extends StatefulWidget {
+  const _ServerStatusSummary({
+    required this.controller,
+    required this.server,
+    required this.onOpenDashboard,
+    required this.onFirstHostKey,
+  });
 
-  final Task task;
-  final bool running;
+  final AppController controller;
+  final ServerProfile server;
+  final VoidCallback onOpenDashboard;
+  final FutureOr<bool> Function(SshHostKey key) onFirstHostKey;
+
+  @override
+  State<_ServerStatusSummary> createState() => _ServerStatusSummaryState();
+}
+
+class _ServerStatusSummaryState extends State<_ServerStatusSummary> {
+  static const _refreshInterval = Duration(seconds: 30);
+
+  ServerDashboard? _dashboard;
+  Timer? _refreshTimer;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshTimer = Timer.periodic(_refreshInterval, (_) => _load());
+    unawaited(_load());
+  }
+
+  @override
+  void didUpdateWidget(covariant _ServerStatusSummary oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.server.id != oldWidget.server.id) {
+      _dashboard = null;
+      unawaited(_load());
+    }
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    if (_loading) return;
+    _loading = true;
+    try {
+      final dashboard = await widget.controller.loadServerDashboard(
+        widget.server,
+        onFirstHostKey: widget.onFirstHostKey,
+      );
+      if (mounted) setState(() => _dashboard = dashboard);
+    } catch (_) {
+      // The full dashboard remains the place to inspect a connection error.
+    } finally {
+      _loading = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final (icon, label, color) = switch (task.status) {
-      'completed' => (Icons.check_circle_outline, '已完成', Colors.green),
-      'running' => (Icons.sync_rounded, '运行中', colors.primary),
-      'stopping' => (Icons.stop_circle_outlined, '正在停止', colors.outline),
-      'cancelled' ||
-      'canceled' => (Icons.stop_circle_outlined, '已取消', colors.outline),
-      'interrupted' => (Icons.pause_circle_outline, '已中断', colors.error),
-      'unknown' => (Icons.help_outline_rounded, '状态待核实', colors.error),
-      'failed' => (Icons.error_outline_rounded, '执行失败', colors.error),
-      'queued' => (Icons.schedule_outlined, '等待执行', colors.outline),
-      _ => (Icons.help_outline_rounded, '状态待核实', colors.error),
-    };
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 2, 12, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.10),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 17, color: color),
-            const SizedBox(width: 7),
-            Text(
-              running && task.status == 'running' ? '运行中' : label,
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w600,
-                fontSize: 12,
+    final dashboard = _dashboard;
+    final cpu = dashboard?.cpuUsage;
+    final memory = dashboard == null ? null : _firstPercent(dashboard.memory);
+    final systemDisk = dashboard == null ? null : _diskPercent(dashboard, '/');
+    final dataDisk = dashboard == null ? null : _diskPercent(dashboard, '/www');
+    final summary =
+        'C${_percent(cpu)}  内${_percent(memory)}  '
+        '盘${_percent(systemDisk)}  数${_percent(dataDisk)}';
+
+    return Semantics(
+      button: true,
+      label:
+          '服务器状态：CPU ${_percent(cpu)}，内存 ${_percent(memory)}，'
+          '系统盘 ${_percent(systemDisk)}，数据盘 ${_percent(dataDisk)}',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: widget.onOpenDashboard,
+          borderRadius: BorderRadius.circular(4),
+          child: SizedBox(
+            width: double.infinity,
+            height: 20,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                summary,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontSize: 9,
+                  height: 1,
+                  fontFamily: 'monospace',
+                ),
               ),
             ),
-          ],
+          ),
         ),
       ),
     );
   }
+}
+
+int? _diskPercent(ServerDashboard dashboard, String mount) {
+  for (final disk in dashboard.disks) {
+    if (disk.mount == mount) return disk.usedPercent;
+  }
+  if (mount == '/') return _firstPercent(dashboard.disk);
+  return null;
+}
+
+int? _firstPercent(String value) {
+  final match = RegExp(r'(\d{1,3})%').firstMatch(value);
+  return match == null ? null : int.tryParse(match.group(1)!);
+}
+
+String _percent(int? value) => value == null ? '—' : '$value%';
+
+class _TaskStatusBar extends StatefulWidget {
+  const _TaskStatusBar({required this.task, required this.events});
+
+  final Task task;
+  final List<TaskEvent> events;
+
+  @override
+  State<_TaskStatusBar> createState() => _TaskStatusBarState();
+}
+
+class _TaskStatusBarState extends State<_TaskStatusBar> {
+  Timer? _clock;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncClock();
+  }
+
+  @override
+  void didUpdateWidget(covariant _TaskStatusBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_normalizedTaskStatus(oldWidget.task.status) !=
+        _normalizedTaskStatus(widget.task.status)) {
+      _syncClock();
+    }
+  }
+
+  void _syncClock() {
+    _clock?.cancel();
+    if (_activeTaskStatus(_normalizedTaskStatus(widget.task.status))) {
+      _clock = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _clock?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final presentation = _taskStatusPresentation(widget.task, widget.events);
+    final colors = Theme.of(context).colorScheme;
+    final color = _taskStatusColor(presentation.status, colors);
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final maxWidth = screenWidth - 24 > 0 ? screenWidth - 24 : screenWidth;
+    final maxDetailWidth = (screenWidth * 0.34).clamp(80.0, 130.0).toDouble();
+    final borderColor = color.withValues(alpha: 0.35);
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxWidth),
+          child: Semantics(
+            container: true,
+            liveRegion: true,
+            label: presentation.accessibleLabel,
+            child: Container(
+              constraints: const BoxConstraints(minHeight: 22),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.10),
+                border: Border.all(color: borderColor),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 5,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    presentation.label,
+                    style: TextStyle(
+                      color: colors.onSurface,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 10,
+                      height: 1,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: maxDetailWidth),
+                    child: Text(
+                      presentation.detail,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: colors.onSurfaceVariant,
+                        fontSize: 10,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    presentation.time,
+                    style: TextStyle(
+                      color: colors.onSurfaceVariant,
+                      fontFamily: 'monospace',
+                      fontSize: 9,
+                      height: 1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TaskStatusPresentation {
+  const _TaskStatusPresentation({
+    required this.status,
+    required this.label,
+    required this.detail,
+    required this.time,
+  });
+
+  final String status;
+  final String label;
+  final String detail;
+  final String time;
+
+  String get accessibleLabel => '$label，$detail';
+}
+
+_TaskStatusPresentation _taskStatusPresentation(
+  Task task,
+  List<TaskEvent> events,
+) {
+  final status = _normalizedTaskStatus(task.status);
+  final detail = _taskStatusDetail(status, events);
+  return _TaskStatusPresentation(
+    status: status,
+    label: _taskStatusLabel(status),
+    detail: detail,
+    time: _taskStatusTime(task, status, events),
+  );
+}
+
+String _normalizedTaskStatus(String status) {
+  return switch (status) {
+    'unknown' => 'uncertain',
+    'cancelled' || 'canceled' => 'interrupted',
+    _ => status,
+  };
+}
+
+bool _activeTaskStatus(String status) => const {
+  'queued',
+  'running',
+  'waiting',
+  'stopping',
+  'uncertain',
+}.contains(status);
+
+String _taskStatusLabel(String status) {
+  return switch (status) {
+    'queued' => '等待执行',
+    'running' => '执行中',
+    'waiting' => '等待确认',
+    'stopping' => '正在终止任务',
+    'uncertain' => '确认任务状态',
+    'completed' => '已完成',
+    'failed' => '执行失败',
+    'interrupted' => '已终止',
+    _ => '状态延迟',
+  };
+}
+
+String _taskStatusDetail(String status, List<TaskEvent> events) {
+  switch (status) {
+    case 'queued':
+      return '等待执行';
+    case 'waiting':
+      return '等待确认';
+    case 'stopping':
+      return '发送终止请求';
+    case 'uncertain':
+      return '核对是否已送达';
+    case 'completed':
+      return '执行结束';
+    case 'failed':
+      return '执行发生错误';
+    case 'interrupted':
+      return '已停止执行';
+  }
+
+  for (final event in events.reversed) {
+    switch (event.type) {
+      case 'assistant.delta':
+        return '生成回复';
+      case 'tool.started':
+        return _toolStatusPhase(event.payload['name']);
+      case 'task.started':
+      case 'tool.completed':
+      case 'tool.failed':
+        return '处理中';
+    }
+  }
+  return '处理中';
+}
+
+String _toolStatusPhase(Object? value) {
+  final name = value is String ? value : '';
+  if (name == 'image.generate') return '生成图片';
+  if (name.startsWith('terminal.')) return '执行命令';
+  if (name == 'file.write' ||
+      name == 'file.replace' ||
+      name == 'project.write' ||
+      name == 'project.replace' ||
+      name == 'server.download_to_project') {
+    return '修改文件';
+  }
+  return '调用工具';
+}
+
+String _taskStatusTime(Task task, String status, List<TaskEvent> events) {
+  final startedAt =
+      _firstTaskEventTime(events, 'task.started') ?? task.createdAt;
+  if (status == 'queued') {
+    return '已排队 ${_formatTaskDuration(DateTime.now().difference(task.createdAt))}';
+  }
+  if (_activeTaskStatus(status)) {
+    return '已运行 ${_formatTaskDuration(DateTime.now().difference(startedAt))}';
+  }
+
+  final finishedAt = _lastTerminalTaskEventTime(events) ?? task.updatedAt;
+  final prefix = switch (status) {
+    'completed' => '完成于',
+    'failed' => '失败于',
+    'interrupted' => '终止于',
+    _ => '更新于',
+  };
+  final duration = finishedAt.isAfter(startedAt)
+      ? ' · 用时 ${_formatTaskDuration(finishedAt.difference(startedAt))}'
+      : '';
+  return '$prefix ${_formatTaskClock(finishedAt)}$duration';
+}
+
+DateTime? _firstTaskEventTime(List<TaskEvent> events, String type) {
+  for (final event in events) {
+    if (event.type == type) return event.timestamp;
+  }
+  return null;
+}
+
+DateTime? _lastTerminalTaskEventTime(List<TaskEvent> events) {
+  for (final event in events.reversed) {
+    if (event.type == 'task.completed' ||
+        event.type == 'task.failed' ||
+        event.type == 'task.cancelled' ||
+        event.type == 'task.unknown') {
+      return event.timestamp;
+    }
+  }
+  return null;
+}
+
+String _formatTaskDuration(Duration duration) {
+  final seconds = duration.inSeconds < 0 ? 0 : duration.inSeconds;
+  if (seconds < 60) return '$seconds 秒';
+  final minutes = seconds ~/ 60;
+  if (minutes < 60) return '$minutes 分 ${seconds % 60} 秒';
+  final hours = minutes ~/ 60;
+  return '$hours 小时 ${minutes % 60} 分';
+}
+
+String _formatTaskClock(DateTime timestamp) {
+  final local = timestamp.toLocal();
+  String twoDigits(int value) => value.toString().padLeft(2, '0');
+  return '${twoDigits(local.hour)}:${twoDigits(local.minute)}:${twoDigits(local.second)}';
+}
+
+Color _taskStatusColor(String status, ColorScheme colors) {
+  return switch (status) {
+    'running' || 'stopping' => colors.primary,
+    'queued' || 'waiting' || 'uncertain' => colors.tertiary,
+    'completed' => Colors.green,
+    'failed' || 'interrupted' => colors.error,
+    _ => colors.outline,
+  };
 }
 
 class _EventPresentation {
@@ -1813,6 +2219,51 @@ class _MessageBubble extends StatelessWidget {
             selectable: true,
             styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
           );
+    final bubble = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 680),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        decoration: BoxDecoration(
+          color: isUser
+              ? colors.primaryContainer
+              : colors.surfaceContainerHighest,
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(18),
+            topRight: const Radius.circular(18),
+            bottomLeft: Radius.circular(isUser ? 18 : 5),
+            bottomRight: Radius.circular(isUser ? 5 : 18),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (attachments.isNotEmpty)
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final attachment in attachments)
+                    Chip(
+                      avatar: Icon(
+                        attachment.isImage
+                            ? Icons.image_outlined
+                            : Icons.insert_drive_file_outlined,
+                        size: 16,
+                      ),
+                      label: Text(
+                        attachment.name,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+              ),
+            if (attachments.isNotEmpty && text.trim().isNotEmpty)
+              const SizedBox(height: 6),
+            if (text.trim().isNotEmpty) content,
+          ],
+        ),
+      ),
+    );
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Align(
@@ -1820,7 +2271,7 @@ class _MessageBubble extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 760),
           child: Row(
-            mainAxisSize: MainAxisSize.max,
+            mainAxisSize: isUser ? MainAxisSize.min : MainAxisSize.max,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (!isUser) ...[
@@ -1833,54 +2284,10 @@ class _MessageBubble extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-              Flexible(
-                fit: FlexFit.loose,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 11,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isUser
-                        ? colors.primaryContainer
-                        : colors.surfaceContainerHighest,
-                    borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(18),
-                      topRight: const Radius.circular(18),
-                      bottomLeft: Radius.circular(isUser ? 18 : 5),
-                      bottomRight: Radius.circular(isUser ? 5 : 18),
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (attachments.isNotEmpty)
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: [
-                            for (final attachment in attachments)
-                              Chip(
-                                avatar: Icon(
-                                  attachment.isImage
-                                      ? Icons.image_outlined
-                                      : Icons.insert_drive_file_outlined,
-                                  size: 16,
-                                ),
-                                label: Text(
-                                  attachment.name,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                          ],
-                        ),
-                      if (attachments.isNotEmpty && text.trim().isNotEmpty)
-                        const SizedBox(height: 6),
-                      if (text.trim().isNotEmpty) content,
-                    ],
-                  ),
-                ),
-              ),
+              if (isUser)
+                bubble
+              else
+                Flexible(fit: FlexFit.loose, child: bubble),
               if (isUser) ...[
                 const SizedBox(width: 8),
                 _MessageAvatar(
@@ -1963,11 +2370,17 @@ class _ToolEventTile extends StatelessWidget {
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
           dense: true,
-          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-          leading: Icon(icon, color: iconColor),
-          title: Text('$name', maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text(status),
+          minTileHeight: 52,
+          visualDensity: const VisualDensity(vertical: -3),
+          tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          leading: Icon(icon, color: iconColor, size: 23),
+          title: Text(
+            '$name · $status',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
           children: [
             if (arguments != null)
               _ToolDetail(title: '参数', value: _prettyValue(arguments)),
