@@ -14,6 +14,15 @@ abstract class AiChatClient {
   });
 }
 
+abstract class AiCompactionClient {
+  Future<List<Map<String, Object?>>> compact({
+    required List<AiMessage> messages,
+    required String instructions,
+    required List<AiToolDefinition> tools,
+    Future<void>? cancellation,
+  });
+}
+
 class AiRequestCancelled implements Exception {
   const AiRequestCancelled();
 }
@@ -45,18 +54,16 @@ class AiResponseInvalid implements Exception {
   String toString() => message;
 }
 
-class _ProviderHttpError implements Exception {
-  const _ProviderHttpError(this.statusCode, this.body);
-
-  final int statusCode;
-  final String body;
+class _ProviderHttpError extends AiProviderHttpException {
+  const _ProviderHttpError(int statusCode, String body)
+    : super(protocol: 'Responses', statusCode: statusCode, body: body);
 
   @override
   String toString() =>
       'AI provider returned HTTP $statusCode: ${_limitProviderError(body)}';
 }
 
-class OpenAiCompatibleClient implements AiChatClient {
+class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   factory OpenAiCompatibleClient({
     required String baseUrl,
     required String apiKey,
@@ -64,17 +71,9 @@ class OpenAiCompatibleClient implements AiChatClient {
     String reasoningEffort = 'default',
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
-    int? compactThreshold,
     int? maxResponseBytes,
     List<String>? inputModalities,
   }) {
-    if (compactThreshold != null && compactThreshold <= 0) {
-      throw ArgumentError.value(
-        compactThreshold,
-        'compactThreshold',
-        'must be greater than zero',
-      );
-    }
     return OpenAiCompatibleClient._(
       baseUrl: baseUrl.trim().replaceFirst(RegExp(r'/+$'), ''),
       apiKey: apiKey,
@@ -82,7 +81,6 @@ class OpenAiCompatibleClient implements AiChatClient {
       reasoningEffort: reasoningEffort,
       timeout: timeout,
       client: client ?? http.Client(),
-      compactThreshold: compactThreshold,
       maxResponseBytes: maxResponseBytes,
       inputModalities: inputModalities,
     );
@@ -95,7 +93,6 @@ class OpenAiCompatibleClient implements AiChatClient {
     required this.reasoningEffort,
     required this.timeout,
     required this._client,
-    required this.compactThreshold,
     required this.maxResponseBytes,
     required this.inputModalities,
   });
@@ -106,9 +103,44 @@ class OpenAiCompatibleClient implements AiChatClient {
   final String reasoningEffort;
   final Duration timeout;
   final http.Client _client;
-  final int? compactThreshold;
   final int? maxResponseBytes;
   final List<String>? inputModalities;
+
+  /// Estimates the model-visible items appended after the latest assistant
+  /// output. Codex adds this tail to the latest reported usage because local
+  /// user/tool items are not included in that response's usage snapshot.
+  ///
+  /// This is intentionally the same coarse JSON-byte heuristic used by
+  /// Codex's history estimator: serialized item bytes divided by four,
+  /// rounded up. It is only used to decide whether a Responses compaction is
+  /// due; provider-reported usage remains authoritative when available.
+  static int estimateResponsesTailTokenCount(
+    List<AiMessage> messages, {
+    List<String>? inputModalities,
+  }) {
+    var lastAssistantIndex = -1;
+    for (var index = 0; index < messages.length; index++) {
+      if (messages[index].role == 'assistant') lastAssistantIndex = index;
+    }
+    if (lastAssistantIndex < 0 || lastAssistantIndex + 1 >= messages.length) {
+      return 0;
+    }
+
+    final supportsImages = _supportsModality(inputModalities, 'image');
+    final supportsAudio = _supportsModality(inputModalities, 'audio');
+    var total = 0;
+    for (final message in messages.skip(lastAssistantIndex + 1)) {
+      for (final item in _responsesInputItemsForMessage(
+        message,
+        supportsImages: supportsImages,
+        supportsAudio: supportsAudio,
+      )) {
+        final bytes = utf8.encode(jsonEncode(item)).length;
+        total += (bytes + 3) ~/ 4;
+      }
+    }
+    return total;
+  }
 
   @override
   Future<AiMessage> complete({
@@ -148,11 +180,6 @@ class OpenAiCompatibleClient implements AiChatClient {
       // transcript on the phone while the provider performs compaction.
       'store': false,
     };
-    if (compactThreshold != null) {
-      requestBody['context_management'] = [
-        {'type': 'compaction', 'compact_threshold': compactThreshold},
-      ];
-    }
     if (tools.isNotEmpty) {
       requestBody['tools'] = _responsesTools(tools);
     }
@@ -166,6 +193,86 @@ class OpenAiCompatibleClient implements AiChatClient {
       onContentDelta: onContentDelta,
       cancellation: cancellation,
     );
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> compact({
+    required List<AiMessage> messages,
+    required String instructions,
+    required List<AiToolDefinition> tools,
+    Future<void>? cancellation,
+  }) async {
+    final request = http.Request(
+      'POST',
+      Uri.parse('$baseUrl/responses/compact'),
+    );
+    request.headers['Accept'] = 'application/json';
+    request.headers['Content-Type'] = 'application/json';
+    if (_apiKey.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $_apiKey';
+    }
+
+    // Codex sends base instructions separately to /responses/compact. The
+    // system message is therefore excluded from the stateless input array.
+    final requestBody = <String, Object?>{
+      'model': model,
+      'input': _responsesInput([
+        for (final message in messages)
+          if (message.role != 'system') message,
+      ], inputModalities: inputModalities),
+      if (instructions.isNotEmpty) 'instructions': instructions,
+      'parallel_tool_calls': true,
+    };
+    if (tools.isNotEmpty) {
+      requestBody['tools'] = _responsesTools(tools);
+    }
+    if (reasoningEffort != 'default') {
+      requestBody['reasoning'] = {'effort': reasoningEffort};
+    }
+    request.body = jsonEncode(requestBody);
+
+    final response = await _awaitCancellation(
+      _client.send(request).timeout(timeout),
+      cancellation,
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final body = await _awaitCancellation(
+        _readLimitedText(
+          response.stream,
+          maxBytes: _maxProviderErrorBytes,
+        ).timeout(timeout),
+        cancellation,
+      );
+      throw _ProviderHttpError(
+        response.statusCode,
+        _redactProviderSecrets(body, _apiKey),
+      );
+    }
+    final body = await _awaitCancellation(
+      _readLimitedText(
+        response.stream,
+        maxBytes: maxResponseBytes,
+      ).timeout(timeout),
+      cancellation,
+    );
+    final decoded = jsonDecode(body);
+    if (decoded is! Map || decoded['output'] is! List) {
+      throw const AiResponseInvalid(
+        'Responses compact response is missing output',
+      );
+    }
+    final output = decoded['output'] as List;
+    final outputItems = <Map<String, Object?>>[];
+    for (var index = 0; index < output.length; index++) {
+      final item = output[index];
+      if (item is! Map) {
+        throw AiResponseInvalid(
+          'Responses compact output item at index $index is not an object',
+        );
+      }
+      outputItems.add(Map<String, Object?>.from(item));
+    }
+    return outputItems;
   }
 
   Future<AiMessage> _send(
@@ -249,7 +356,14 @@ class OpenAiCompatibleClient implements AiChatClient {
         streamDone = true;
         return;
       }
-      final decoded = jsonDecode(data);
+      Object? decoded;
+      try {
+        decoded = jsonDecode(data);
+      } on FormatException {
+        // Codex ignores an invalid event and continues reading the stream so a
+        // later valid terminal event can still finish the request.
+        return;
+      }
       if (decoded is! Map) return;
       final decodedMap = Map<String, Object?>.from(decoded);
       if (decodedMap['error'] != null && decodedMap['type'] == 'error') {
@@ -328,9 +442,20 @@ class OpenAiCompatibleClient implements AiChatClient {
           type == 'response.cancelled') {
         responseTerminal = true;
         final rawResponse = decodedMap['response'];
-        final responseMap = rawResponse is Map
-            ? Map<String, Object?>.from(rawResponse)
-            : const <String, Object?>{};
+        if (rawResponse is! Map) {
+          throw AiResponseInvalid(
+            'AI response terminal event $type is missing response',
+          );
+        }
+        final responseMap = Map<String, Object?>.from(rawResponse);
+        if (type == 'response.completed') {
+          final responseId = responseMap['id'];
+          if (responseId is! String || responseId.isEmpty) {
+            throw const AiResponseInvalid(
+              'AI response.completed is missing response.id',
+            );
+          }
+        }
         responseStatus = responseMap['status'] is String
             ? responseMap['status'] as String
             : type == 'response.completed'
@@ -453,82 +578,94 @@ class OpenAiCompatibleClient implements AiChatClient {
     final supportsImages = _supportsModality(inputModalities, 'image');
     final supportsAudio = _supportsModality(inputModalities, 'audio');
     for (final message in messages) {
-      if (message.role == 'tool') {
-        final callId = message.toolCallId;
-        if (callId == null || callId.isEmpty) {
-          throw const AiResponseInvalid(
-            'AI tool result is missing the real call_id',
-          );
-        }
-        input.add({
+      input.addAll(
+        _responsesInputItemsForMessage(
+          message,
+          supportsImages: supportsImages,
+          supportsAudio: supportsAudio,
+        ),
+      );
+    }
+    return _normalizeResponsesInput(input);
+  }
+
+  static List<Map<String, Object?>> _responsesInputItemsForMessage(
+    AiMessage message, {
+    required bool supportsImages,
+    required bool supportsAudio,
+  }) {
+    if (message.role == 'tool') {
+      final callId = message.toolCallId;
+      if (callId == null || callId.isEmpty) {
+        throw const AiResponseInvalid(
+          'AI tool result is missing the real call_id',
+        );
+      }
+      return [
+        {
           'type': 'function_call_output',
           'call_id': callId,
           'output': message.content ?? '',
-        });
-        continue;
-      }
-      if (message.responsesOutputItems.isNotEmpty) {
-        // The Responses API requires the provider's output items to be
-        // replayed verbatim. This includes reasoning and compaction items.
-        _validateResponsesOutputItems(message.responsesOutputItems);
-        input.addAll(message.responsesOutputItems);
-        continue;
-      }
-      final text = message.content;
-      final content = <Map<String, Object?>>[];
-      if (text != null && text.isNotEmpty) {
-        content.add({
-          'type': message.role == 'assistant' ? 'output_text' : 'input_text',
-          'text': text,
-        });
-      }
-      for (final attachment in message.attachments) {
-        if (attachment.isImage) {
-          if (supportsImages) {
-            content.add({
-              'type': 'input_image',
-              'image_url': attachment.dataUrl,
-            });
-          } else {
-            content.add({
-              'type': 'input_text',
-              'text':
-                  '[Image omitted: this model does not support image input.]',
-            });
-          }
-        } else if (attachment.mimeType.toLowerCase().startsWith('audio/') &&
-            !supportsAudio) {
-          content.add({
-            'type': 'input_text',
-            'text': '[Audio omitted: this model does not support audio input.]',
-          });
+        },
+      ];
+    }
+    if (message.responsesOutputItems.isNotEmpty) {
+      // The Responses API requires the provider's output items to be
+      // replayed verbatim. This includes reasoning and compaction items.
+      _validateResponsesOutputItems(message.responsesOutputItems);
+      return List<Map<String, Object?>>.from(message.responsesOutputItems);
+    }
+    final input = <Map<String, Object?>>[];
+    final text = message.content;
+    final content = <Map<String, Object?>>[];
+    if (text != null && text.isNotEmpty) {
+      content.add({
+        'type': message.role == 'assistant' ? 'output_text' : 'input_text',
+        'text': text,
+      });
+    }
+    for (final attachment in message.attachments) {
+      if (attachment.isImage) {
+        if (supportsImages) {
+          content.add({'type': 'input_image', 'image_url': attachment.dataUrl});
         } else {
           content.add({
-            'type': 'input_file',
-            'filename': attachment.name,
-            'file_data': attachment.dataUrl,
+            'type': 'input_text',
+            'text': '[Image omitted: this model does not support image input.]',
           });
         }
-      }
-      if (content.isNotEmpty) {
-        input.add({'role': message.role, 'content': content});
-      }
-      for (final call in message.toolCalls) {
-        final callId = call.callId;
-        if (callId == null || callId.isEmpty) {
-          throw const AiResponseInvalid(
-            'AI function call history is missing the real call_id',
-          );
-        }
-        input.add({
-          'type': 'function_call',
-          'call_id': callId,
-          'name': providerToolName(call.name),
-          'arguments': call.arguments,
+      } else if (attachment.mimeType.toLowerCase().startsWith('audio/') &&
+          !supportsAudio) {
+        content.add({
+          'type': 'input_text',
+          'text': '[Audio omitted: this model does not support audio input.]',
+        });
+      } else {
+        content.add({
+          'type': 'input_file',
+          'filename': attachment.name,
+          'file_data': attachment.dataUrl,
         });
       }
     }
-    return _normalizeResponsesInput(input);
+    if (content.isNotEmpty) {
+      input.add({'role': message.role, 'content': content});
+    }
+    for (final call in message.toolCalls) {
+      final callId = call.callId;
+      if (callId == null || callId.isEmpty) {
+        throw const AiResponseInvalid(
+          'AI function call history is missing the real call_id',
+        );
+      }
+      input.add({
+        'type': 'function_call',
+        'call_id': callId,
+        'name': providerToolName(call.name),
+        'arguments': call.arguments,
+      });
+    }
+    return input;
   }
 
   static bool _supportsModality(List<String>? modalities, String modality) {

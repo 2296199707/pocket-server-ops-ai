@@ -264,6 +264,11 @@ void main() {
       }
 
       expect(error, isA<ChatCompletionsUnsupportedException>());
+      expect(error, isA<AiProviderHttpException>());
+      expect(
+        (error as AiProviderHttpException).kind,
+        AiProviderHttpErrorKind.client,
+      );
       expect(error.toString(), isNot(contains('secret-api-key')));
       expect(error.toString(), contains('[REDACTED]'));
       expect(error.toString().length, lessThanOrEqualTo(2_000 + 100));

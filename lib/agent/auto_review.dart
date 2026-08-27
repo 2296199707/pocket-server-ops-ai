@@ -1,5 +1,59 @@
 import 'dart:convert';
 
+final _reviewSecretFieldPattern = RegExp(
+  r'(?:password|passwd|passphrase|token|secret|api[_-]?key|private[_-]?key|credential)',
+  caseSensitive: false,
+);
+final _reviewSecretOptionPattern = RegExp(
+  r'--?(?:password|passwd|passphrase|token|secret|api[_-]?key|private[_-]?key)\s+[^\s]+',
+  caseSensitive: false,
+);
+final _reviewSecretAssignmentPattern = RegExp(
+  r'(?:password|passwd|passphrase|token|secret|api[_-]?key|private[_-]?key)\s*[=:]\s*[^\s]+',
+  caseSensitive: false,
+);
+final _reviewBearerPattern = RegExp(r'Bearer\s+[^\s]+', caseSensitive: false);
+final _reviewSshpassPattern = RegExp(
+  r'sshpass\s+-p\s+[^\s]+',
+  caseSensitive: false,
+);
+
+/// Removes common credential values before a tool call is sent to the review
+/// model. The command itself remains available for risk classification.
+Object? redactReviewInput(Object? value) {
+  if (value is Map) {
+    return {
+      for (final entry in value.entries)
+        '${entry.key}': _reviewSecretFieldPattern.hasMatch('${entry.key}')
+            ? '[REDACTED]'
+            : redactReviewInput(entry.value),
+    };
+  }
+  if (value is List) {
+    return [for (final item in value) redactReviewInput(item)];
+  }
+  if (value is String) {
+    var result = value;
+    result = result.replaceAllMapped(
+      _reviewSecretOptionPattern,
+      (_) => '[REDACTED]',
+    );
+    result = result.replaceAllMapped(
+      _reviewSecretAssignmentPattern,
+      (_) => '[REDACTED]',
+    );
+    result = result.replaceAllMapped(
+      _reviewBearerPattern,
+      (_) => 'Bearer [REDACTED]',
+    );
+    return result.replaceAllMapped(
+      _reviewSshpassPattern,
+      (_) => 'sshpass -p [REDACTED]',
+    );
+  }
+  return value;
+}
+
 /// The result of the independent model that reviews one gated tool call.
 class AgentReviewDecision {
   const AgentReviewDecision({

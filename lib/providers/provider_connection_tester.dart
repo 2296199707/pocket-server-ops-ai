@@ -18,9 +18,6 @@ class ProviderConnectionTester {
       apiKey: secret,
       model: profile.model,
       reasoningEffort: profile.reasoningEffort,
-      compactThreshold: profile.wireApi == 'responses'
-          ? profile.modelMetadata[profile.model]?.resolvedAutoCompactTokenLimit
-          : null,
       inputModalities: profile.wireApi == 'responses'
           ? profile.modelMetadata[profile.model]?.inputModalities
           : null,

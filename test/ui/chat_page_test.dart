@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
 import 'package:mobile_agent/domain/models.dart';
+import 'package:mobile_agent/providers/provider_usage_client.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 import 'package:mobile_agent/storage/memory_app_database.dart';
 import 'package:mobile_agent/ui/chat_page.dart';
@@ -167,5 +170,56 @@ void main() {
     expect(find.textContaining('用时 2 分'), findsOneWidget);
     expect(find.textContaining('用时 12 小时'), findsNothing);
     controller.dispose();
+  });
+
+  testWidgets('Responses context details expose manual compaction', (
+    tester,
+  ) async {
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+      providerUsageClient: ProviderUsageClient(
+        client: MockClient((_) async => http.Response('', 404)),
+      ),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: '界面测试供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    final provider = controller.providers.single;
+    final task = await controller.createTask(
+      mode: 'chat',
+      providerId: provider.id,
+      title: '上下文详情',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatPage(
+            controller: controller,
+            taskId: task.id,
+            onTaskActivated: (_) {},
+            onOpenSettings: () {},
+            onConfirmTool: (_, _, _) async => true,
+            onConfirmHostKey: (_, _) async => true,
+            onUserInfoRequest: (_, _) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final contextButton = find.byIcon(Icons.data_usage_outlined);
+    expect(contextButton, findsOneWidget);
+    await tester.tap(contextButton);
+    await tester.pumpAndSettle();
+
+    expect(find.text('立即压缩'), findsOneWidget);
+    expect(find.byIcon(Icons.compress_outlined), findsOneWidget);
   });
 }

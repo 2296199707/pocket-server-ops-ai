@@ -142,6 +142,14 @@ void main() {
     expect(merged.compactionMode, 'disabled');
   });
 
+  test('missing tool-output metadata uses Codex fallback policy', () {
+    const metadata = ProviderModelMetadata(model: 'id-only');
+
+    expect(metadata.truncationPolicy, isNull);
+    expect(metadata.resolvedTruncationPolicy.mode, 'bytes');
+    expect(metadata.resolvedTruncationPolicy.limit, 10000);
+  });
+
   test('Codex model capabilities round-trip and accept wire field names', () {
     final metadata = ProviderModelMetadata.fromMap({
       'model': 'codex-model',
@@ -218,5 +226,10 @@ void main() {
     );
     expect(usage.remainingPercent, isNull);
     expect(usage.toMap().containsKey('model_context_window'), isFalse);
+  });
+
+  test('Chat Completions is labeled as compatibility mode', () {
+    expect(wireApiLabel('responses'), 'Responses');
+    expect(wireApiLabel('chat-completions'), 'Chat Completions（兼容模式）');
   });
 }

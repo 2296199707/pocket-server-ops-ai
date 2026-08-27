@@ -289,8 +289,8 @@ class ChatPageState extends State<ChatPage> {
                     ),
               if (task != null)
                 Positioned(
-                  right: 12,
-                  bottom: 6,
+                  right: 8,
+                  bottom: 8,
                   child: IgnorePointer(
                     child: _TaskStatusBar(task: task, events: events),
                   ),
@@ -356,6 +356,11 @@ class ChatPageState extends State<ChatPage> {
                           IconButton(
                             tooltip: '附件、图片和项目文件',
                             visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 34,
+                              height: 34,
+                            ),
+                            padding: EdgeInsets.zero,
                             onPressed:
                                 widget.controller.providers.isEmpty ||
                                     running ||
@@ -403,14 +408,27 @@ class ChatPageState extends State<ChatPage> {
                             IconButton.filled(
                               tooltip: '停止',
                               visualDensity: VisualDensity.compact,
-                              onPressed: () =>
-                                  widget.controller.stopTask(task.id),
+                              constraints: const BoxConstraints.tightFor(
+                                width: 34,
+                                height: 34,
+                              ),
+                              padding: EdgeInsets.zero,
+                              onPressed: () => widget.controller.stopTask(
+                                task.id,
+                                expectedTurnId: widget.controller
+                                    .activeTurnIdFor(task.id),
+                              ),
                               icon: const Icon(Icons.stop),
                             )
                           else
                             IconButton.filled(
                               tooltip: '发送',
                               visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints.tightFor(
+                                width: 34,
+                                height: 34,
+                              ),
+                              padding: EdgeInsets.zero,
                               onPressed:
                                   _sending ||
                                       widget.controller.providers.isEmpty
@@ -435,6 +453,7 @@ class ChatPageState extends State<ChatPage> {
                   server: boundServer,
                   task: task,
                   contextUsage: contextUsage,
+                  compatibilityMode: provider?.wireApi == 'chat-completions',
                   executionMode: task?.executionMode ?? _executionMode,
                   onOpenDashboard: boundServer == null
                       ? null
@@ -524,7 +543,20 @@ class ChatPageState extends State<ChatPage> {
     if (!mounted) return;
     await showDialog<void>(
       context: context,
-      builder: (_) => _ContextStatusDialog(usage: usage),
+      builder: (_) => _ContextStatusDialog(
+        usage: usage,
+        wireApi: provider?.wireApi,
+        isTaskRunning: () => widget.controller.isTaskRunning(task.id),
+        onCompact:
+            provider?.wireApi == 'responses' && !widget.controller.previewMode
+            ? () => widget.controller.compactTaskContext(
+                task,
+                onFirstHostKey: (key) => widget.onConfirmHostKey(task, key),
+                onUserInfoRequest: (request) =>
+                    widget.onUserInfoRequest(task, request),
+              )
+            : null,
+      ),
     );
   }
 
@@ -1685,66 +1717,58 @@ class _ContextBar extends StatelessWidget {
         ? contextName
         : '$contextName · ${project!.name}';
     final usageText = _providerCompactUsageText(usage);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 3, 8, 3),
-      child: Column(
-        children: [
-          Row(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final providerWidth = constraints.maxWidth < 380 ? 108.0 : 148.0;
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(10, 2, 6, 2),
+          child: Row(
             children: [
-              Icon(_workModeIcon(workMode), size: 18, color: colors.primary),
-              const SizedBox(width: 6),
-              Expanded(
+              Icon(_workModeIcon(workMode), size: 16, color: colors.primary),
+              const SizedBox(width: 4),
+              Flexible(
                 child: Text(
                   contextLabel,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium,
+                  style: Theme.of(context).textTheme.labelSmall
+                      ?.copyWith(fontSize: 11),
                 ),
+              ),
+              const SizedBox(width: 4),
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: providerWidth),
+                child: _ContextPill(
+                  icon: Icons.hub_outlined,
+                  label: provider?.name ?? '配置供应商',
+                  onTap: onProviderTap,
+                ),
+              ),
+              if (usageText.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                Text(
+                  usageText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall
+                      ?.copyWith(fontSize: 10),
+                ),
+              ],
+              IconButton(
+                tooltip: '对话设置',
+                onPressed: onEdit,
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints.tightFor(
+                  width: 30,
+                  height: 30,
+                ),
+                padding: EdgeInsets.zero,
+                icon: const Icon(Icons.tune_outlined, size: 16),
               ),
             ],
           ),
-          Padding(
-            padding: const EdgeInsets.only(left: 24, top: 2),
-            child: Row(
-              children: [
-                Expanded(
-                  child: provider != null
-                      ? _ContextPill(
-                          icon: Icons.hub_outlined,
-                          label: provider!.name,
-                          onTap: onProviderTap,
-                        )
-                      : _ContextPill(
-                          icon: Icons.hub_outlined,
-                          label: '配置供应商',
-                          onTap: onProviderTap,
-                        ),
-                ),
-                if (usageText.isNotEmpty) ...[
-                  const SizedBox(width: 6),
-                  Text(
-                    usageText,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ],
-                IconButton(
-                  tooltip: '对话设置',
-                  onPressed: onEdit,
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 32,
-                    height: 32,
-                  ),
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.tune_outlined, size: 17),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -1760,27 +1784,28 @@ class _ContextPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final content = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
         color: colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 15),
-          const SizedBox(width: 4),
+          Icon(icon, size: 13),
+          const SizedBox(width: 3),
           Flexible(
             child: Text(
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelMedium,
+              style: Theme.of(context).textTheme.labelSmall
+                  ?.copyWith(fontSize: 10),
             ),
           ),
           if (onTap != null) ...[
             const SizedBox(width: 2),
-            const Icon(Icons.keyboard_arrow_down_rounded, size: 16),
+            const Icon(Icons.keyboard_arrow_down_rounded, size: 13),
           ],
         ],
       ),
@@ -1817,28 +1842,29 @@ class _ModelReasoningPill extends StatelessWidget {
         : reasoningEffort;
     return Material(
       color: colors.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.auto_awesome_outlined, size: 14),
-              const SizedBox(width: 4),
+              const Icon(Icons.auto_awesome_outlined, size: 13),
+              const SizedBox(width: 3),
               Flexible(
                 child: Text(
                   '$modelText $effortText',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall,
+                  style: Theme.of(context).textTheme.labelSmall
+                      ?.copyWith(fontSize: 10),
                 ),
               ),
               if (onTap != null) ...[
                 const SizedBox(width: 2),
-                const Icon(Icons.keyboard_arrow_down_rounded, size: 16),
+                const Icon(Icons.keyboard_arrow_down_rounded, size: 13),
               ],
             ],
           ),
@@ -1858,17 +1884,69 @@ class _ModelReasoningSelection {
   final String reasoningEffort;
 }
 
-class _ContextStatusDialog extends StatelessWidget {
-  const _ContextStatusDialog({required this.usage});
+class _ContextStatusDialog extends StatefulWidget {
+  const _ContextStatusDialog({
+    required this.usage,
+    required this.wireApi,
+    required this.onCompact,
+    required this.isTaskRunning,
+  });
 
   final TaskContextUsage? usage;
+  final String? wireApi;
+  final Future<TaskContextUsage> Function()? onCompact;
+  final bool Function()? isTaskRunning;
+
+  @override
+  State<_ContextStatusDialog> createState() => _ContextStatusDialogState();
+}
+
+class _ContextStatusDialogState extends State<_ContextStatusDialog> {
+  TaskContextUsage? _usage;
+  var _compacting = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _usage = widget.usage;
+  }
+
+  Future<void> _compact() async {
+    final onCompact = widget.onCompact;
+    if (onCompact == null ||
+        _compacting ||
+        (widget.isTaskRunning?.call() ?? false)) {
+      return;
+    }
+    setState(() {
+      _compacting = true;
+      _error = null;
+    });
+    try {
+      final usage = await onCompact();
+      if (!mounted) return;
+      setState(() {
+        _usage = usage;
+        _compacting = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _compacting = false;
+        _error = '$error';
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final last = usage?.last;
-    final total = usage?.total;
+    final compatibilityMode = widget.wireApi == 'chat-completions';
+    final last = _usage?.last;
+    final total = _usage?.total;
+    final taskRunning = widget.isTaskRunning?.call() ?? false;
     return AlertDialog(
-      title: const Text('上下文状态'),
+      title: Text(compatibilityMode ? 'Chat Completions · 兼容模式' : '上下文状态'),
       content: SizedBox(
         width: 360,
         child: Column(
@@ -1876,25 +1954,38 @@ class _ContextStatusDialog extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              usage == null || last == null ? '供应商未返回 Token 用量' : '当前上下文',
+              compatibilityMode
+                  ? '仅显示供应商返回的 Token 用量'
+                  : _usage == null || last == null
+                  ? '供应商未返回 Token 用量'
+                  : '当前上下文',
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 12),
-            _ContextStat(label: '模型', value: usage?.model ?? '未知'),
-            _ContextStat(label: '当前用量', value: _formatUsage(last?.totalTokens)),
+            _ContextStat(label: '模型', value: _usage?.model ?? '未知'),
             _ContextStat(
-              label: '剩余',
-              value: usage?.remainingPercent == null
+              label: compatibilityMode ? '本次用量' : '当前用量',
+              value: _formatUsage(last?.totalTokens),
+            ),
+            _ContextStat(
+              label: '上下文剩余',
+              value: compatibilityMode
+                  ? '兼容模式'
+                  : _usage?.remainingPercent == null
                   ? '未知'
-                  : '${usage!.remainingPercent}%',
+                  : '${_usage!.remainingPercent}%',
             ),
             _ContextStat(
               label: '有效窗口',
-              value: _formatUsage(usage?.effectiveContextWindow),
+              value: compatibilityMode
+                  ? '不适用'
+                  : _formatUsage(_usage?.effectiveContextWindow),
             ),
             _ContextStat(
               label: '自动压缩阈值',
-              value: _formatUsage(usage?.autoCompactTokenLimit),
+              value: compatibilityMode
+                  ? '不适用'
+                  : _formatUsage(_usage?.autoCompactTokenLimit),
             ),
             _ContextStat(
               label: '累计用量',
@@ -1902,19 +1993,39 @@ class _ContextStatusDialog extends StatelessWidget {
             ),
             _ContextStat(
               label: '已记录压缩',
-              value: '${usage?.compactionCount ?? 0} 次',
+              value: '${_usage?.compactionCount ?? 0} 次',
             ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
             const SizedBox(height: 12),
             Text(
-              '窗口未知时显示“未知”，不会用估算值冒充供应商数据。',
+              compatibilityMode
+                  ? '兼容模式不使用 Codex Responses 上下文百分比和自动压缩。'
+                  : '窗口未知时显示“未知”，不会用估算值冒充供应商数据。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
         ),
       ),
       actions: [
+        if (widget.onCompact != null)
+          OutlinedButton.icon(
+            onPressed: taskRunning || _compacting ? null : _compact,
+            icon: _compacting
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.compress_outlined),
+            label: Text(_compacting ? '压缩中' : '立即压缩'),
+          ),
         TextButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _compacting ? null : () => Navigator.pop(context),
           child: const Text('关闭'),
         ),
       ],
@@ -2198,6 +2309,7 @@ class _ConversationFooter extends StatelessWidget {
     required this.server,
     required this.task,
     required this.contextUsage,
+    required this.compatibilityMode,
     required this.executionMode,
     required this.onOpenDashboard,
     required this.onFirstHostKey,
@@ -2208,6 +2320,7 @@ class _ConversationFooter extends StatelessWidget {
   final ServerProfile? server;
   final Task? task;
   final TaskContextUsage? contextUsage;
+  final bool compatibilityMode;
   final String executionMode;
   final VoidCallback? onOpenDashboard;
   final FutureOr<bool> Function(SshHostKey key)? onFirstHostKey;
@@ -2236,7 +2349,11 @@ class _ConversationFooter extends StatelessWidget {
             )
           else
             const Spacer(),
-          _ContextUsageSummary(usage: contextUsage, onTap: onShowContext),
+          _ContextUsageSummary(
+            usage: contextUsage,
+            compatibilityMode: compatibilityMode,
+            onTap: onShowContext,
+          ),
           const SizedBox(width: 5),
           _ExecutionModeStatus(executionMode: executionMode),
         ],
@@ -2246,14 +2363,19 @@ class _ConversationFooter extends StatelessWidget {
 }
 
 class _ContextUsageSummary extends StatelessWidget {
-  const _ContextUsageSummary({required this.usage, required this.onTap});
+  const _ContextUsageSummary({
+    required this.usage,
+    required this.compatibilityMode,
+    required this.onTap,
+  });
 
   final TaskContextUsage? usage;
+  final bool compatibilityMode;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final remaining = usage?.remainingPercent;
+    final remaining = compatibilityMode ? null : usage?.remainingPercent;
     final child = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2276,7 +2398,9 @@ class _ContextUsageSummary extends StatelessWidget {
     );
     if (onTap == null) return child;
     return Tooltip(
-      message: '上下文剩余 ${remaining == null ? '未知' : '$remaining%'}，点击查看详情',
+      message: compatibilityMode
+          ? 'Chat Completions · 兼容模式：不显示 Codex 上下文百分比，点击查看用量'
+          : '上下文剩余 ${remaining == null ? '未知' : '$remaining%'}，点击查看详情',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(3),
@@ -2514,7 +2638,7 @@ class _TaskStatusBarState extends State<_TaskStatusBar> {
           constraints: const BoxConstraints(minHeight: 12),
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
           decoration: BoxDecoration(
-            color: colors.surface.withValues(alpha: 0.52),
+            color: colors.surface.withValues(alpha: 0.24),
             border: Border.all(color: borderColor),
             borderRadius: BorderRadius.circular(3),
           ),
@@ -3169,37 +3293,97 @@ Future<void> _showStoredAttachment(
   );
 }
 
-class _ToolDetail extends StatelessWidget {
+class _ToolDetail extends StatefulWidget {
   const _ToolDetail({required this.title, required this.value});
 
   final String title;
   final String value;
 
   @override
+  State<_ToolDetail> createState() => _ToolDetailState();
+}
+
+class _ToolDetailState extends State<_ToolDetail> {
+  bool _expanded = false;
+
+  bool get _hasMore {
+    final collapsedLines = widget.title == '结果' ? 4 : 7;
+    return widget.value.length > 600 ||
+        widget.value.split('\n').length > collapsedLines;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final isResult = widget.title == '结果';
+    final collapsedLines = isResult ? 4 : 7;
+    final expandedHeight = (MediaQuery.sizeOf(context).height * 0.42)
+        .clamp(160.0, 360.0)
+        .toDouble();
     return Padding(
       padding: const EdgeInsets.only(top: 5),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: const TextStyle(fontSize: 10, height: 1)),
+          Text(widget.title, style: const TextStyle(fontSize: 9, height: 1)),
           const SizedBox(height: 3),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(6),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: _expanded
+                  ? expandedHeight
+                  : isResult
+                  ? 72
+                  : 104,
             ),
-            child: SelectableText(
-              value,
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 10,
-                height: 1.15,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(6),
               ),
+              child: _expanded
+                  ? SingleChildScrollView(
+                      child: SelectableText(
+                        widget.value,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 9,
+                          height: 1.1,
+                        ),
+                      ),
+                    )
+                  : SelectableText(
+                      widget.value,
+                      maxLines: collapsedLines,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 9,
+                        height: 1.1,
+                      ),
+                    ),
             ),
           ),
+          if (_hasMore)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: () => setState(() => _expanded = !_expanded),
+                icon: Icon(
+                  _expanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  size: 14,
+                ),
+                label: Text(_expanded ? '收起' : '展开完整输出'),
+                style: TextButton.styleFrom(
+                  minimumSize: Size.zero,
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                  textStyle: const TextStyle(fontSize: 10),
+                ),
+              ),
+            ),
         ],
       ),
     );

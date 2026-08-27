@@ -107,7 +107,7 @@ Android 前台服务只负责在手机进程仍然存活时提高任务存活概
 为保持第一版实现小而可控，当前边界固定如下：
 
 - Agent 每轮最多 64 个模型步骤和 128 次工具调用。模型或网络在已执行远端操作后出错，或者达到上限，任务显示 `unknown`，提示人工检查，不自动重放；
-- 供应商协议由用户明确选择 Responses 或 Chat Completions。Responses 只有在供应商 `/models` 返回当前模型的上下文元数据后，才按 Codex 规则使用 `context_window`（缺失时取 `max_context_window`）、有效窗口 95% 和自动压缩阈值 90%，并显式发送 `context_management`；未知窗口不猜测也不发送压缩参数。供应商不支持 `/responses` 或已明确启用的 compaction 参数时直接报错，不自动改走 Chat Completions。Chat Completions 保持独立协议，只解析其 usage，不伪装成 Responses；
+- 供应商协议由用户明确选择 Responses 或 Chat Completions。Responses 只有在供应商 `/models` 返回当前模型的上下文元数据后，才按 Codex 规则使用 `context_window`（缺失时取 `max_context_window`）、有效窗口 95% 和自动压缩阈值 90%；普通 `/responses` 请求不发送 `context_management`。达到自动压缩阈值时，手机单独调用供应商的 `POST /responses/compact`，返回失败直接报错；未知窗口不猜测也不发送压缩请求。供应商不支持已选择的协议或 `/responses/compact` 时直接报错，不自动改走 Chat Completions。Chat Completions 保持独立协议，只解析其 usage，不伪装成 Responses；
 - `/models` 同时兼容 OpenAI 风格的 `data` 列表和 Codex 风格的 `models` 列表。返回的模型元数据按模型保存到供应商配置；只有模型目录给出真实限制时才更新已有值，普通只返回模型 ID 的接口不会覆盖手动元数据；
 - 每次模型响应保存 `last_token_usage` 对应的当前用量和 `total_token_usage` 对应的累计用量，并记录 `model_context_window`、`auto_compact_token_limit` 和压缩次数。底部上下文百分比只在窗口和 usage 都真实可用时显示，否则显示 `--`；分页或尚未加载的聊天历史不会影响该统计；
 - 手机不猜测模型 token 窗口，不按 Base64 字节数、字符数或固定几 MiB 推断上下文。Responses、Chat Completions 和生图接口的正常响应默认都不设本地字节上限；64 KiB 只用于截取供应商 HTTP 错误正文，不影响正常模型响应和图片；
@@ -148,7 +148,7 @@ SSH 始终使用用户配置的原账号和原权限；非 root 账号不会被�
 
 已确认的官方行为如下：
 
-1. Responses 服务端压缩通过 `context_management.compact_threshold` 开启。输入数组的链式请求必须原样追加上一次 Responses output，包括 opaque 的 compaction item；可以丢弃最新 compaction item 之前的旧输入，但使用 `previous_response_id` 时不能再手动裁剪历史。
+1. Codex 的普通 Responses 请求不携带 `context_management`；压缩是独立的 `POST /responses/compact` 请求。压缩请求携带当前历史、instructions、工具和 reasoning，返回的 output 整体成为新的历史窗口。后续无状态请求必须原样追加返回的 output，包括 opaque 的 compaction item；可以丢弃最新 compaction item 之前的旧输入，但使用 `previous_response_id` 时不能再手动裁剪历史。
 2. Codex 会规范化历史：为缺少 output 的 function call 补 `aborted`，清理孤立 output，按模型 `input_modalities` 删除不支持的图片和音频，并对工具输出做语义化截断。
 3. 模型能力不是由客户端猜测。官方模型元数据至少涉及 `default_reasoning_level`、`supported_reasoning_levels`、`input_modalities`、`truncation_policy`、`context_window`、`max_context_window`、`auto_compact_token_limit` 和 `effective_context_window_percent`。
 4. 有效上下文窗口默认按原窗口的 95% 计算，自动压缩默认在原始上下文窗口约 90% 处触发。界面剩余上下文百分比使用官方 TUI 的 12,000 token baseline，而不是用字符数、Base64 字节数或固定几 MiB 猜算。

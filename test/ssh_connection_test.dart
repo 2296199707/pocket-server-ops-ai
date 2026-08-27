@@ -71,6 +71,57 @@ void main() {
     },
   );
 
+  test('SSH output buffer uses raw UTF-8 byte offsets', () {
+    final buffer = SshOutputBuffer(maxCharacters: 10);
+    buffer.add('abc');
+    buffer.add('12中文de');
+
+    expect(buffer.maxBytes, 10);
+    expect(buffer.maxCharacters, 10);
+    expect(buffer.length, 13);
+    expect(buffer.truncated, isTrue);
+    expect(buffer.value, 'abc12\n... 3 bytes omitted ...\n文de');
+    expect(buffer.substring(4), '2\n... 3 bytes omitted ...\n文de');
+    expect(buffer.substring(6), '\n... 3 bytes omitted ...\n文de');
+    // Offsets are raw bytes, so a caller may begin in the middle of a
+    // multi-byte character. Lossy decoding preserves the offset instead of
+    // silently skipping continuation bytes.
+    expect(buffer.substring(9), '��de');
+    expect(utf8.decode(utf8.encode(buffer.value)), buffer.value);
+
+    final complete = SshOutputBuffer(maxBytes: 10);
+    complete.add('甲乙丙');
+    expect(complete.length, 9);
+    expect(complete.substring(4), '��丙');
+
+    final rawBoundary = SshOutputBuffer(maxBytes: 4);
+    rawBoundary.add('甲乙');
+    expect(rawBoundary.value, '�\n... 2 bytes omitted ...\n��');
+    expect(rawBoundary.length, 6);
+  });
+
+  test('SSH output buffer supports a zero-byte cap', () {
+    final buffer = SshOutputBuffer(maxBytes: 0);
+    buffer.add('中文');
+
+    expect(buffer.length, 6);
+    expect(buffer.truncated, isTrue);
+    expect(buffer.value, '\n... 6 bytes omitted ...\n');
+    expect(buffer.substring(buffer.length), isEmpty);
+  });
+
+  test(
+    'SSH output buffer counts raw bytes across chunks and decodes lossily',
+    () {
+      final buffer = SshOutputBuffer(maxBytes: 10);
+      buffer.addBytes([0xe4]);
+      buffer.addBytes([0xb8, 0xad, 0xff]);
+
+      expect(buffer.length, 4);
+      expect(buffer.value, '中�');
+    },
+  );
+
   test('terminate stops after TERM when the session closes', () async {
     final harness = _SessionHarness(closeOnSignal: 'TERM');
     final stream = SshCommandStream(harness.session);
@@ -112,7 +163,7 @@ void main() {
   });
 
   test(
-    'terminal start counts concurrent channel opens in the 32 limit',
+    'terminal start counts concurrent channel opens in the 64 limit',
     () async {
       final connection = _FakeConnection();
       final tools = RemoteAgentTools(connection);
@@ -120,7 +171,7 @@ void main() {
         (tool) => tool.definition.name == 'terminal.start',
       );
       final starts = [
-        for (var index = 0; index < 32; index++)
+        for (var index = 0; index < 64; index++)
           start.call({'command': 'long-running-test'}),
       ];
 
@@ -128,7 +179,7 @@ void main() {
         start.call({'command': 'must-be-rejected'}),
         throwsA(isA<StateError>()),
       );
-      expect(connection.pendingExecutes, hasLength(32));
+      expect(connection.pendingExecutes, hasLength(64));
 
       for (final pending in connection.pendingExecutes) {
         pending.completeError(StateError('test channel open cancelled'));
@@ -140,6 +191,33 @@ void main() {
       await tools.close();
     },
   );
+
+  test('terminal poll exposes an unexpected channel failure', () async {
+    final harness = _SessionHarness();
+    final connection = _FakeConnection(
+      stream: SshCommandStream(harness.session),
+    );
+    final tools = RemoteAgentTools(connection);
+    final start = tools.tools.singleWhere(
+      (tool) => tool.definition.name == 'terminal.start',
+    );
+    final poll = tools.tools.singleWhere(
+      (tool) => tool.definition.name == 'terminal.poll',
+    );
+
+    final started = await start.call({'command': 'long-running-test'});
+    harness.destroy();
+    final result = await poll.call({
+      'process_id': (started as Map)['process_id'],
+      'wait_ms': 1000,
+    }) as Map;
+
+    expect(result['done'], isTrue);
+    expect(result['failed'], isTrue);
+    expect(result['exit_code'], isNull);
+    expect(result['error'], contains('without an exit status'));
+    await tools.close();
+  });
 }
 
 class _SessionHarness {
@@ -176,9 +254,10 @@ class _SessionHarness {
 }
 
 class _FakeConnection implements SshConnection {
-  _FakeConnection({this.fileContent = ''});
+  _FakeConnection({this.fileContent = '', this.stream});
 
   final String fileContent;
+  final SshCommandStream? stream;
   final pendingExecutes = <Completer<SshCommandStream>>[];
 
   @override
@@ -201,6 +280,8 @@ class _FakeConnection implements SshConnection {
     String? workingDirectory,
     bool pty = false,
   }) async {
+    final ready = stream;
+    if (ready != null) return ready;
     final pending = Completer<SshCommandStream>();
     pendingExecutes.add(pending);
     return pending.future;

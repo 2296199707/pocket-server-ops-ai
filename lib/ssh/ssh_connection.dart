@@ -152,6 +152,7 @@ class SshCommandStream {
   Stream<Uint8List> get stdout => _session.stdout;
   Stream<Uint8List> get stderr => _session.stderr;
   int? get exitCode => _session.exitCode;
+  SSHSessionExitSignal? get exitSignal => _session.exitSignal;
   Future<void> get done => _session.done;
 
   void write(Uint8List data) => _session.write(data);
@@ -456,14 +457,10 @@ class DartSshConnection implements SshConnection {
         final stdoutBuffer = SshOutputBuffer();
         final stderrBuffer = SshOutputBuffer();
         final stdoutDone = stream.stdout
-            .cast<List<int>>()
-            .transform(const Utf8Decoder(allowMalformed: true))
-            .listen(stdoutBuffer.add)
+            .listen(stdoutBuffer.addBytes)
             .asFuture<void>();
         final stderrDone = stream.stderr
-            .cast<List<int>>()
-            .transform(const Utf8Decoder(allowMalformed: true))
-            .listen(stderrBuffer.add)
+            .listen(stderrBuffer.addBytes)
             .asFuture<void>();
         if (input != null) stream.writeText(input);
         await stream.closeInput();
@@ -576,7 +573,7 @@ class DartSshConnection implements SshConnection {
         return SshFileChunk(
           offset: offset,
           nextOffset: nextOffset,
-          content: utf8.decode(contents),
+          content: utf8.decode(contents, allowMalformed: true),
           eof: size != null
               ? nextOffset >= size
               : contents.length < requestedLength + 3,
@@ -734,46 +731,59 @@ const _sftpTimeout = Duration(minutes: 2);
 
 /// Keeps command output bounded while preserving logical offsets for polling.
 /// The beginning and end are retained so a long-running command remains
-/// useful to the model without keeping an unbounded string in memory.
+/// useful to the model without keeping an unbounded string in memory. Capacity
+/// and offsets are measured in UTF-8 bytes.
 class SshOutputBuffer {
-  SshOutputBuffer({this.maxCharacters = 1024 * 1024})
-    : assert(maxCharacters > 0);
+  SshOutputBuffer({int? maxBytes, int? maxCharacters})
+    : maxBytes = maxBytes ?? maxCharacters ?? 1024 * 1024,
+      assert(
+        maxBytes == null || maxCharacters == null || maxBytes == maxCharacters,
+        'maxBytes and maxCharacters must match when both are provided',
+      ),
+      assert((maxBytes ?? maxCharacters ?? 1024 * 1024) >= 0);
 
-  final int maxCharacters;
-  late final int _headLimit = maxCharacters ~/ 2;
-  late final int _tailLimit = maxCharacters - _headLimit;
+  final int maxBytes;
 
-  StringBuffer? _all = StringBuffer();
-  String _head = '';
-  String _tail = '';
+  /// Kept as a compatibility alias for callers using the original name.
+  int get maxCharacters => maxBytes;
+
+  late final int _headLimit = maxBytes ~/ 2;
+  late final int _tailLimit = maxBytes - _headLimit;
+
+  List<int>? _all = <int>[];
+  List<int> _head = <int>[];
+  List<int> _tail = <int>[];
   var _length = 0;
   var _truncated = false;
 
   bool get truncated => _truncated;
+
+  /// Total UTF-8 bytes observed, including bytes omitted from the buffer.
   int get length => _length;
 
   void add(String value) {
     if (value.isEmpty) return;
-    _length += value.length;
+    addBytes(utf8.encode(value));
+  }
+
+  /// Append output before decoding it so byte offsets remain exact.
+  void addBytes(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    _length += bytes.length;
     final all = _all;
     if (!_truncated && all != null) {
-      if (all.length + value.length <= maxCharacters) {
-        all.write(value);
+      if (all.length + bytes.length <= maxBytes) {
+        all.addAll(bytes);
         return;
       }
-      final existing = all.toString();
-      _head = existing.substring(
-        0,
-        existing.length < _headLimit ? existing.length : _headLimit,
-      );
-      final tailSource = value.length >= _tailLimit ? value : '$existing$value';
-      _tail = _last(tailSource, _tailLimit);
+      _head = _headForAppend(all, bytes);
+      _tail = _tailForAppend(all, bytes);
       _all = null;
       _truncated = true;
       return;
     }
 
-    _tail = _last('$_tail$value', _tailLimit);
+    _tail = _tailForAppend(_tail, bytes);
   }
 
   String get value => substring(0);
@@ -782,20 +792,49 @@ class SshOutputBuffer {
     final offset = start.clamp(0, _length).toInt();
     final all = _all;
     if (!_truncated && all != null) {
-      return all.toString().substring(offset);
+      return utf8.decode(all.sublist(offset), allowMalformed: true);
     }
     final tailStart = _length - _tail.length;
-    const omitted = '\n[…输出中间部分已省略…]\n';
+    final omitted =
+        '\n... ${_length - _head.length - _tail.length} bytes omitted ...\n';
     if (offset < _head.length) {
-      return '${_head.substring(offset)}$omitted$_tail';
+      return '${utf8.decode(_head.sublist(offset), allowMalformed: true)}'
+          '$omitted${utf8.decode(_tail, allowMalformed: true)}';
     }
-    if (offset < tailStart) return omitted + _tail;
-    return _tail.substring(offset - tailStart);
+    if (offset < tailStart) {
+      return omitted + utf8.decode(_tail, allowMalformed: true);
+    }
+    return utf8.decode(_tail.sublist(offset - tailStart), allowMalformed: true);
   }
 
-  static String _last(String value, int length) {
-    if (value.length <= length) return value;
-    return value.substring(value.length - length);
+  List<int> _headForAppend(List<int> previous, List<int> incoming) {
+    if (previous.length >= _headLimit) {
+      return _prefix(previous, _headLimit);
+    }
+    final head = <int>[...previous];
+    head.addAll(_prefix(incoming, _headLimit - head.length));
+    return head;
+  }
+
+  List<int> _tailForAppend(List<int> previous, List<int> incoming) {
+    if (incoming.length >= _tailLimit) {
+      return _suffix(incoming, _tailLimit);
+    }
+    final tail = _suffix(previous, _tailLimit - incoming.length);
+    return <int>[...tail, ...incoming];
+  }
+
+  static List<int> _prefix(List<int> bytes, int limit) {
+    if (limit <= 0) return <int>[];
+    final end = bytes.length < limit ? bytes.length : limit;
+    return bytes.sublist(0, end);
+  }
+
+  static List<int> _suffix(List<int> bytes, int limit) {
+    if (limit <= 0) return <int>[];
+    if (bytes.length <= limit) return <int>[...bytes];
+    final start = bytes.length - limit;
+    return bytes.sublist(start);
   }
 }
 

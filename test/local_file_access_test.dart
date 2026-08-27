@@ -4,6 +4,27 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_agent/local/local_file_access.dart';
 
 void main() {
+  test('canonical scope checks handle parents, root, and similar prefixes', () {
+    expect(
+      LocalFileAccessStore.scopesOverlapCanonical(
+        '/data/user/0/app',
+        '/data/user/0',
+      ),
+      isTrue,
+    );
+    expect(
+      LocalFileAccessStore.scopesOverlapCanonical('/data/user/0', '/'),
+      isTrue,
+    );
+    expect(
+      LocalFileAccessStore.scopesOverlapCanonical(
+        '/data/user/0/app2',
+        '/data/user/0/app',
+      ),
+      isFalse,
+    );
+  });
+
   test(
     'canonical path checks prevent a symlink from leaving the grant',
     () async {

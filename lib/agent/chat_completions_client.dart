@@ -11,14 +11,11 @@ const int _maxProviderErrorCharacters = 2_000;
 
 /// A bounded provider HTTP error. [body] is already redacted before it is
 /// stored in the exception.
-class ChatCompletionsHttpException implements Exception {
+class ChatCompletionsHttpException extends AiProviderHttpException {
   const ChatCompletionsHttpException({
-    required this.statusCode,
-    required this.body,
-  });
-
-  final int statusCode;
-  final String body;
+    required super.statusCode,
+    required super.body,
+  }) : super(protocol: 'Chat Completions');
 
   @override
   String toString() {

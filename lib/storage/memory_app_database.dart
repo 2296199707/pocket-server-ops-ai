@@ -165,9 +165,19 @@ class MemoryAppDatabase extends AppDatabase {
           0,
           (value, event) => event.sequence > value ? event.sequence : value,
         );
+    var providerProjectionSequence = boundary;
+    for (final event in events) {
+      if (event.sequence > providerProjectionSequence &&
+          event.type == 'task.context_changed' &&
+          _requiresProviderProjection(event.payload)) {
+        providerProjectionSequence = event.sequence;
+      }
+    }
     return [
       for (final event in events)
-        if (event.type == 'assistant.completed' && event.sequence > boundary)
+        if ((event.type == 'assistant.completed' ||
+                event.type == 'context.compacted') &&
+            event.sequence > providerProjectionSequence)
           event.payload,
     ];
   }
@@ -193,6 +203,7 @@ class MemoryAppDatabase extends AppDatabase {
         providerProjectionSequence = event.sequence;
       }
     }
+    TaskEvent? compactedEvent;
     for (final event in values) {
       final items = event.payload['responses_output_items'];
       if (useCompactionBoundary &&
@@ -200,11 +211,34 @@ class MemoryAppDatabase extends AppDatabase {
           items is List &&
           items.any((item) => item is Map && item['type'] == 'compaction')) {
         startSequence = event.sequence;
+        compactedEvent = event;
       }
     }
-    return values
+    final events = values
         .where((event) => event.sequence >= startSequence)
         .toList(growable: false);
+    final compactedTurnId = compactedEvent?.payload['turn_id'];
+    if (compactedEvent == null ||
+        compactedTurnId is! String ||
+        compactedTurnId.isEmpty) {
+      return events;
+    }
+    TaskEvent? precedingUser;
+    for (final event in values.reversed) {
+      if (event.sequence >= compactedEvent.sequence) continue;
+      if (event.type == 'user.message' &&
+          event.payload['turn_id'] == compactedTurnId) {
+        precedingUser = event;
+        break;
+      }
+    }
+    if (precedingUser == null) return events;
+    return [
+      for (final event in events) ...[
+        event,
+        if (event.eventId == compactedEvent.eventId) precedingUser,
+      ],
+    ];
   }
 
   @override

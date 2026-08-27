@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path/path.dart' as path_util;
 
@@ -62,6 +63,8 @@ class RemoteAgentTools {
   var _closing = false;
 
   bool get isClosed => _connection.isClosed;
+
+  SshConnection get connection => _connection;
 
   List<AgentTool> get tools => [
     AgentTool(
@@ -322,7 +325,8 @@ class RemoteAgentTools {
     await process.stop();
     return {
       'process_id': _requiredString(arguments, 'process_id'),
-      'stopped': true,
+      'stopped': process.failure == null,
+      if (process.failure != null) 'error': process.failureDescription,
     };
   }
 
@@ -448,7 +452,9 @@ class RemoteAgentTools {
     _processes.removeWhere((_, process) => process.done);
   }
 
-  bool get hasRunningProcesses => _processes.values.any((value) => !value.done);
+  bool get hasRunningProcesses =>
+      _startingProcesses.isNotEmpty ||
+      _processes.values.any((value) => !value.done);
 
   static String _requiredString(Map<String, Object?> arguments, String key) {
     final value = arguments[key];
@@ -1068,43 +1074,53 @@ class LocalAgentTools {
 
 class _ManagedProcess {
   _ManagedProcess(this.stream) {
-    _stdoutSubscription = stream.stdout
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .listen((value) {
-          _stdout.add(value);
-          _signalChanged();
-        });
-    _stderrSubscription = stream.stderr
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .listen((value) {
-          _stderr.add(value);
-          _signalChanged();
-        });
-    final stdoutDone = _stdoutSubscription.asFuture<void>();
-    final stderrDone = _stderrSubscription.asFuture<void>();
+    _stdoutSubscription = stream.stdout.listen((value) {
+      _stdout.addBytes(value);
+      _signalChanged();
+    });
+    _stderrSubscription = stream.stderr.listen((value) {
+      _stderr.addBytes(value);
+      _signalChanged();
+    });
+    final stdoutDone = _observe(_stdoutSubscription.asFuture<void>());
+    final stderrDone = _observe(_stderrSubscription.asFuture<void>());
     unawaited(
-      Future.wait<void>([stream.done, stdoutDone, stderrDone]).then<void>(
-        (_) => _finish(),
-        onError: (Object error, StackTrace stackTrace) => _finish(),
-      ),
+      Future.wait<void>([_observe(stream.done), stdoutDone, stderrDone])
+          .then<void>((_) => _finish()),
     );
   }
 
   final SshCommandStream stream;
   final SshOutputBuffer _stdout = SshOutputBuffer();
   final SshOutputBuffer _stderr = SshOutputBuffer();
-  late final StreamSubscription<String> _stdoutSubscription;
-  late final StreamSubscription<String> _stderrSubscription;
+  late final StreamSubscription<Uint8List> _stdoutSubscription;
+  late final StreamSubscription<Uint8List> _stderrSubscription;
   var _changed = Completer<void>();
   final _finished = Completer<void>();
   Future<void>? _stopFuture;
   Future<void>? _closeFuture;
+  Object? failure;
   bool done = false;
+
+  String? get failureDescription => failure == null ? null : '$failure';
+
+  Future<void> _observe(Future<void> future) async {
+    try {
+      await future;
+    } catch (error) {
+      failure ??= error;
+    }
+  }
 
   void _finish() {
     if (done) return;
+    if (failure == null &&
+        stream.exitCode == null &&
+        stream.exitSignal == null) {
+      failure = StateError(
+        'Remote process channel closed without an exit status',
+      );
+    }
     done = true;
     if (!_finished.isCompleted) _finished.complete();
     _signalChanged();
@@ -1191,6 +1207,8 @@ class _ManagedProcess {
       'stdout_truncated': _stdout.truncated,
       'stderr_truncated': _stderr.truncated,
       'done': done,
+      'failed': failure != null,
+      if (failure != null) 'error': failureDescription,
       'exit_code': stream.exitCode,
       'stdout': _stdout.substring(stdoutStart),
       'stderr': _stderr.substring(stderrStart),
@@ -1205,5 +1223,5 @@ class _ManagedProcess {
 
 const _maxFileChunkBytes = 1024 * 1024;
 const _maxPollWaitMilliseconds = 30 * 1000;
-const _maxManagedProcesses = 32;
+const _maxManagedProcesses = 64;
 const _processStartCloseTimeout = Duration(seconds: 2);

@@ -7,6 +7,7 @@ import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/agent/auto_review.dart';
 import 'package:mobile_agent/agent/openai_compatible_client.dart';
 import 'package:mobile_agent/agent/remote_write_queue.dart';
+import 'package:mobile_agent/domain/models.dart';
 
 void main() {
   test('cancellation stops an in-flight AI request', () async {
@@ -180,6 +181,39 @@ void main() {
       expect(items.last, 'item-99');
     },
   );
+
+  test('Codex fallback policy bounds results without catalog fields', () async {
+    final client = _ToolThenTextClient();
+    const metadata = ProviderModelMetadata(model: 'id-only');
+    final policy = metadata.resolvedTruncationPolicy;
+
+    final result =
+        await AgentLoop(
+          client: client,
+          tools: [
+            AgentTool(
+              definition: const AiToolDefinition(
+                name: 'test.tool',
+                description: 'test',
+                parameters: {'type': 'object'},
+              ),
+              call: (_) async => {'stdout': 'x' * 20000},
+            ),
+          ],
+        ).run(
+          prompt: '读取',
+          executionMode: 'auto',
+          toolOutputLimit: policy.limit,
+          toolOutputLimitInTokens: policy.mode == 'tokens',
+        );
+
+    expect(result.status, 'completed');
+    final toolMessage = client.messages.singleWhere(
+      (message) => message.role == 'tool',
+    );
+    expect(toolMessage.content!.length, lessThanOrEqualTo(policy.limit));
+    expect(toolMessage.content, contains('__mobile_agent_truncated'));
+  });
 
   test(
     'rebounded structured tool results accumulate omitted entries',
@@ -386,6 +420,28 @@ void main() {
     },
   );
 
+  test(
+    'remote writes for one server serialize across working directories',
+    () async {
+      final queue = RemoteWriteQueue();
+      final firstFinished = Completer<void>();
+      var secondStarted = false;
+
+      final first = queue.run<void>('server-1', () async {
+        await firstFinished.future;
+      }, cancellation: AgentCancellation());
+      final second = queue.run<void>('server-1', () async {
+        secondStarted = true;
+      }, cancellation: AgentCancellation());
+
+      await Future<void>.delayed(Duration.zero);
+      expect(secondStarted, isFalse);
+      firstFinished.complete();
+      await Future.wait([first, second]);
+      expect(secondStarted, isTrue);
+    },
+  );
+
   test('unknown execution modes fall back to confirmation', () async {
     var confirmations = 0;
     var executions = 0;
@@ -494,49 +550,46 @@ void main() {
     },
   );
 
-  test(
-    'review failure is surfaced and requires explicit user approval',
-    () async {
-      final events = <String>[];
-      var confirmations = 0;
-      var executions = 0;
-      final result =
-          await AgentLoop(
-            client: _ToolThenTextClient(),
-            tools: [
-              AgentTool(
-                definition: const AiToolDefinition(
-                  name: 'test.tool',
-                  description: 'test',
-                  parameters: {'type': 'object'},
-                ),
-                call: (_) async {
-                  executions++;
-                  return const {'ok': true};
-                },
+  test('review failure is surfaced and fails closed', () async {
+    final events = <String>[];
+    var confirmations = 0;
+    var executions = 0;
+    final result =
+        await AgentLoop(
+          client: _ToolThenTextClient(),
+          tools: [
+            AgentTool(
+              definition: const AiToolDefinition(
+                name: 'test.tool',
+                description: 'test',
+                parameters: {'type': 'object'},
               ),
-            ],
-          ).run(
-            prompt: '执行',
-            executionMode: 'auto_review',
-            review: (_, _) async => AgentReviewDecision.failure('审查服务不可用'),
-            confirm: (_, _) async {
-              confirmations++;
-              return false;
-            },
-            onEvent: (type, payload) {
-              events.add(type);
-              return Future.value();
-            },
-          );
+              call: (_) async {
+                executions++;
+                return const {'ok': true};
+              },
+            ),
+          ],
+        ).run(
+          prompt: '执行',
+          executionMode: 'auto_review',
+          review: (_, _) async => AgentReviewDecision.failure('审查服务不可用'),
+          confirm: (_, _) async {
+            confirmations++;
+            return false;
+          },
+          onEvent: (type, payload) {
+            events.add(type);
+            return Future.value();
+          },
+        );
 
-      expect(result.status, 'completed');
-      expect(confirmations, 1);
-      expect(executions, 0);
-      expect(events, contains('review.failed'));
-      expect(events, isNot(contains('review.completed')));
-    },
-  );
+    expect(result.status, 'completed');
+    expect(confirmations, 0);
+    expect(executions, 0);
+    expect(events, contains('review.failed'));
+    expect(events, isNot(contains('review.completed')));
+  });
 
   test(
     'local tool failure after cancellation is not marked as remote unknown',
@@ -681,6 +734,55 @@ void main() {
     },
   );
 
+  test(
+    'mid-turn compaction replaces history before the next request',
+    () async {
+      final client = _UsageToolThenTextClient();
+      var compactCalls = 0;
+      final result =
+          await AgentLoop(
+            client: client,
+            tools: [
+              AgentTool(
+                definition: const AiToolDefinition(
+                  name: 'test.tool',
+                  description: 'test',
+                  parameters: {'type': 'object'},
+                ),
+                requiresConfirmation: false,
+                call: (_) async => const {'ok': true},
+              ),
+            ],
+          ).run(
+            prompt: '执行',
+            executionMode: 'auto',
+            compactHistory: (messages) async {
+              compactCalls++;
+              expect(messages.any((message) => message.role == 'tool'), isTrue);
+              return const [
+                AiMessage(role: 'system', content: 'system'),
+                AiMessage(
+                  role: 'assistant',
+                  responsesOutputItems: [
+                    {'type': 'compaction', 'encrypted_content': 'opaque'},
+                  ],
+                ),
+              ];
+            },
+          );
+
+      expect(result.status, 'completed');
+      expect(compactCalls, 1);
+      expect(
+        client.requests[1]
+            .firstWhere((message) => message.responsesOutputItems.isNotEmpty)
+            .responsesOutputItems
+            .single['type'],
+        'compaction',
+      );
+    },
+  );
+
   test('provider-safe tool names map back to internal tools', () async {
     var executions = 0;
     final result = await AgentLoop(
@@ -781,6 +883,36 @@ class _ToolThenTextClient implements AiChatClient {
             arguments: '{}',
           ),
         ],
+      );
+    }
+    return const AiMessage(role: 'assistant', content: 'done');
+  }
+}
+
+class _UsageToolThenTextClient implements AiChatClient {
+  final requests = <List<AiMessage>>[];
+  var calls = 0;
+
+  @override
+  Future<AiMessage> complete({
+    required List<AiMessage> messages,
+    required List<AiToolDefinition> tools,
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    requests.add(List.unmodifiable(messages));
+    if (calls++ == 0) {
+      return const AiMessage(
+        role: 'assistant',
+        toolCalls: [
+          AiToolCall(
+            id: 'fc-1',
+            callId: 'call-1',
+            name: 'test.tool',
+            arguments: '{}',
+          ),
+        ],
+        usage: {'total_tokens': 100},
       );
     }
     return const AiMessage(role: 'assistant', content: 'done');

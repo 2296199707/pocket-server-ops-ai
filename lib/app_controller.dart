@@ -99,6 +99,7 @@ class AppController extends ChangeNotifier {
   final Map<String, Future<ProviderUsageSnapshot>> _providerUsageLoads = {};
   final Map<String, TaskContextUsage> _taskContextUsages = {};
   final Map<String, Future<TaskContextUsage>> _taskContextLoads = {};
+  final Map<String, Future<TaskContextUsage>> _taskCompactions = {};
   final Map<String, int> _taskContextGenerations = {};
   Future<void> _loadTail = Future<void>.value();
   int _idSequence = 0;
@@ -161,7 +162,13 @@ class AppController extends ChangeNotifier {
     final pending = _taskContextLoads[task.id];
     if (pending != null) return pending;
     final generation = _taskContextGenerations[task.id] ?? 0;
-    final load = _loadTaskContextUsage(task, metadata, model, generation);
+    final load = _loadTaskContextUsage(
+      task,
+      metadata,
+      model,
+      generation,
+      activeProvider?.id,
+    );
     _taskContextLoads[task.id] = load;
     try {
       return await load;
@@ -186,6 +193,10 @@ class AppController extends ChangeNotifier {
   }
 
   bool isTaskRunning(String taskId) => _runningTasks.containsKey(taskId);
+
+  bool isTaskCompacting(String taskId) => _taskCompactions.containsKey(taskId);
+
+  String? activeTurnIdFor(String taskId) => _taskRunIds[taskId];
 
   List<TaskEvent> eventsFor(String taskId) {
     return List.unmodifiable(_events[taskId] ?? const <TaskEvent>[]);
@@ -241,9 +252,10 @@ class AppController extends ChangeNotifier {
       beforeSequence: current.first.sequence,
     );
     if (!_tasks.any((task) => task.id == taskId)) return;
+    final latest = eventsFor(taskId);
     _events = {
       ..._events,
-      taskId: List.unmodifiable(_mergeEvents(page.events, current)),
+      taskId: List.unmodifiable(_mergeEvents(page.events, latest)),
     };
     _hasEarlierTaskEvents[taskId] = page.hasEarlier;
     _notify();
@@ -315,12 +327,17 @@ class AppController extends ChangeNotifier {
 
     final recoveredTasks = <Task>[];
     for (final task in storedTasks) {
-      if ((task.status == 'running' || task.status == 'waiting') &&
+      if ((task.status == 'running' ||
+              task.status == 'waiting' ||
+              task.status == 'stopping') &&
           !_runningTasks.containsKey(task.id)) {
+        final latestEvent = await _database.loadLatestEvent(task.id);
         final terminalEvent = await _database.loadLatestTerminalEvent(task.id);
-        final terminalStatus = terminalEvent == null
-            ? null
-            : _statusForTerminalEvent(terminalEvent.type);
+        final terminalStatus =
+            terminalEvent != null &&
+                _terminalEventMatchesLatestEvent(terminalEvent, latestEvent)
+            ? _statusForTerminalEvent(terminalEvent.type)
+            : null;
         if (terminalStatus != null) {
           final recovered = task.copyWith(status: terminalStatus);
           await _database.saveTask(recovered);
@@ -424,8 +441,7 @@ class AppController extends ChangeNotifier {
     // path that might contain the secure-storage integration's files.
     if (roots.isEmpty) return true;
     return roots.any((root) {
-      final normalized = path_util.posix.normalize(root);
-      return candidate == normalized || candidate.startsWith('$normalized/');
+      return LocalFileAccessStore.scopesOverlapCanonical(candidate, root);
     });
   }
 
@@ -659,6 +675,9 @@ class AppController extends ChangeNotifier {
     if (_taskRuns.containsKey(taskId)) {
       throw StateError('任务正在运行，不能修改对话设置');
     }
+    if (_taskCompactions.containsKey(taskId)) {
+      throw StateError('上下文正在压缩，不能修改对话设置');
+    }
 
     final current = _tasks.firstWhere((task) => task.id == taskId);
     final normalizedProjectId = projectId ?? current.projectId;
@@ -729,7 +748,8 @@ class AppController extends ChangeNotifier {
         current.mode != normalizedMode ||
         current.effectiveWorkMode != normalizedWorkMode ||
         current.projectId != normalizedProjectId ||
-        current.serverId != normalizedServerId;
+        current.serverId != normalizedServerId ||
+        current.workingDirectory != normalizedWorkingDirectory;
     final modelChanged = previousModel != nextModel;
     final now = DateTime.now().toUtc();
     final updated = Task(
@@ -750,6 +770,14 @@ class AppController extends ChangeNotifier {
       createdAt: current.createdAt,
       updatedAt: now,
     );
+    if (historyBoundaryChanged) {
+      try {
+        await _releasePhoneTask(taskId);
+      } catch (_) {
+        // A changed task can reconnect with the new boundary even if closing
+        // the old channel reports an error.
+      }
+    }
     await _database.saveTask(updated);
     _tasks = [
       for (final task in _tasks) task.id == updated.id ? updated : task,
@@ -914,9 +942,8 @@ class AppController extends ChangeNotifier {
       } catch (_) {
         // The task is being deleted; its final error is no longer actionable.
       }
-    } else {
-      await _releasePhoneTask(task.id);
     }
+    await _releasePhoneTask(task.id);
     final eventTail = _taskEventTails[task.id];
     if (eventTail != null) await eventTail;
     final eventLoad = _eventLoads[task.id];
@@ -971,6 +998,233 @@ class AppController extends ChangeNotifier {
     return result;
   }
 
+  /// Compact the current Responses history without creating a user-visible
+  /// turn. The standalone endpoint returns the complete next context window;
+  /// keep that output intact as the durable history boundary.
+  Future<TaskContextUsage> compactTaskContext(
+    Task task, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    SshUserInfoHandler? onUserInfoRequest,
+  }) async {
+    final pending = _taskCompactions[task.id];
+    if (pending != null) return pending;
+    if (_taskRuns.containsKey(task.id) || _runningTasks.containsKey(task.id)) {
+      throw StateError('任务运行中，不能主动压缩');
+    }
+    final future = _compactTaskContext(
+      task,
+      onFirstHostKey: onFirstHostKey,
+      onUserInfoRequest: onUserInfoRequest,
+    );
+    _taskCompactions[task.id] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_taskCompactions[task.id], future)) {
+        _taskCompactions.remove(task.id);
+      }
+    }
+  }
+
+  Future<TaskContextUsage> _compactTaskContext(
+    Task task, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    SshUserInfoHandler? onUserInfoRequest,
+  }) async {
+    if (previewMode) throw StateError('预览模式不支持主动压缩');
+    final provider = _providerForTask(task);
+    if (provider.wireApi != 'responses') {
+      throw StateError('当前供应商未使用 Responses，无法主动压缩');
+    }
+    final apiKey = await _readCredential(provider.apiKeyRef, '供应商 API Key 不可用');
+    final cancellation = AgentCancellation();
+    final tools = <AgentTool>[];
+    Project? taskProject;
+    SshConnection? temporaryConnection;
+    RemoteAgentTools? temporaryRemoteTools;
+    AiChatClient? client;
+
+    try {
+      final events = await _database.loadModelEvents(
+        task.id,
+        useCompactionBoundary: true,
+      );
+      var systemPrompt = _systemPrompt(task);
+      final workMode = task.effectiveWorkMode;
+      final useLocalTools = workModeUsesLocal(workMode);
+      final useServerTools = workModeUsesServer(workMode);
+
+      if (task.mode == 'agent') {
+        Project? project;
+        String? workingDirectory;
+        if (useLocalTools) {
+          final access = _localAccess.putIfAbsent(
+            task.id,
+            LocalFileAccessStore.new,
+          );
+          tools.addAll(LocalAgentTools(access).tools);
+          project = projectFor(task.projectId);
+          taskProject = project;
+          if (task.projectId != null && project == null) {
+            throw StateError('对话绑定的项目不存在');
+          }
+          if (project != null) {
+            await _ensureProjectStoragePath(project.localPath);
+            await _projectFiles.ensureRoot(project);
+            final projectTools = ProjectAgentTools(
+              project,
+              _projectFiles,
+              preview: _localPreview,
+            );
+            tools.addAll(
+              _serializeRemoteWrites(
+                projectTools.tools,
+                'project\u0000${project.id}',
+                cancellation: cancellation,
+              ),
+            );
+          }
+        }
+
+        final serverId = task.serverId;
+        if (useServerTools && (serverId == null || serverId.isEmpty)) {
+          throw StateError('服务器工作模式没有目标服务器');
+        }
+        if (useServerTools) {
+          final server = _servers.firstWhere((value) => value.id == serverId);
+          var remoteTools = _phoneTools[task.id];
+          if (remoteTools != null && remoteTools.isClosed) {
+            _phoneTools.remove(task.id);
+            await remoteTools.close();
+            remoteTools = null;
+          }
+          if (remoteTools == null) {
+            temporaryConnection = await _connectServer(
+              server,
+              onFirstHostKey: onFirstHostKey,
+              onUserInfoRequest: onUserInfoRequest,
+            );
+            await _saveObservedHostKey(server, temporaryConnection.hostKey);
+            workingDirectory =
+                task.workingDirectory ?? server.defaultWorkingDirectory;
+            remoteTools = RemoteAgentTools(
+              temporaryConnection,
+              workingDirectory: workingDirectory,
+              project: useLocalTools ? project : null,
+              projectFiles: useLocalTools ? _projectFiles : null,
+            );
+            temporaryRemoteTools = remoteTools;
+          } else {
+            workingDirectory =
+                task.workingDirectory ?? server.defaultWorkingDirectory;
+          }
+          tools.addAll(
+            _serializeRemoteWrites(
+              remoteTools.tools,
+              server.id,
+              cancellation: cancellation,
+            ),
+          );
+          systemPrompt = _systemPrompt(
+            task,
+            project: useLocalTools ? project : null,
+            workingDirectory: workingDirectory,
+          );
+          final instructions = await _remoteInstructions.load(
+            remoteTools.connection,
+            workingDirectory,
+          );
+          if (instructions != null) {
+            systemPrompt =
+                '$systemPrompt\n\n--- project-doc ---\n\n$instructions';
+          }
+        } else {
+          systemPrompt = _systemPrompt(
+            task,
+            project: useLocalTools ? project : null,
+          );
+        }
+        if (tools.isEmpty) throw StateError('Agent 没有可用的项目或服务器工具');
+      }
+
+      final imageProvider = imageProviderFor(task);
+      if (imageProvider != null) {
+        tools.add(
+          _imageGenerationTool(
+            imageProvider,
+            taskProject,
+            task.id,
+            cancellation: cancellation,
+          ),
+        );
+      }
+
+      final model = task.modelOverride ?? provider.model;
+      client = createAiClient(
+        wireApi: provider.wireApi,
+        baseUrl: provider.baseUrl,
+        apiKey: apiKey,
+        model: model,
+        reasoningEffort:
+            task.reasoningEffortOverride ?? provider.reasoningEffort,
+        inputModalities: provider.modelMetadata[model]?.inputModalities,
+      );
+      final compactionClient = client is AiCompactionClient
+          ? client as AiCompactionClient
+          : null;
+      if (compactionClient == null) {
+        throw StateError('当前 Responses 供应商不支持 /responses/compact');
+      }
+      final messages = await _localHistory(
+        task.id,
+        systemPrompt,
+        events,
+        useResponsesCompaction: true,
+        providerId: provider.id,
+      );
+      final hasConversation = messages.any(
+        (message) =>
+            message.role == 'user' ||
+            message.role == 'assistant' ||
+            message.role == 'tool',
+      );
+      if (!hasConversation) throw StateError('当前没有可压缩的对话内容');
+      final outputItems = await compactionClient.compact(
+        messages: messages,
+        instructions: systemPrompt,
+        tools: [for (final tool in tools) tool.definition],
+        cancellation: cancellation.whenCancelled,
+      );
+      if (outputItems.isEmpty) throw StateError('Responses 压缩返回了空历史');
+
+      await appendTaskEvent(
+        taskId: task.id,
+        type: 'context.compacted',
+        payload: {
+          'source': 'manual',
+          'provider_id': provider.id,
+          'wire_api': provider.wireApi,
+          'model': model,
+          'responses_output_items': outputItems,
+        },
+      );
+      _invalidateTaskContextUsage(task.id);
+      return await loadTaskContextUsage(task, provider: provider);
+    } finally {
+      if (client != null) closeAiClient(client);
+      if (temporaryRemoteTools != null) {
+        try {
+          await temporaryRemoteTools.close();
+        } catch (_) {}
+      }
+      if (temporaryConnection != null) {
+        try {
+          await temporaryConnection.close();
+        } catch (_) {}
+      }
+    }
+  }
+
   Future<AgentResult> runTask(
     Task task, {
     required String prompt,
@@ -982,6 +1236,9 @@ class AppController extends ChangeNotifier {
   }) async {
     if (_taskRuns.containsKey(task.id)) {
       throw StateError('任务正在运行');
+    }
+    if (_taskCompactions.containsKey(task.id)) {
+      throw StateError('上下文正在压缩');
     }
     final turnId = _newId('turn');
     _taskRunIds[task.id] = turnId;
@@ -1052,9 +1309,29 @@ class AppController extends ChangeNotifier {
     AiChatClient? client;
     var remoteOperationStarted = false;
     var serviceStarted = false;
+    var userMessageRecorded = false;
+    var durableAttachments = const <AiAttachment>[];
     final workMode = task.effectiveWorkMode;
     final useLocalTools = workModeUsesLocal(workMode);
     final useServerTools = workModeUsesServer(workMode);
+
+    Future<void> appendUserMessage(
+      List<AiAttachment> messageAttachments,
+    ) async {
+      await appendTaskEvent(
+        taskId: task.id,
+        type: 'user.message',
+        payload: {
+          'turn_id': turnId,
+          'text': prompt,
+          if (messageAttachments.isNotEmpty)
+            'attachments': messageAttachments
+                .map((item) => item.toJson())
+                .toList(),
+        },
+      );
+      userMessageRecorded = true;
+    }
 
     Future<void> markTaskWaiting() async {
       if (cancellation.isCancelled) return;
@@ -1112,6 +1389,8 @@ class AppController extends ChangeNotifier {
     }
 
     try {
+      requestAttachments = await _persistAttachments(task.id, attachments);
+      durableAttachments = requestAttachments;
       await _migrateLegacyAttachments(task.id);
       provider = previewMode ? null : _providerForTask(task);
       final useResponsesHistory = provider?.wireApi != 'chat-completions';
@@ -1119,19 +1398,7 @@ class AppController extends ChangeNotifier {
         task.id,
         useCompactionBoundary: useResponsesHistory,
       );
-      requestAttachments = await _persistAttachments(task.id, attachments);
-      await appendTaskEvent(
-        taskId: task.id,
-        type: 'user.message',
-        payload: {
-          'turn_id': turnId,
-          'text': prompt,
-          if (requestAttachments.isNotEmpty)
-            'attachments': requestAttachments
-                .map((item) => item.toJson())
-                .toList(),
-        },
-      );
+      await appendUserMessage(requestAttachments);
       if (previewMode) {
         return await _runPreviewTask(
           task,
@@ -1230,7 +1497,7 @@ class AppController extends ChangeNotifier {
           tools.addAll(
             _serializeRemoteWrites(
               remoteTools.tools,
-              '${server.id}\u0000$workingDirectory',
+              server.id,
               cancellation: cancellation,
             ),
           );
@@ -1277,11 +1544,6 @@ class AppController extends ChangeNotifier {
         model: task.modelOverride ?? activeProvider.model,
         reasoningEffort:
             task.reasoningEffortOverride ?? activeProvider.reasoningEffort,
-        compactThreshold: activeProvider.wireApi == 'responses'
-            ? activeProvider
-                  .modelMetadata[task.modelOverride ?? activeProvider.model]
-                  ?.resolvedAutoCompactTokenLimit
-            : null,
         inputModalities: activeProvider.wireApi == 'responses'
             ? activeProvider
                   .modelMetadata[task.modelOverride ?? activeProvider.model]
@@ -1290,14 +1552,82 @@ class AppController extends ChangeNotifier {
       );
       final modelMetadata = activeProvider
           .modelMetadata[task.modelOverride ?? activeProvider.model];
+      final truncationPolicy =
+          modelMetadata?.resolvedTruncationPolicy ??
+          ProviderTruncationPolicy.codexFallback;
       final loop = AgentLoop(client: client, tools: tools);
-      final initialMessages = await _localHistory(
+      var initialMessages = await _localHistory(
         task.id,
         systemPrompt,
         previousEvents,
         useResponsesCompaction: activeProvider.wireApi == 'responses',
         providerId: activeProvider.id,
       );
+      final compactedItems = await _compactResponsesHistoryIfNeeded(
+        task: task,
+        provider: activeProvider,
+        client: client,
+        messages: initialMessages,
+        tools: tools,
+        instructions: systemPrompt,
+        cancellation: cancellation.whenCancelled,
+        additionalTokenCount:
+            OpenAiCompatibleClient.estimateResponsesTailTokenCount(
+              initialMessages,
+              inputModalities: modelMetadata?.inputModalities,
+            ),
+      );
+      if (compactedItems != null) {
+        initialMessages = [
+          AiMessage(role: 'system', content: systemPrompt),
+          AiMessage(role: 'assistant', responsesOutputItems: compactedItems),
+        ];
+        await appendTurnEvent('context.compacted', {
+          'provider_id': activeProvider.id,
+          'wire_api': activeProvider.wireApi,
+          'model': task.modelOverride ?? activeProvider.model,
+          'responses_output_items': compactedItems,
+        });
+        _invalidateTaskContextUsage(task.id);
+      }
+      Future<List<AiMessage>?> compactHistory(List<AiMessage> messages) async {
+        if (activeProvider.wireApi != 'responses') return null;
+        TokenUsageSnapshot? latestUsage;
+        for (final message in messages.reversed) {
+          final rawUsage = message.usage;
+          if (rawUsage == null) continue;
+          latestUsage = TokenUsageSnapshot.fromProviderUsage(rawUsage);
+          if (latestUsage != null) break;
+        }
+        final compactedItems = await _compactResponsesHistoryIfNeeded(
+          task: task,
+          provider: activeProvider,
+          client: client!,
+          messages: messages,
+          tools: tools,
+          instructions: systemPrompt,
+          cancellation: cancellation.whenCancelled,
+          activeTokenCount: latestUsage?.totalTokens,
+          additionalTokenCount:
+              OpenAiCompatibleClient.estimateResponsesTailTokenCount(
+                messages,
+                inputModalities: modelMetadata?.inputModalities,
+              ),
+        );
+        if (compactedItems == null) return null;
+        await appendTurnEvent('context.compacted', {
+          'provider_id': activeProvider.id,
+          'wire_api': activeProvider.wireApi,
+          'model': task.modelOverride ?? activeProvider.model,
+          'responses_output_items': compactedItems,
+        });
+        _invalidateTaskContextUsage(task.id);
+        return [
+          AiMessage(role: 'system', content: systemPrompt),
+          AiMessage(role: 'assistant', responsesOutputItems: compactedItems),
+        ];
+      }
+
       var eventQueue = Future<void>.value();
       final result = await loop.run(
         prompt: prompt,
@@ -1305,14 +1635,14 @@ class AppController extends ChangeNotifier {
         initialMessages: initialMessages,
         executionMode: task.executionMode,
         cancellation: cancellation,
-        toolOutputLimit: modelMetadata?.truncationPolicy?.limit,
-        toolOutputLimitInTokens:
-            modelMetadata?.truncationPolicy?.mode == 'tokens',
+        toolOutputLimit: truncationPolicy.limit,
+        toolOutputLimitInTokens: truncationPolicy.mode == 'tokens',
         confirm: waitingConfirm,
         review: task.executionMode == 'auto_review'
             ? (tool, arguments) =>
                   _reviewTool(task, tool, arguments, cancellation: cancellation)
             : null,
+        compactHistory: compactHistory,
         onRemoteOperationStarted: (tool) {
           if (tool.writesRemoteState) remoteOperationStarted = true;
         },
@@ -1371,7 +1701,31 @@ class AppController extends ChangeNotifier {
       return result;
     } catch (error) {
       // A setup or persistence failure may happen before AgentLoop can return
-      // its complete message list. Rebuild from durable events on retry.
+      // its complete message list. Codex records accepted input on the
+      // equivalent aborted setup paths; do the same without retaining raw
+      // attachment data in the event log.
+      if (!userMessageRecorded) {
+        try {
+          final persistedEvents = await _database.loadEvents(task.id);
+          TaskEvent? persistedUserMessage;
+          for (final event in persistedEvents.reversed) {
+            if (event.type == 'user.message' &&
+                event.payload['turn_id'] == turnId) {
+              persistedUserMessage = event;
+              break;
+            }
+          }
+          if (persistedUserMessage != null) {
+            _mergeLoadedEvent(persistedUserMessage);
+            userMessageRecorded = true;
+          } else {
+            await appendUserMessage(durableAttachments);
+          }
+        } catch (_) {
+          // Preserve the original setup error if the storage layer is also
+          // unavailable; the normal failure event below remains best effort.
+        }
+      }
       final status = remoteOperationStarted
           ? 'unknown'
           : cancellation.isCancelled
@@ -1391,13 +1745,16 @@ class AppController extends ChangeNotifier {
       }
       if (client != null) closeAiClient(client);
       if (task.mode == 'agent' && serviceStarted) {
+        final keepRemoteTools = remoteTools?.hasRunningProcesses ?? false;
         if (connection == null && cancellation.isCancelled) {
           _sshPool.abort(task.id);
         }
-        try {
-          await _releasePhoneTask(task.id);
-        } catch (_) {
-          // Cleanup must not replace a task result.
+        if (!keepRemoteTools) {
+          try {
+            await _releasePhoneTask(task.id);
+          } catch (_) {
+            // Cleanup must not replace a task result.
+          }
         }
         try {
           await _taskService.stop(task.id);
@@ -1453,10 +1810,11 @@ class AppController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  void stopTask(String taskId) {
+  void stopTask(String taskId, {String? expectedTurnId}) {
     final cancellation = _runningTasks[taskId];
     if (cancellation == null) return;
     final turnId = _taskRunIds[taskId];
+    if (expectedTurnId != null && turnId != expectedTurnId) return;
     cancellation.cancel();
     unawaited(updateTaskStatus(taskId, 'stopping', turnId: turnId));
     unawaited(_recordCancellationRequest(taskId, turnId));
@@ -1509,19 +1867,18 @@ class AppController extends ChangeNotifier {
         exitCode: 0,
       );
     }
-    final connection = await _connectServer(
-      profile,
-      onFirstHostKey: onFirstHostKey,
+    return _remoteWriteQueue.run(
+      profile.id,
+      () => _withServerConnection(
+        profile,
+        (connection) => connection.run(
+          command,
+          workingDirectory: profile.defaultWorkingDirectory,
+        ),
+        onFirstHostKey: onFirstHostKey,
+      ),
+      cancellation: AgentCancellation(),
     );
-    try {
-      await _saveObservedHostKey(profile, connection.hostKey);
-      return await connection.run(
-        command,
-        workingDirectory: profile.defaultWorkingDirectory,
-      );
-    } finally {
-      await connection.close();
-    }
   }
 
   Future<ServerTerminalSession> openServerTerminal(
@@ -1814,13 +2171,17 @@ class AppController extends ChangeNotifier {
   }) async {
     if (remotePath.trim().isEmpty) throw ArgumentError('文件路径不能为空');
     if (previewMode) return;
-    await _withServerConnection(
-      profile,
-      (connection) => connection.writeFile(
-        remotePath.trim(),
-        Uint8List.fromList(utf8.encode(content)),
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(
+        profile,
+        (connection) => connection.writeFile(
+          remotePath.trim(),
+          Uint8List.fromList(utf8.encode(content)),
+        ),
+        onFirstHostKey: onFirstHostKey,
       ),
-      onFirstHostKey: onFirstHostKey,
+      cancellation: AgentCancellation(),
     );
     _invalidateServerDirectoryCache(profile);
   }
@@ -1893,12 +2254,16 @@ class AppController extends ChangeNotifier {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
   }) async {
     if (previewMode) return;
-    await _withServerConnection(profile, (connection) async {
-      final result = await connection.run(statusScriptInstallCommand);
-      if (result.exitCode != 0) {
-        throw StateError('状态脚本安装失败：${result.stderr}');
-      }
-    }, onFirstHostKey: onFirstHostKey);
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(profile, (connection) async {
+        final result = await connection.run(statusScriptInstallCommand);
+        if (result.exitCode != 0) {
+          throw StateError('状态脚本安装失败：${result.stderr}');
+        }
+      }, onFirstHostKey: onFirstHostKey),
+      cancellation: AgentCancellation(),
+    );
   }
 
   Future<void> saveServer({
@@ -1920,14 +2285,40 @@ class AppController extends ChangeNotifier {
     final authTypeChanged = existing != null && existing.authType != authType;
     final endpointChanged =
         existing != null && (existing.host != host || existing.port != port);
+    final defaultWorkingDirectory = workingDirectory.isEmpty
+        ? null
+        : workingDirectory;
+    final connectionSettingsChanged =
+        existing != null &&
+        (endpointChanged ||
+            existing.username != username ||
+            authTypeChanged ||
+            secret.isNotEmpty ||
+            (authType == 'privateKey' &&
+                (passphrase.isNotEmpty || clearPassphrase)) ||
+            (authType != 'privateKey' &&
+                existing.credentialPassphraseRef != null) ||
+            existing.defaultWorkingDirectory != defaultWorkingDirectory);
     final credentialRef = existing?.credentialRef ?? 'server:$id:ssh';
     final passphraseRef = authType == 'privateKey'
         ? (existing?.credentialPassphraseRef ?? 'server:$id:passphrase')
         : null;
+    if (secret.isEmpty && (existing == null || authTypeChanged)) {
+      throw ArgumentError('首次保存服务器时必须填写密码或私钥');
+    }
+    if (connectionSettingsChanged) {
+      if (_tasks.any(
+        (task) => task.serverId == id && _taskRuns.containsKey(task.id),
+      )) {
+        throw StateError('服务器任务正在运行，不能修改连接设置');
+      }
+      await Future.wait([
+        for (final task in _tasks)
+          if (task.serverId == id) _releasePhoneTask(task.id),
+      ]);
+    }
     if (secret.isNotEmpty) {
       await _credentials.write(credentialRef, secret);
-    } else if (existing == null || authTypeChanged) {
-      throw ArgumentError('首次保存服务器时必须填写密码或私钥');
     }
     await _database.saveServer(
       ServerProfile(
@@ -1943,9 +2334,7 @@ class AppController extends ChangeNotifier {
         hostKeyFingerprint: endpointChanged
             ? null
             : existing?.hostKeyFingerprint,
-        defaultWorkingDirectory: workingDirectory.isEmpty
-            ? null
-            : workingDirectory,
+        defaultWorkingDirectory: defaultWorkingDirectory,
       ),
     );
     if (authType == 'privateKey' && passphrase.isNotEmpty) {
@@ -1974,9 +2363,7 @@ class AppController extends ChangeNotifier {
         hostKeyFingerprint: endpointChanged
             ? null
             : existing?.hostKeyFingerprint,
-        defaultWorkingDirectory: workingDirectory.isEmpty
-            ? null
-            : workingDirectory,
+        defaultWorkingDirectory: defaultWorkingDirectory,
       ),
     ]..sort((left, right) => left.name.compareTo(right.name));
     _invalidateServerDirectoryCacheById(id);
@@ -2271,9 +2658,6 @@ class AppController extends ChangeNotifier {
         apiKey: apiKey,
         model: model,
         reasoningEffort: provider.reasoningEffort,
-        compactThreshold: provider.wireApi == 'responses'
-            ? provider.modelMetadata[model]?.resolvedAutoCompactTokenLimit
-            : null,
         inputModalities: provider.wireApi == 'responses'
             ? provider.modelMetadata[model]?.inputModalities
             : null,
@@ -2283,7 +2667,7 @@ class AppController extends ChangeNotifier {
         'work_mode': task.effectiveWorkMode,
         'tool': tool.definition.name,
         'tool_description': tool.definition.description,
-        'arguments': arguments,
+        'arguments': redactReviewInput(arguments),
         'server_id': task.serverId,
         'working_directory': task.workingDirectory,
       });
@@ -2385,11 +2769,57 @@ class AppController extends ChangeNotifier {
     return provider.modelMetadata[model];
   }
 
+  Future<List<Map<String, Object?>>?> _compactResponsesHistoryIfNeeded({
+    required Task task,
+    required ProviderProfile provider,
+    required AiChatClient client,
+    required List<AiMessage> messages,
+    required List<AgentTool> tools,
+    required String instructions,
+    required Future<void> cancellation,
+    int? activeTokenCount,
+    int additionalTokenCount = 0,
+  }) async {
+    if (provider.wireApi != 'responses') return null;
+    final metadata = _contextMetadataForTask(task, provider);
+    final threshold = metadata?.resolvedAutoCompactTokenLimit;
+    if (threshold == null) return null;
+    final baseTokens =
+        activeTokenCount ??
+        (await loadTaskContextUsage(
+          task,
+          provider: provider,
+        )).last?.totalTokens;
+    final activeTokens = baseTokens == null
+        ? additionalTokenCount > 0
+              ? additionalTokenCount
+              : null
+        : baseTokens + additionalTokenCount;
+    if (activeTokens == null || activeTokens < threshold) return null;
+    final compactionClient = client is AiCompactionClient
+        ? client as AiCompactionClient
+        : null;
+    if (compactionClient == null) {
+      throw StateError('当前 Responses 供应商不支持 /responses/compact');
+    }
+    final outputItems = await compactionClient.compact(
+      messages: messages,
+      instructions: instructions,
+      tools: [for (final tool in tools) tool.definition],
+      cancellation: cancellation,
+    );
+    if (outputItems.isEmpty) {
+      throw StateError('Responses 压缩返回了空历史');
+    }
+    return outputItems;
+  }
+
   Future<TaskContextUsage> _loadTaskContextUsage(
     Task task,
     ProviderModelMetadata? metadata,
     String model,
     int generation,
+    String? providerId,
   ) async {
     TokenUsageSnapshot? last;
     TokenUsageSnapshot? total;
@@ -2397,6 +2827,20 @@ class AppController extends ChangeNotifier {
     var compactionCount = 0;
     final payloads = await _database.loadAssistantUsagePayloads(task.id);
     for (final payload in payloads) {
+      final eventProviderId = payload['provider_id'];
+      if (providerId != null &&
+          eventProviderId is String &&
+          eventProviderId.isNotEmpty &&
+          eventProviderId != providerId) {
+        continue;
+      }
+      final hasCompaction = _compactionCountInPayload(payload) > 0;
+      if (hasCompaction) {
+        // A compacted history is a new active context. Keep cumulative totals,
+        // but do not use the pre-compaction request to trigger another compact.
+        last = null;
+        lastModel = null;
+      }
       final stored = payload['context_usage'];
       if (stored is Map) {
         final snapshot = TaskContextUsage.fromMap(
@@ -2710,6 +3154,24 @@ class AppController extends ChangeNotifier {
           activeToolCallIds = {
             for (final call in normalizedCalls) call.id: call.toolResultId,
           };
+        case 'context.compacted':
+          if (!useResponsesCompaction) continue;
+          final compactedProviderId = event.payload['provider_id'];
+          if (providerId != null &&
+              compactedProviderId is String &&
+              compactedProviderId.isNotEmpty &&
+              compactedProviderId != providerId) {
+            continue;
+          }
+          final compactedItems = _readResponsesOutputItems(
+            event.payload['responses_output_items'],
+          );
+          if (compactedItems.isEmpty) continue;
+          messages.add(
+            AiMessage(role: 'assistant', responsesOutputItems: compactedItems),
+          );
+          assistantIndex = null;
+          activeToolCallIds = <String, String>{};
         case 'tool.started':
           final id = event.payload['id'];
           final name = event.payload['name'];
@@ -3214,6 +3676,15 @@ class AppController extends ChangeNotifier {
     };
   }
 
+  void _mergeLoadedEvent(TaskEvent event) {
+    _events = {
+      ..._events,
+      event.taskId: List.unmodifiable(
+        _mergeEvents(eventsFor(event.taskId), [event]),
+      ),
+    };
+  }
+
   static List<Map<String, Object?>> _readResponsesOutputItems(Object? value) {
     if (value is! List) return const [];
     return [
@@ -3652,4 +4123,15 @@ String? _statusForTerminalEvent(String type) {
     default:
       return null;
   }
+}
+
+bool _terminalEventMatchesLatestEvent(TaskEvent terminal, TaskEvent? latest) {
+  if (latest == null) return false;
+  if (terminal.sequence == latest.sequence) return true;
+  final terminalTurnId = terminal.payload['turn_id'];
+  final latestTurnId = latest.payload['turn_id'];
+  return latest.type == 'task.cancel_requested' &&
+      terminalTurnId is String &&
+      terminalTurnId.isNotEmpty &&
+      latestTurnId == terminalTurnId;
 }

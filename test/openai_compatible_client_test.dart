@@ -7,6 +7,45 @@ import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/agent/openai_compatible_client.dart';
 
 void main() {
+  test(
+    'Responses tail token estimate includes local items after model output',
+    () {
+      const call = {
+        'type': 'function_call',
+        'id': 'fc_1',
+        'call_id': 'call_1',
+        'name': 'terminal_exec',
+        'arguments': '{}',
+      };
+      final toolOutput = 'x' * 41;
+      final expectedItems = [
+        {
+          'type': 'function_call_output',
+          'call_id': 'call_1',
+          'output': toolOutput,
+        },
+      ];
+      final expectedBytes = utf8
+          .encode(jsonEncode(expectedItems.single))
+          .length;
+
+      expect(
+        OpenAiCompatibleClient.estimateResponsesTailTokenCount([
+          const AiMessage(role: 'assistant', responsesOutputItems: [call]),
+          AiMessage.tool(toolCallId: 'call_1', content: toolOutput),
+        ]),
+        (expectedBytes + 3) ~/ 4,
+      );
+      expect(
+        OpenAiCompatibleClient.estimateResponsesTailTokenCount([
+          AiMessage.user('没有模型输出边界'),
+          AiMessage.tool(toolCallId: 'call_1', content: toolOutput),
+        ]),
+        0,
+      );
+    },
+  );
+
   test('Responses input sends selected image and file attachments', () async {
     late http.Request request;
     final client = OpenAiCompatibleClient(
@@ -71,63 +110,154 @@ void main() {
     });
   });
 
-  test('Responses JSON parses and enables server-side compaction', () async {
-    late http.Request request;
+  test(
+    'Responses JSON parses without embedding compaction configuration',
+    () async {
+      late http.Request request;
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'gpt-5.6-luna',
+        client: MockClient((incoming) async {
+          request = incoming;
+          return http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'function_call',
+                  'id': 'fc_1',
+                  'call_id': 'call_1',
+                  'name': 'terminal.exec',
+                  'arguments': '{"command":"pwd"}',
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      final response = await client.complete(
+        messages: [AiMessage.user('执行 pwd')],
+        tools: [
+          const AiToolDefinition(
+            name: 'terminal.exec',
+            description: 'Run a command',
+            parameters: {'type': 'object'},
+          ),
+        ],
+      );
+
+      final body = jsonDecode(request.body) as Map<String, Object?>;
+      expect(request.url.path, '/v1/responses');
+      expect(body['store'], false);
+      expect(body.containsKey('reasoning'), isFalse);
+      expect(body.containsKey('context_management'), isFalse);
+      expect((body['tools'] as List).single, {
+        'type': 'function',
+        'name': 'terminal_exec',
+        'description': 'Run a command',
+        'parameters': {'type': 'object'},
+      });
+      expect(response.toolCalls.single.id, 'fc_1');
+      expect(response.toolCalls.single.callId, 'call_1');
+      expect(response.toolCalls.single.effectiveCallId, 'call_1');
+      expect(response.responsesOutputItems.single['type'], 'function_call');
+    },
+  );
+
+  test(
+    'Responses compaction uses its dedicated endpoint and replaces history',
+    () async {
+      late http.Request request;
+      const compactedItem = {
+        'type': 'compaction',
+        'encrypted_content': 'opaque-summary',
+      };
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'gpt-5.6-luna',
+        reasoningEffort: 'high',
+        client: MockClient((incoming) async {
+          request = incoming;
+          return http.Response(
+            jsonEncode({
+              'output': [compactedItem],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      final output = await client.compact(
+        messages: [
+          const AiMessage(role: 'system', content: 'base instructions'),
+          AiMessage.user('保留这条用户消息'),
+        ],
+        instructions: 'base instructions',
+        tools: const [
+          AiToolDefinition(
+            name: 'terminal.exec',
+            description: 'Run a command',
+            parameters: {'type': 'object'},
+          ),
+        ],
+      );
+
+      final body = jsonDecode(request.body) as Map<String, Object?>;
+      expect(request.url.path, '/v1/responses/compact');
+      expect(body['model'], 'gpt-5.6-luna');
+      expect(body['instructions'], 'base instructions');
+      expect(body['parallel_tool_calls'], true);
+      expect(body['reasoning'], {'effort': 'high'});
+      expect((body['input'] as List).length, 1);
+      expect((body['input'] as List).single['role'], 'user');
+      expect(body.containsKey('stream'), isFalse);
+      expect(body.containsKey('store'), isFalse);
+      expect(output, [compactedItem]);
+    },
+  );
+
+  test('Responses compaction rejects non-object output items', () async {
     final client = OpenAiCompatibleClient(
       baseUrl: 'https://provider.example/v1',
       apiKey: 'test-key',
-      model: 'gpt-5.6-luna',
-      compactThreshold: 200000,
-      client: MockClient((incoming) async {
-        request = incoming;
-        return http.Response(
+      model: 'test-model',
+      client: MockClient(
+        (_) async => http.Response(
           jsonEncode({
-            'status': 'completed',
             'output': [
-              {
-                'type': 'function_call',
-                'id': 'fc_1',
-                'call_id': 'call_1',
-                'name': 'terminal.exec',
-                'arguments': '{"command":"pwd"}',
-              },
+              {'type': 'compaction', 'encrypted_content': 'opaque-summary'},
+              'invalid-item',
             ],
           }),
           200,
           headers: {'content-type': 'application/json'},
-        );
-      }),
+        ),
+      ),
     );
     addTearDown(client.close);
 
-    final response = await client.complete(
-      messages: [AiMessage.user('执行 pwd')],
-      tools: [
-        const AiToolDefinition(
-          name: 'terminal.exec',
-          description: 'Run a command',
-          parameters: {'type': 'object'},
+    await expectLater(
+      client.compact(
+        messages: [AiMessage.user('压缩历史')],
+        instructions: 'instructions',
+        tools: const [],
+      ),
+      throwsA(
+        isA<AiResponseInvalid>().having(
+          (error) => error.message,
+          'message',
+          contains('index 1'),
         ),
-      ],
+      ),
     );
-
-    final body = jsonDecode(request.body) as Map<String, Object?>;
-    expect(request.url.path, '/v1/responses');
-    expect(body['store'], false);
-    expect(body.containsKey('reasoning'), isFalse);
-    expect(body['context_management'], [
-      {'type': 'compaction', 'compact_threshold': 200000},
-    ]);
-    expect((body['tools'] as List).single, {
-      'type': 'function',
-      'name': 'terminal_exec',
-      'description': 'Run a command',
-      'parameters': {'type': 'object'},
-    });
-    expect(response.toolCalls.single.id, 'fc_1');
-    expect(response.toolCalls.single.callId, 'call_1');
-    expect(response.toolCalls.single.effectiveCallId, 'call_1');
-    expect(response.responsesOutputItems.single['type'], 'function_call');
   });
 
   test(
@@ -427,7 +557,7 @@ void main() {
           'data: ${jsonEncode({'type': 'response.output_item.done', 'item': compaction})}\n\n'
           'data: ${jsonEncode({
             'type': 'response.completed',
-            'response': {'status': 'completed'},
+            'response': {'id': 'resp_sse_compaction', 'status': 'completed'},
           })}\n\n',
           200,
           headers: {'content-type': 'text/event-stream'},
@@ -524,6 +654,60 @@ void main() {
     await expectLater(
       client.complete(messages: [AiMessage.user('hello')], tools: const []),
       throwsA(isA<AiResponseIncomplete>()),
+    );
+  });
+
+  test('malformed Responses SSE event is skipped before a valid completion', () async {
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      client: MockClient(
+        (_) async => http.Response.bytes(
+          utf8.encode(
+            'data: {not-json}\n\n'
+            'data: ${jsonEncode({'type': 'response.output_text.delta', 'delta': '完成'})}\n\n'
+            'data: ${jsonEncode({
+              'type': 'response.completed',
+              'response': {'id': 'resp_after_malformed', 'status': 'completed'},
+            })}\n\n',
+          ),
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        ),
+      ),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('继续')],
+      tools: const [],
+    );
+
+    expect(response.content, '完成');
+  });
+
+  test('Responses SSE completion without response id is rejected', () async {
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      client: MockClient(
+        (_) async => http.Response(
+          'data: ${jsonEncode({
+            'type': 'response.completed',
+            'response': {'status': 'completed'},
+          })}\n\n',
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        ),
+      ),
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.complete(messages: [AiMessage.user('继续')], tools: const []),
+      throwsA(isA<AiResponseInvalid>()),
     );
   });
 
@@ -637,7 +821,7 @@ void main() {
         'item': {'type': 'function_call', 'id': 'fc_1', 'name': 'terminal.exec', 'status': 'completed', 'arguments': '{"command":"pwd"}'},
       })}\n\n',
       'data: {"type":"response.completed",\n'
-          'data: "response":{"status":"completed"}}\n\n',
+          'data: "response":{"id":"resp_multiline","status":"completed"}}\n\n',
     ].join();
     final client = OpenAiCompatibleClient(
       baseUrl: 'https://provider.example/v1',
@@ -667,7 +851,7 @@ void main() {
       'data: ${jsonEncode({'type': 'response.output_text.done', 'text': '完成'})}\n\n',
       'data: ${jsonEncode({
         'type': 'response.completed',
-        'response': {'status': 'completed'},
+        'response': {'id': 'resp_text_done', 'status': 'completed'},
       })}\n\n',
     ].join();
     final client = OpenAiCompatibleClient(
@@ -721,6 +905,11 @@ void main() {
       }
 
       expect(error, isNotNull);
+      expect(error, isA<AiProviderHttpException>());
+      expect(
+        (error as AiProviderHttpException).kind,
+        AiProviderHttpErrorKind.server,
+      );
       expect(error.toString(), isNot(contains(secret)));
       expect(error.toString(), contains('[REDACTED]'));
     },

@@ -135,31 +135,24 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
               child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  Expanded(
-                    child: _DrawerActionButton(
-                      icon: Icons.add_circle_outline,
-                      label: '服务器添加',
-                      onPressed: _openServerManagerFromDrawer,
-                    ),
+                  _DrawerActionButton(
+                    icon: Icons.add_circle_outline,
+                    label: '服务器添加',
+                    onPressed: _openServerManagerFromDrawer,
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _DrawerActionButton(
-                      icon: Icons.dashboard_outlined,
-                      label: '服务器仪表盘',
-                      onPressed: _openDashboardFromDrawer,
-                    ),
+                  _DrawerActionButton(
+                    icon: Icons.dashboard_outlined,
+                    label: '服务器仪表盘',
+                    onPressed: _openDashboardFromDrawer,
                   ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: _DrawerActionButton(
-                      icon: Icons.smart_toy_outlined,
-                      label: '供应商设置',
-                      onPressed: _openProviderSettingsFromDrawer,
-                    ),
+                  _DrawerActionButton(
+                    icon: Icons.smart_toy_outlined,
+                    label: '供应商设置',
+                    onPressed: _openProviderSettingsFromDrawer,
                   ),
                 ],
               ),
@@ -991,24 +984,19 @@ class _DrawerActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return OutlinedButton(
-      onPressed: onPressed,
-      style: OutlinedButton.styleFrom(
-        minimumSize: const Size.fromHeight(52),
-        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 20),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.labelSmall,
-          ),
-        ],
+    return Tooltip(
+      message: label,
+      child: IconButton(
+        onPressed: onPressed,
+        tooltip: label,
+        constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        style: IconButton.styleFrom(
+          side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+        icon: Icon(icon, size: 18),
       ),
     );
   }

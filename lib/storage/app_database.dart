@@ -374,11 +374,21 @@ class AppDatabase {
         startSequence = row['sequence'] as int;
       }
     }
+    var providerProjectionSequence = startSequence;
+    for (final row in contextRows) {
+      final sequence = row['sequence'] as int;
+      if (sequence > providerProjectionSequence &&
+          _requiresProviderProjection(_decodePayload(row['payload']))) {
+        providerProjectionSequence = sequence;
+      }
+    }
     final rows = await database.query(
       'task_events',
       columns: ['payload'],
-      where: "taskId = ? AND type = 'assistant.completed' AND sequence > ?",
-      whereArgs: [taskId, startSequence],
+      where:
+          "taskId = ? AND type IN ('assistant.completed', 'context.compacted') "
+          'AND sequence > ?',
+      whereArgs: [taskId, providerProjectionSequence],
       orderBy: 'sequence',
     );
     return [
@@ -414,6 +424,7 @@ class AppDatabase {
         providerProjectionSequence = sequence;
       }
     }
+    String? compactedTurnId;
     if (useCompactionBoundary) {
       const scanPageSize = 32;
       var offset = 0;
@@ -423,7 +434,8 @@ class AppDatabase {
           'task_events',
           columns: ['sequence', 'payload'],
           where:
-              "taskId = ? AND type = 'assistant.completed' AND sequence >= ?",
+              "taskId = ? AND type IN ('assistant.completed', 'context.compacted') "
+              'AND sequence >= ?',
           whereArgs: [taskId, providerProjectionSequence],
           orderBy: 'sequence DESC',
           limit: scanPageSize,
@@ -435,6 +447,10 @@ class AppDatabase {
           );
           if (_payloadHasCompaction(payload)) {
             startSequence = row['sequence'] as int;
+            final turnId = payload['turn_id'];
+            compactedTurnId = turnId is String && turnId.isNotEmpty
+                ? turnId
+                : null;
             foundCompaction = true;
             break;
           }
@@ -449,7 +465,29 @@ class AppDatabase {
       whereArgs: [taskId, startSequence],
       orderBy: 'sequence',
     );
-    return rows.map(_eventFromRow).toList(growable: false);
+    final events = rows.map(_eventFromRow).toList(growable: false);
+    if (compactedTurnId == null) return events;
+
+    // The app durably records the new user message before compaction so a
+    // setup failure cannot lose it. Codex compacts before recording that
+    // message, so restore the same logical order when reading model history.
+    final precedingUserRows = await database.query(
+      'task_events',
+      where: "taskId = ? AND type = 'user.message' AND sequence < ?",
+      whereArgs: [taskId, startSequence],
+      orderBy: 'sequence DESC',
+      limit: 1,
+    );
+    if (precedingUserRows.isEmpty) return events;
+    final precedingUser = _eventFromRow(precedingUserRows.single);
+    if (precedingUser.payload['turn_id'] != compactedTurnId) return events;
+
+    return [
+      for (final event in events) ...[
+        event,
+        if (event.sequence == startSequence) precedingUser,
+      ],
+    ];
   }
 
   Future<TaskEventPage> loadRecentEvents(

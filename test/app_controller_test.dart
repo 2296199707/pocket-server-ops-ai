@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -8,6 +9,7 @@ import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
 import 'package:mobile_agent/domain/models.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
+import 'package:mobile_agent/storage/app_database.dart';
 import 'package:mobile_agent/storage/memory_app_database.dart';
 import 'package:mobile_agent/storage/attachment_store.dart';
 
@@ -79,6 +81,110 @@ void main() {
     controller.dispose();
   });
 
+  test('a task with only a partially persisted nonterminal event is recovered as unknown', () async {
+    final database = MemoryAppDatabase();
+    final timestamp = DateTime.utc(2026, 8, 24);
+    await database.saveTask(
+      Task(
+        id: 'task-1',
+        mode: 'agent',
+        serverId: 'server-1',
+        providerId: null,
+        title: '半写入任务',
+        workingDirectory: '/srv/app',
+        executionMode: 'confirm',
+        status: 'running',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'event-started',
+        taskId: 'task-1',
+        sequence: 1,
+        type: 'task.started',
+        timestamp: timestamp,
+        payload: const {'turn_id': 'turn-1'},
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'event-partial',
+        taskId: 'task-1',
+        sequence: 2,
+        type: 'assistant.completed',
+        timestamp: timestamp.add(const Duration(seconds: 1)),
+        payload: const {'turn_id': 'turn-1', 'text': '部分回复'},
+      ),
+    );
+
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+
+    await controller.load();
+
+    expect(controller.tasks.single.status, 'unknown');
+    expect(controller.eventsFor('task-1').single.type, 'task.recovered');
+    expect((await database.loadLatestEvent('task-1'))?.type, 'task.recovered');
+    controller.dispose();
+  });
+
+  test(
+    'a late nonterminal event cannot make a terminal event authoritative',
+    () async {
+      final database = MemoryAppDatabase();
+      final timestamp = DateTime.utc(2026, 8, 24);
+      await database.saveTask(
+        Task(
+          id: 'task-1',
+          mode: 'agent',
+          serverId: 'server-1',
+          providerId: null,
+          title: '迟到事件',
+          workingDirectory: '/srv/app',
+          executionMode: 'confirm',
+          status: 'running',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'event-completed',
+          taskId: 'task-1',
+          sequence: 1,
+          type: 'task.completed',
+          timestamp: timestamp,
+          payload: const {'turn_id': 'turn-1'},
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'event-late',
+          taskId: 'task-1',
+          sequence: 2,
+          type: 'assistant.completed',
+          timestamp: timestamp.add(const Duration(seconds: 1)),
+          payload: const {'turn_id': 'turn-1', 'text': '迟到'},
+        ),
+      );
+
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+
+      await controller.load();
+
+      expect(controller.tasks.single.status, 'unknown');
+      expect(controller.eventsFor('task-1').single.type, 'task.recovered');
+      controller.dispose();
+    },
+  );
+
   test(
     'preview phone Agent remains local and never needs server credentials',
     () async {
@@ -130,6 +236,13 @@ void main() {
     expect(firstTurn, isA<String>());
     expect(secondTurn, isA<String>());
     expect(secondTurn, isNot(firstTurn));
+
+    await controller.updateTaskStatus(
+      task.id,
+      'failed',
+      turnId: firstTurn as String,
+    );
+    expect(controller.tasks.single.status, 'completed');
     expect(controller.isTaskRunning(task.id), isFalse);
     controller.dispose();
   });
@@ -786,6 +899,28 @@ void main() {
     controller.dispose();
   });
 
+  test('a stale stop request cannot cancel the active turn', () async {
+    final database = _BlockingModelHistoryDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      previewMode: true,
+    );
+    await controller.load();
+    final task = await controller.createTask(title: '停止竞态');
+    final run = controller.runTask(task, prompt: '继续执行');
+
+    await database.started.future;
+    final activeTurnId = controller.activeTurnIdFor(task.id);
+    expect(activeTurnId, isNotNull);
+    controller.stopTask(task.id, expectedTurnId: 'stale-turn');
+    expect(controller.isTaskRunning(task.id), isTrue);
+    database.release.complete();
+
+    expect((await run).status, 'completed');
+    controller.dispose();
+  });
+
   test(
     'changing a server endpoint clears its saved host fingerprint',
     () async {
@@ -1034,6 +1169,266 @@ void main() {
   });
 
   test(
+    'manual Responses compaction stores the canonical output window',
+    () async {
+      final requestBodies = <Map<String, Object?>>[];
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      const compactedItem = {
+        'type': 'compaction',
+        'id': 'cmp-1',
+        'encrypted_content': 'opaque-summary',
+      };
+      const retainedItem = {
+        'type': 'message',
+        'id': 'retained-1',
+        'role': 'assistant',
+        'content': [
+          {'type': 'output_text', 'text': '保留摘要'},
+        ],
+      };
+      server.listen((request) async {
+        final raw = await utf8.decoder.bind(request).join();
+        requestBodies.add(Map<String, Object?>.from(jsonDecode(raw) as Map));
+        request.response.headers.contentType = ContentType.json;
+        if (request.uri.path.endsWith('/compact')) {
+          request.response.write(
+            jsonEncode({
+              'output': [retainedItem, compactedItem],
+            }),
+          );
+        } else {
+          request.response.write(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '继续完成'},
+                  ],
+                },
+              ],
+            }),
+          );
+        }
+        await request.response.close();
+      });
+
+      final database = MemoryAppDatabase();
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveProvider(
+        name: 'Responses 测试供应商',
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'model-a',
+        secret: 'test-key',
+        isDefault: true,
+      );
+      final provider = controller.providers.single;
+      final task = await controller.createTask(
+        mode: 'chat',
+        providerId: provider.id,
+        title: '主动压缩',
+      );
+      await controller.appendTaskEvent(
+        taskId: task.id,
+        type: 'user.message',
+        payload: const {'text': '第一轮请求'},
+      );
+      await controller.appendTaskEvent(
+        taskId: task.id,
+        type: 'assistant.completed',
+        payload: {
+          'text': '旧回复',
+          'provider_id': provider.id,
+          'wire_api': 'responses',
+          'model': 'model-a',
+          'responses_output_items': const [
+            {
+              'type': 'message',
+              'id': 'old-output',
+              'role': 'assistant',
+              'content': [
+                {'type': 'output_text', 'text': '旧回复'},
+              ],
+            },
+          ],
+          'usage': const {
+            'input_tokens': 80,
+            'output_tokens': 20,
+            'total_tokens': 100,
+          },
+        },
+      );
+
+      final usage = await controller.compactTaskContext(task);
+
+      expect(requestBodies, hasLength(1));
+      final compactBody = requestBodies.single;
+      expect(compactBody['model'], 'model-a');
+      final compactInput = compactBody['input'] as List;
+      expect(
+        compactInput.any((item) => item is Map && item['role'] == 'user'),
+        isTrue,
+      );
+      expect(
+        compactInput.any((item) => item is Map && item['id'] == 'old-output'),
+        isTrue,
+      );
+      final compactEvents = controller
+          .eventsFor(task.id)
+          .where((event) => event.type == 'context.compacted')
+          .toList();
+      expect(compactEvents, hasLength(1));
+      expect(compactEvents.single.payload['source'], 'manual');
+      expect(compactEvents.single.payload['responses_output_items'], [
+        retainedItem,
+        compactedItem,
+      ]);
+      expect(usage.last, isNull);
+      expect(usage.compactionCount, 1);
+
+      final result = await controller.runTask(task, prompt: '继续');
+      expect(result.status, 'completed');
+      expect(requestBodies, hasLength(2));
+      final nextInput = requestBodies.last['input'] as List;
+      expect(
+        nextInput.any((item) => item is Map && item['type'] == 'compaction'),
+        isTrue,
+      );
+      expect(
+        nextInput.any((item) => item is Map && item['id'] == 'retained-1'),
+        isTrue,
+      );
+      expect(
+        nextInput.any(
+          (item) =>
+              item is Map &&
+              item['role'] == 'user' &&
+              (item['content'] as List).any(
+                (content) => content is Map && content['text'] == '继续',
+              ),
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test('failed manual compaction does not write a context event', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      await utf8.decoder.bind(request).join();
+      request.response.statusCode = 503;
+      request.response.write('temporary failure');
+      await request.response.close();
+    });
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: '失败压缩供应商',
+      baseUrl: 'http://127.0.0.1:${server.port}/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    final provider = controller.providers.single;
+    final task = await controller.createTask(
+      mode: 'chat',
+      providerId: provider.id,
+      title: '压缩失败',
+    );
+    await controller.appendTaskEvent(
+      taskId: task.id,
+      type: 'user.message',
+      payload: const {'text': '保留历史'},
+    );
+
+    await expectLater(
+      controller.compactTaskContext(task),
+      throwsA(isA<AiProviderHttpException>()),
+    );
+    expect(
+      controller
+          .eventsFor(task.id)
+          .where((event) => event.type == 'context.compacted'),
+      isEmpty,
+    );
+  });
+
+  test('manual compaction is rejected while a task is running', () async {
+    final requestStarted = Completer<void>();
+    final release = Completer<void>();
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      await utf8.decoder.bind(request).join();
+      if (!requestStarted.isCompleted) requestStarted.complete();
+      await release.future;
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'status': 'completed',
+          'output': [
+            {
+              'type': 'message',
+              'role': 'assistant',
+              'content': [
+                {'type': 'output_text', 'text': '完成'},
+              ],
+            },
+          ],
+        }),
+      );
+      await request.response.close();
+    });
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: '运行中压缩供应商',
+      baseUrl: 'http://127.0.0.1:${server.port}/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    final provider = controller.providers.single;
+    final task = await controller.createTask(
+      mode: 'chat',
+      providerId: provider.id,
+      title: '运行中',
+    );
+    final running = controller.runTask(task, prompt: '执行中');
+    await requestStarted.future;
+
+    await expectLater(
+      controller.compactTaskContext(task),
+      throwsA(
+        isA<StateError>().having(
+          (error) => '$error',
+          'message',
+          contains('任务运行中'),
+        ),
+      ),
+    );
+    release.complete();
+    expect((await running).status, 'completed');
+  });
+
+  test(
     'attachments are referenced in events and restored after restart',
     () async {
       final root = await Directory.systemTemp.createTemp('mobile-agent-files-');
@@ -1229,6 +1624,63 @@ void main() {
     },
   );
 
+  test(
+    'loading earlier events keeps an event appended during the load',
+    () async {
+      final database = _BlockingEventsBeforeDatabase();
+      final timestamp = DateTime.utc(2026, 8, 26);
+      await database.saveTask(
+        Task(
+          id: 'task-page-race',
+          mode: 'chat',
+          serverId: null,
+          providerId: null,
+          title: '分页竞态',
+          workingDirectory: null,
+          executionMode: 'confirm',
+          status: 'completed',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        ),
+      );
+      for (var sequence = 1; sequence <= 80; sequence++) {
+        await database.saveEvent(
+          TaskEvent(
+            eventId: 'page-event-$sequence',
+            taskId: 'task-page-race',
+            sequence: sequence,
+            type: 'user.message',
+            timestamp: timestamp,
+            payload: {'text': 'message $sequence'},
+          ),
+        );
+      }
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      await controller.ensureTaskEventsLoaded('task-page-race');
+
+      final loading = controller.loadEarlierTaskEvents('task-page-race');
+      await database.started.future;
+      await controller.appendTaskEvent(
+        taskId: 'task-page-race',
+        type: 'user.message',
+        payload: const {'text': 'new message'},
+      );
+      database.release.complete();
+      await loading;
+
+      expect(controller.eventsFor('task-page-race'), hasLength(81));
+      expect(
+        controller.eventsFor('task-page-race').last.payload['text'],
+        'new message',
+      );
+      controller.dispose();
+    },
+  );
+
   test('attachments before the latest compaction are not read again', () async {
     final root = await Directory.systemTemp.createTemp('mobile-agent-compact-');
     addTearDown(() async {
@@ -1324,6 +1776,69 @@ void main() {
     expect(await database.loadAttachment('missing-image'), isNotNull);
     controller.dispose();
   });
+
+  test(
+    'model history restores the current user after pre-turn compaction',
+    () async {
+      final database = MemoryAppDatabase();
+      final timestamp = DateTime.utc(2026, 8, 26);
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'current-user-before-compaction',
+          taskId: 'task-pre-turn-compaction',
+          sequence: 1,
+          type: 'user.message',
+          timestamp: timestamp,
+          payload: const {'turn_id': 'turn-current', 'text': '本轮请求'},
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'task-started-before-compaction',
+          taskId: 'task-pre-turn-compaction',
+          sequence: 2,
+          type: 'task.started',
+          timestamp: timestamp,
+          payload: const {'turn_id': 'turn-current'},
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'pre-turn-compaction',
+          taskId: 'task-pre-turn-compaction',
+          sequence: 3,
+          type: 'context.compacted',
+          timestamp: timestamp,
+          payload: const {
+            'turn_id': 'turn-current',
+            'responses_output_items': [
+              {'type': 'compaction', 'encrypted_content': 'summary'},
+            ],
+          },
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'after-compaction',
+          taskId: 'task-pre-turn-compaction',
+          sequence: 4,
+          type: 'assistant.completed',
+          timestamp: timestamp,
+          payload: const {'text': '完成'},
+        ),
+      );
+
+      expect(
+        (await database.loadModelEvents('task-pre-turn-compaction'))
+            .map((event) => event.eventId),
+        [
+          'pre-turn-compaction',
+          'current-user-before-compaction',
+          'after-compaction',
+        ],
+      );
+    },
+  );
 
   test('Responses compaction resumes after a provider projection', () async {
     final database = MemoryAppDatabase();
@@ -1563,6 +2078,51 @@ void main() {
     },
   );
 
+  test('setup failure still persists the current user message', () async {
+    final root = await Directory.systemTemp.createTemp('mobile-agent-setup-');
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final database = _FailingModelHistoryDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      attachmentStore: AttachmentStore(rootProvider: () async => root),
+      previewMode: true,
+    );
+    await controller.load();
+    final task = await controller.createTask(title: '初始化失败');
+
+    final result = await controller.runTask(
+      task,
+      prompt: '保留这条消息',
+      attachments: const [
+        AiAttachment(
+          name: 'setup.png',
+          mimeType: 'image/png',
+          base64Data: 'c2V0dXA=',
+        ),
+      ],
+    );
+
+    expect(result.status, 'failed');
+    final events = await database.loadEvents(task.id);
+    expect(events.map((event) => event.type), ['user.message', 'task.failed']);
+    final userEvent = events.first;
+    expect(userEvent.payload['text'], '保留这条消息');
+    expect(jsonEncode(userEvent.payload), isNot(contains('c2V0dXA=')));
+    final attachment = AiAttachment.fromJson(
+      Map<String, Object?>.from(
+        (userEvent.payload['attachments'] as List).single as Map,
+      ),
+    );
+    expect(
+      await controller.loadAttachmentBytes(attachment.id!, taskId: task.id),
+      utf8.encode('setup'),
+    );
+    controller.dispose();
+  });
+
   test('storage cleanup removes only unreferenced attachment files', () async {
     final root = await Directory.systemTemp.createTemp('mobile-agent-cleanup-');
     addTearDown(() async {
@@ -1733,6 +2293,54 @@ class _FailingTaskSaveDatabase extends MemoryAppDatabase {
       throw StateError('save failed');
     }
     return super.saveTask(task);
+  }
+}
+
+class _FailingModelHistoryDatabase extends MemoryAppDatabase {
+  @override
+  Future<List<TaskEvent>> loadModelEvents(
+    String taskId, {
+    bool useCompactionBoundary = true,
+  }) {
+    throw StateError('history load failed');
+  }
+}
+
+class _BlockingEventsBeforeDatabase extends MemoryAppDatabase {
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<TaskEventPage> loadEventsBefore(
+    String taskId, {
+    required int beforeSequence,
+    int limit = 40,
+  }) async {
+    if (!started.isCompleted) started.complete();
+    await release.future;
+    return super.loadEventsBefore(
+      taskId,
+      beforeSequence: beforeSequence,
+      limit: limit,
+    );
+  }
+}
+
+class _BlockingModelHistoryDatabase extends MemoryAppDatabase {
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<List<TaskEvent>> loadModelEvents(
+    String taskId, {
+    bool useCompactionBoundary = true,
+  }) async {
+    if (!started.isCompleted) started.complete();
+    await release.future;
+    return super.loadModelEvents(
+      taskId,
+      useCompactionBoundary: useCompactionBoundary,
+    );
   }
 }
 

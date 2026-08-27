@@ -21,7 +21,7 @@ String wireApiLabel(String value) {
     case 'responses':
       return 'Responses';
     case 'chat-completions':
-      return 'Chat Completions';
+      return 'Chat Completions（兼容模式）';
     default:
       return value;
   }
@@ -437,6 +437,11 @@ class ProviderModelMetadata {
     return configured < windowLimit ? configured : windowLimit;
   }
 
+  /// Codex supplies this policy in its fallback model descriptor when a model
+  /// catalog has no richer metadata.
+  ProviderTruncationPolicy get resolvedTruncationPolicy =>
+      truncationPolicy ?? ProviderTruncationPolicy.codexFallback;
+
   ProviderModelMetadata mergedWith(ProviderModelMetadata remote) {
     // A normal OpenAI-compatible /models response often returns only an id.
     // Keep a manually supplied window in that case, while allowing a Codex
@@ -522,6 +527,11 @@ class ProviderReasoningLevel {
 /// Codex's per-model tool-output truncation policy.
 class ProviderTruncationPolicy {
   const ProviderTruncationPolicy({required this.mode, required this.limit});
+
+  static const codexFallback = ProviderTruncationPolicy(
+    mode: 'bytes',
+    limit: 10000,
+  );
 
   final String mode;
   final int limit;

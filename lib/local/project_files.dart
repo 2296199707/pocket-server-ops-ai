@@ -172,7 +172,23 @@ class ProjectFileStore {
   ) async {
     final target = File(await _resolveForIo(project, relativePath));
     await target.parent.create(recursive: true);
-    await target.writeAsBytes(bytes, flush: true);
+    final temporary = File(
+      '${target.path}.mobile-agent-${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
+    var committed = false;
+    try {
+      await temporary.writeAsBytes(bytes, flush: true);
+      await temporary.rename(target.path);
+      committed = true;
+    } finally {
+      if (!committed && await temporary.exists()) {
+        try {
+          await temporary.delete();
+        } catch (_) {
+          // A leftover temporary file can be removed by the next cleanup.
+        }
+      }
+    }
   }
 
   Future<void> replaceText(

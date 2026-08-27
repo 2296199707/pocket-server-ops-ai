@@ -9,7 +9,6 @@ AiChatClient createAiClient({
   required String apiKey,
   required String model,
   String reasoningEffort = 'default',
-  int? compactThreshold,
   List<String>? inputModalities,
   http.Client? client,
 }) {
@@ -20,7 +19,6 @@ AiChatClient createAiClient({
         apiKey: apiKey,
         model: model,
         reasoningEffort: reasoningEffort,
-        compactThreshold: compactThreshold,
         inputModalities: inputModalities,
         client: client,
       );

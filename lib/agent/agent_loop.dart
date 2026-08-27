@@ -64,6 +64,7 @@ class AgentLoop {
       Map<String, Object?> arguments,
     )?
     review,
+    Future<List<AiMessage>?> Function(List<AiMessage> messages)? compactHistory,
     void Function(AgentTool tool)? onRemoteOperationStarted,
     Future<void> Function(String type, Map<String, Object?> payload)? onEvent,
   }) async {
@@ -359,8 +360,11 @@ class AgentLoop {
                 'error': decision.reason,
                 'failure_code': decision.failureCode,
               });
-              allowed = await askUser();
-              if (!allowed) deniedReason = decision.reason;
+              // Codex Guardian fails closed when the independent review cannot
+              // produce a decision. The user can choose the normal confirmation
+              // mode explicitly if they need to approve the action themselves.
+              allowed = false;
+              deniedReason = decision.reason;
             } else if (decision.isAllow) {
               allowed = true;
             } else if (decision.isAskUser) {
@@ -543,6 +547,38 @@ class AgentLoop {
               ? 'Task cancelled after remote execution started; result is unknown.'
               : 'Tool call cancelled before execution.',
         );
+      }
+
+      if (!stop.isCancelled && compactHistory != null) {
+        try {
+          final compacted = await compactHistory(messages);
+          if (compacted != null) {
+            messages
+              ..clear()
+              ..addAll(compacted);
+          }
+        } catch (error) {
+          if (stop.isCancelled) {
+            final status = remoteOperationStarted ? 'unknown' : 'cancelled';
+            await _emit(
+              onEvent,
+              status == 'unknown' ? 'task.unknown' : 'task.cancelled',
+              {'error': '$error'},
+            );
+            return AgentResult(
+              status: status,
+              messages: List.unmodifiable(messages),
+              error: error,
+            );
+          }
+          final type = remoteOperationStarted ? 'task.unknown' : 'task.failed';
+          await _emit(onEvent, type, {'error': '$error'});
+          return AgentResult(
+            status: remoteOperationStarted ? 'unknown' : 'failed',
+            messages: List.unmodifiable(messages),
+            error: error,
+          );
+        }
       }
     }
 

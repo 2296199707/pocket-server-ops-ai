@@ -1,5 +1,42 @@
 import 'dart:convert';
 
+enum AiProviderHttpErrorKind {
+  unauthorized,
+  rateLimited,
+  client,
+  server,
+  other,
+}
+
+/// Common HTTP error contract for the explicitly selected AI protocol.
+///
+/// The body is expected to be redacted and bounded by the client that read it.
+class AiProviderHttpException implements Exception {
+  const AiProviderHttpException({
+    required this.protocol,
+    required this.statusCode,
+    required this.body,
+  });
+
+  final String protocol;
+  final int statusCode;
+  final String body;
+
+  AiProviderHttpErrorKind get kind {
+    if (statusCode == 401) return AiProviderHttpErrorKind.unauthorized;
+    if (statusCode == 429) return AiProviderHttpErrorKind.rateLimited;
+    if (statusCode >= 500) return AiProviderHttpErrorKind.server;
+    if (statusCode >= 400) return AiProviderHttpErrorKind.client;
+    return AiProviderHttpErrorKind.other;
+  }
+
+  @override
+  String toString() {
+    final suffix = body.isEmpty ? '' : ': $body';
+    return '$protocol HTTP error $statusCode$suffix';
+  }
+}
+
 class AiAttachment {
   const AiAttachment({
     this.id,

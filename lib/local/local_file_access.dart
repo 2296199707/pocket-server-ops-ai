@@ -95,6 +95,10 @@ class LocalFileAccessStore {
     return _isWithin(candidate, root);
   }
 
+  static bool scopesOverlapCanonical(String first, String second) {
+    return _isWithin(first, second) || _isWithin(second, first);
+  }
+
   static Future<String> _resolveExisting(
     String normalized,
     String requestedPath,
@@ -129,6 +133,10 @@ class LocalFileAccessStore {
   }
 
   static bool _isWithin(String candidate, String root) {
-    return candidate == root || candidate.startsWith('$root/');
+    final normalizedCandidate = path_util.posix.normalize(candidate);
+    final normalizedRoot = path_util.posix.normalize(root);
+    if (normalizedRoot == '/') return normalizedCandidate.startsWith('/');
+    return normalizedCandidate == normalizedRoot ||
+        normalizedCandidate.startsWith('$normalizedRoot/');
   }
 }
