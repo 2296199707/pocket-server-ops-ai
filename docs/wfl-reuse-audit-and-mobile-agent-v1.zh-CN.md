@@ -148,7 +148,7 @@ SSH 始终使用用户配置的原账号和原权限；非 root 账号不会被�
 
 已确认的官方行为如下：
 
-1. Codex 的普通 Responses 请求不携带 `context_management`；压缩是独立的 `POST /responses/compact` 请求。压缩请求携带当前历史、instructions、工具和 reasoning，返回的 output 整体成为新的历史窗口。后续无状态请求必须原样追加返回的 output，包括 opaque 的 compaction item；可以丢弃最新 compaction item 之前的旧输入，但使用 `previous_response_id` 时不能再手动裁剪历史。
+1. Codex 的普通 Responses 请求不携带 `context_management`；压缩是独立的 `POST /responses/compact` 请求。压缩请求携带当前历史，必要时通过 `instructions` 传入系统指令；工具调用和 reasoning 属于 `input` 中的历史 output item，不作为 compact 请求的顶层 `tools`、`parallel_tool_calls` 或 `reasoning` 字段发送。返回的 output 整体成为新的历史窗口。后续无状态请求必须原样追加返回的 output，包括 opaque 的 compaction item；可以丢弃最新 compaction item 之前的旧输入，但使用 `previous_response_id` 时不能再手动裁剪历史。
 2. Codex 会规范化历史：为缺少 output 的 function call 补 `aborted`，清理孤立 output，按模型 `input_modalities` 删除不支持的图片和音频，并对工具输出做语义化截断。
 3. 模型能力不是由客户端猜测。官方模型元数据至少涉及 `default_reasoning_level`、`supported_reasoning_levels`、`input_modalities`、`truncation_policy`、`context_window`、`max_context_window`、`auto_compact_token_limit` 和 `effective_context_window_percent`。
 4. 有效上下文窗口默认按原窗口的 95% 计算，自动压缩默认在原始上下文窗口约 90% 处触发。界面剩余上下文百分比使用官方 TUI 的 12,000 token baseline，而不是用字符数、Base64 字节数或固定几 MiB 猜算。

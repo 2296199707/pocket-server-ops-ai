@@ -201,21 +201,15 @@ void main() {
           AiMessage.user('保留这条用户消息'),
         ],
         instructions: 'base instructions',
-        tools: const [
-          AiToolDefinition(
-            name: 'terminal.exec',
-            description: 'Run a command',
-            parameters: {'type': 'object'},
-          ),
-        ],
       );
 
       final body = jsonDecode(request.body) as Map<String, Object?>;
       expect(request.url.path, '/v1/responses/compact');
       expect(body['model'], 'gpt-5.6-luna');
       expect(body['instructions'], 'base instructions');
-      expect(body['parallel_tool_calls'], true);
-      expect(body['reasoning'], {'effort': 'high'});
+      expect(body.containsKey('parallel_tool_calls'), isFalse);
+      expect(body.containsKey('tools'), isFalse);
+      expect(body.containsKey('reasoning'), isFalse);
       expect((body['input'] as List).length, 1);
       expect((body['input'] as List).single['role'], 'user');
       expect(body.containsKey('stream'), isFalse);
@@ -248,13 +242,65 @@ void main() {
       client.compact(
         messages: [AiMessage.user('压缩历史')],
         instructions: 'instructions',
-        tools: const [],
       ),
       throwsA(
         isA<AiResponseInvalid>().having(
           (error) => error.message,
           'message',
           contains('index 1'),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'Responses compaction reports an unsupported endpoint clearly',
+    () async {
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'test-model',
+        client: MockClient((_) async => http.Response('not found', 404)),
+      );
+      addTearDown(client.close);
+
+      await expectLater(
+        client.compact(
+          messages: [AiMessage.user('压缩历史')],
+          instructions: 'instructions',
+        ),
+        throwsA(
+          isA<AiProviderHttpException>().having(
+            (error) => '$error',
+            'message',
+            contains('未提供 /responses/compact'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test('Responses compaction identifies an unavailable upstream', () async {
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      client: MockClient(
+        (_) async => http.Response('upstream unavailable', 503),
+      ),
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.compact(
+        messages: [AiMessage.user('压缩历史')],
+        instructions: 'instructions',
+      ),
+      throwsA(
+        isA<AiProviderHttpException>().having(
+          (error) => '$error',
+          'message',
+          contains('请稍后重试'),
         ),
       ),
     );

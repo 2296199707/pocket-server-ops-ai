@@ -19,7 +19,10 @@ class ProviderConnectionTester {
       model: profile.model,
       reasoningEffort: profile.reasoningEffort,
       inputModalities: profile.wireApi == 'responses'
-          ? profile.modelMetadata[profile.model]?.inputModalities
+          ? resolveProviderModelMetadata(
+              profile,
+              profile.model,
+            )?.inputModalities
           : null,
     );
     try {

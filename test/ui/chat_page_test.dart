@@ -169,7 +169,56 @@ void main() {
 
     expect(find.textContaining('用时 2 分'), findsOneWidget);
     expect(find.textContaining('用时 12 小时'), findsNothing);
+    expect(find.text('已完成'), findsOneWidget);
+    expect(tester.getTopLeft(find.text('已完成')).dx, lessThan(200));
     controller.dispose();
+  });
+
+  testWidgets('context actions stay right aligned while status stays left', (
+    tester,
+  ) async {
+    tester.binding.setSurfaceSize(const Size(400, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: '布局测试供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    final task = await controller.createTask(
+      mode: 'chat',
+      providerId: controller.providers.single.id,
+      title: '顶部布局',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatPage(
+            controller: controller,
+            taskId: task.id,
+            onTaskActivated: (_) {},
+            onOpenSettings: () {},
+            onConfirmTool: (_, _, _) async => true,
+            onConfirmHostKey: (_, _) async => true,
+            onUserInfoRequest: (_, _) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final context = tester.getTopLeft(find.text('普通对话')).dx;
+    final provider = tester.getTopLeft(find.text('布局测试供应商')).dx;
+    final settings = tester.getTopLeft(find.byTooltip('对话设置')).dx;
+    expect(provider, greaterThan(context));
+    expect(settings, greaterThan(provider));
   });
 
   testWidgets('Responses context details expose manual compaction', (

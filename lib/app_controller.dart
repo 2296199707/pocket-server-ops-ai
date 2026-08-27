@@ -136,7 +136,7 @@ class AppController extends ChangeNotifier {
   ProviderModelMetadata? modelMetadataFor(
     ProviderProfile provider,
     String model,
-  ) => provider.modelMetadata[model];
+  ) => resolveProviderModelMetadata(provider, model);
 
   TaskContextUsage? contextUsageFor(Task task, {ProviderProfile? provider}) {
     final cached = _taskContextUsages[task.id];
@@ -145,6 +145,8 @@ class AppController extends ChangeNotifier {
     return cached.withMetadata(
       _contextMetadataForTask(task, activeProvider),
       selectedModel: _modelForTask(task, activeProvider),
+      contextWindowMode:
+          activeProvider?.contextWindowMode ?? defaultContextWindowMode,
     );
   }
 
@@ -157,7 +159,12 @@ class AppController extends ChangeNotifier {
     final model = _modelForTask(task, activeProvider);
     final cached = _taskContextUsages[task.id];
     if (cached != null) {
-      return cached.withMetadata(metadata, selectedModel: model);
+      return cached.withMetadata(
+        metadata,
+        selectedModel: model,
+        contextWindowMode:
+            activeProvider?.contextWindowMode ?? defaultContextWindowMode,
+      );
     }
     final pending = _taskContextLoads[task.id];
     if (pending != null) return pending;
@@ -168,6 +175,7 @@ class AppController extends ChangeNotifier {
       model,
       generation,
       activeProvider?.id,
+      activeProvider?.contextWindowMode ?? defaultContextWindowMode,
     );
     _taskContextLoads[task.id] = load;
     try {
@@ -724,10 +732,10 @@ class AppController extends ChangeNotifier {
     final nextModel = normalizedModelOverride ?? nextProvider?.model ?? '';
     final previousMetadata = previousProvider == null
         ? null
-        : previousProvider.modelMetadata[previousModel];
+        : resolveProviderModelMetadata(previousProvider, previousModel);
     final nextMetadata = nextProvider == null
         ? null
-        : nextProvider.modelMetadata[nextModel];
+        : resolveProviderModelMetadata(nextProvider, nextModel);
     final providerContextChanged =
         _providerContextIdentity(
           providerId: current.providerId,
@@ -1160,6 +1168,7 @@ class AppController extends ChangeNotifier {
       }
 
       final model = task.modelOverride ?? provider.model;
+      final modelMetadata = resolveProviderModelMetadata(provider, model);
       client = createAiClient(
         wireApi: provider.wireApi,
         baseUrl: provider.baseUrl,
@@ -1167,7 +1176,7 @@ class AppController extends ChangeNotifier {
         model: model,
         reasoningEffort:
             task.reasoningEffortOverride ?? provider.reasoningEffort,
-        inputModalities: provider.modelMetadata[model]?.inputModalities,
+        inputModalities: modelMetadata?.inputModalities,
       );
       final compactionClient = client is AiCompactionClient
           ? client as AiCompactionClient
@@ -1192,7 +1201,6 @@ class AppController extends ChangeNotifier {
       final outputItems = await compactionClient.compact(
         messages: messages,
         instructions: systemPrompt,
-        tools: [for (final tool in tools) tool.definition],
         cancellation: cancellation.whenCancelled,
       );
       if (outputItems.isEmpty) throw StateError('Responses 压缩返回了空历史');
@@ -1537,21 +1545,19 @@ class AppController extends ChangeNotifier {
         );
       }
 
+      final model = task.modelOverride ?? activeProvider.model;
+      final modelMetadata = resolveProviderModelMetadata(activeProvider, model);
       client = createAiClient(
         wireApi: activeProvider.wireApi,
         baseUrl: activeProvider.baseUrl,
         apiKey: apiKey,
-        model: task.modelOverride ?? activeProvider.model,
+        model: model,
         reasoningEffort:
             task.reasoningEffortOverride ?? activeProvider.reasoningEffort,
         inputModalities: activeProvider.wireApi == 'responses'
-            ? activeProvider
-                  .modelMetadata[task.modelOverride ?? activeProvider.model]
-                  ?.inputModalities
+            ? modelMetadata?.inputModalities
             : null,
       );
-      final modelMetadata = activeProvider
-          .modelMetadata[task.modelOverride ?? activeProvider.model];
       final truncationPolicy =
           modelMetadata?.resolvedTruncationPolicy ??
           ProviderTruncationPolicy.codexFallback;
@@ -1568,7 +1574,6 @@ class AppController extends ChangeNotifier {
         provider: activeProvider,
         client: client,
         messages: initialMessages,
-        tools: tools,
         instructions: systemPrompt,
         cancellation: cancellation.whenCancelled,
         additionalTokenCount:
@@ -1585,7 +1590,7 @@ class AppController extends ChangeNotifier {
         await appendTurnEvent('context.compacted', {
           'provider_id': activeProvider.id,
           'wire_api': activeProvider.wireApi,
-          'model': task.modelOverride ?? activeProvider.model,
+          'model': model,
           'responses_output_items': compactedItems,
         });
         _invalidateTaskContextUsage(task.id);
@@ -1604,7 +1609,6 @@ class AppController extends ChangeNotifier {
           provider: activeProvider,
           client: client!,
           messages: messages,
-          tools: tools,
           instructions: systemPrompt,
           cancellation: cancellation.whenCancelled,
           activeTokenCount: latestUsage?.totalTokens,
@@ -1618,7 +1622,7 @@ class AppController extends ChangeNotifier {
         await appendTurnEvent('context.compacted', {
           'provider_id': activeProvider.id,
           'wire_api': activeProvider.wireApi,
-          'model': task.modelOverride ?? activeProvider.model,
+          'model': model,
           'responses_output_items': compactedItems,
         });
         _invalidateTaskContextUsage(task.id);
@@ -2399,6 +2403,7 @@ class AppController extends ChangeNotifier {
     required String model,
     String reasoningEffort = 'default',
     String wireApi = 'responses',
+    String? contextWindowMode,
     required String secret,
     required bool isDefault,
     Map<String, ProviderModelMetadata>? modelMetadata,
@@ -2419,6 +2424,9 @@ class AppController extends ChangeNotifier {
       model: model,
       reasoningEffort: reasoningEffort,
       wireApi: wireApi,
+      contextWindowMode: normalizeContextWindowMode(
+        contextWindowMode ?? existing?.contextWindowMode,
+      ),
       apiKeyRef: apiKeyRef,
       isDefault: isDefault,
       modelMetadata: modelMetadata ?? existing?.modelMetadata ?? const {},
@@ -2659,7 +2667,7 @@ class AppController extends ChangeNotifier {
         model: model,
         reasoningEffort: provider.reasoningEffort,
         inputModalities: provider.wireApi == 'responses'
-            ? provider.modelMetadata[model]?.inputModalities
+            ? resolveProviderModelMetadata(provider, model)?.inputModalities
             : null,
       );
       final request = jsonEncode({
@@ -2730,16 +2738,21 @@ class AppController extends ChangeNotifier {
     final provider = _providerForTaskFrom(providerId, providers);
     if (provider == null) return jsonEncode(const [null]);
     final model = modelOverride ?? provider.model;
-    final metadata = provider.modelMetadata[model];
+    final metadata = resolveProviderModelMetadata(provider, model);
     return jsonEncode([
       provider.id,
       provider.baseUrl,
       provider.wireApi,
       model,
       metadata?.compHash,
-      metadata?.resolvedContextWindowTokens,
+      provider.contextWindowMode,
+      metadata?.resolveContextWindowTokens(
+        contextWindowMode: provider.contextWindowMode,
+      ),
       metadata?.effectiveContextWindowPercent,
-      metadata?.resolvedAutoCompactTokenLimit,
+      metadata?.resolveAutoCompactTokenLimit(
+        contextWindowMode: provider.contextWindowMode,
+      ),
       metadata?.compactionMode,
       metadata?.inputModalities,
       metadata?.truncationPolicy?.toMap(),
@@ -2766,7 +2779,7 @@ class AppController extends ChangeNotifier {
   ) {
     final model = _modelForTask(task, provider);
     if (provider == null || model.isEmpty) return null;
-    return provider.modelMetadata[model];
+    return resolveProviderModelMetadata(provider, model);
   }
 
   Future<List<Map<String, Object?>>?> _compactResponsesHistoryIfNeeded({
@@ -2774,7 +2787,6 @@ class AppController extends ChangeNotifier {
     required ProviderProfile provider,
     required AiChatClient client,
     required List<AiMessage> messages,
-    required List<AgentTool> tools,
     required String instructions,
     required Future<void> cancellation,
     int? activeTokenCount,
@@ -2782,7 +2794,9 @@ class AppController extends ChangeNotifier {
   }) async {
     if (provider.wireApi != 'responses') return null;
     final metadata = _contextMetadataForTask(task, provider);
-    final threshold = metadata?.resolvedAutoCompactTokenLimit;
+    final threshold = metadata?.resolveAutoCompactTokenLimit(
+      contextWindowMode: provider.contextWindowMode,
+    );
     if (threshold == null) return null;
     final baseTokens =
         activeTokenCount ??
@@ -2805,7 +2819,6 @@ class AppController extends ChangeNotifier {
     final outputItems = await compactionClient.compact(
       messages: messages,
       instructions: instructions,
-      tools: [for (final tool in tools) tool.definition],
       cancellation: cancellation,
     );
     if (outputItems.isEmpty) {
@@ -2820,6 +2833,7 @@ class AppController extends ChangeNotifier {
     String model,
     int generation,
     String? providerId,
+    String contextWindowMode,
   ) async {
     TokenUsageSnapshot? last;
     TokenUsageSnapshot? total;
@@ -2884,9 +2898,15 @@ class AppController extends ChangeNotifier {
       last: last,
       total: total,
       model: model.isEmpty ? null : model,
-      rawContextWindow: metadata?.resolvedContextWindowTokens,
-      effectiveContextWindow: metadata?.effectiveContextWindowTokens,
-      autoCompactTokenLimit: metadata?.resolvedAutoCompactTokenLimit,
+      rawContextWindow: metadata?.resolveContextWindowTokens(
+        contextWindowMode: contextWindowMode,
+      ),
+      effectiveContextWindow: metadata?.resolveEffectiveContextWindowTokens(
+        contextWindowMode: contextWindowMode,
+      ),
+      autoCompactTokenLimit: metadata?.resolveAutoCompactTokenLimit(
+        contextWindowMode: contextWindowMode,
+      ),
       compactionCount: compactionCount,
       metadataSource: metadata?.source,
     );
@@ -2918,13 +2938,20 @@ class AppController extends ChangeNotifier {
       totalTokens: 0,
     );
     final metadata = _contextMetadataForTask(task, provider);
+    final contextWindowMode = provider.contextWindowMode;
     final snapshot = TaskContextUsage(
       last: usage ?? current.last,
       total: usage == null ? current.total : (current.total ?? zero) + usage,
       model: _modelForTask(task, provider),
-      rawContextWindow: metadata?.resolvedContextWindowTokens,
-      effectiveContextWindow: metadata?.effectiveContextWindowTokens,
-      autoCompactTokenLimit: metadata?.resolvedAutoCompactTokenLimit,
+      rawContextWindow: metadata?.resolveContextWindowTokens(
+        contextWindowMode: contextWindowMode,
+      ),
+      effectiveContextWindow: metadata?.resolveEffectiveContextWindowTokens(
+        contextWindowMode: contextWindowMode,
+      ),
+      autoCompactTokenLimit: metadata?.resolveAutoCompactTokenLimit(
+        contextWindowMode: contextWindowMode,
+      ),
       compactionCount:
           current.compactionCount + _compactionCountInPayload(payload),
       metadataSource: metadata?.source,

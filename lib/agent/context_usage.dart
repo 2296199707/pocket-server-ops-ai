@@ -148,14 +148,21 @@ class TaskContextUsage {
   TaskContextUsage withMetadata(
     ProviderModelMetadata? metadata, {
     String? selectedModel,
+    String contextWindowMode = defaultContextWindowMode,
   }) {
     return TaskContextUsage(
       last: last,
       total: total,
       model: selectedModel ?? model,
-      rawContextWindow: metadata?.resolvedContextWindowTokens,
-      effectiveContextWindow: metadata?.effectiveContextWindowTokens,
-      autoCompactTokenLimit: metadata?.resolvedAutoCompactTokenLimit,
+      rawContextWindow: metadata?.resolveContextWindowTokens(
+        contextWindowMode: contextWindowMode,
+      ),
+      effectiveContextWindow: metadata?.resolveEffectiveContextWindowTokens(
+        contextWindowMode: contextWindowMode,
+      ),
+      autoCompactTokenLimit: metadata?.resolveAutoCompactTokenLimit(
+        contextWindowMode: contextWindowMode,
+      ),
       compactionCount: compactionCount,
       metadataSource: metadata?.source,
     );

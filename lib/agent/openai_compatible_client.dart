@@ -18,7 +18,6 @@ abstract class AiCompactionClient {
   Future<List<Map<String, Object?>>> compact({
     required List<AiMessage> messages,
     required String instructions,
-    required List<AiToolDefinition> tools,
     Future<void>? cancellation,
   });
 }
@@ -61,6 +60,25 @@ class _ProviderHttpError extends AiProviderHttpException {
   @override
   String toString() =>
       'AI provider returned HTTP $statusCode: ${_limitProviderError(body)}';
+}
+
+class _ProviderCompactionHttpError extends AiProviderHttpException {
+  const _ProviderCompactionHttpError(int statusCode, String body)
+    : super(protocol: 'Responses', statusCode: statusCode, body: body);
+
+  @override
+  String toString() {
+    if (statusCode == 404 || statusCode == 405) {
+      return '当前 Responses 供应商未提供 /responses/compact（HTTP $statusCode）';
+    }
+    if (statusCode >= 500) {
+      return 'Responses 压缩服务暂时不可用（HTTP $statusCode），请稍后重试';
+    }
+    final detail = _limitProviderError(body);
+    return detail.isEmpty
+        ? 'Responses 压缩请求失败（HTTP $statusCode）'
+        : 'Responses 压缩请求失败（HTTP $statusCode）：$detail';
+  }
 }
 
 class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
@@ -199,7 +217,6 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   Future<List<Map<String, Object?>>> compact({
     required List<AiMessage> messages,
     required String instructions,
-    required List<AiToolDefinition> tools,
     Future<void>? cancellation,
   }) async {
     final request = http.Request(
@@ -221,14 +238,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
           if (message.role != 'system') message,
       ], inputModalities: inputModalities),
       if (instructions.isNotEmpty) 'instructions': instructions,
-      'parallel_tool_calls': true,
     };
-    if (tools.isNotEmpty) {
-      requestBody['tools'] = _responsesTools(tools);
-    }
-    if (reasoningEffort != 'default') {
-      requestBody['reasoning'] = {'effort': reasoningEffort};
-    }
     request.body = jsonEncode(requestBody);
 
     final response = await _awaitCancellation(
@@ -243,7 +253,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
         ).timeout(timeout),
         cancellation,
       );
-      throw _ProviderHttpError(
+      throw _ProviderCompactionHttpError(
         response.statusCode,
         _redactProviderSecrets(body, _apiKey),
       );

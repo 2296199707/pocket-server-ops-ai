@@ -248,6 +248,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   late final TextEditingController _secret;
   String _reasoningEffort = 'default';
   String _wireApi = 'responses';
+  String _contextWindowMode = defaultContextWindowMode;
   bool _isDefault = false;
   bool _saving = false;
   bool _loadingModels = false;
@@ -265,6 +266,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _secret = TextEditingController();
     _reasoningEffort = profile?.reasoningEffort ?? 'default';
     _wireApi = profile?.wireApi ?? 'responses';
+    _contextWindowMode = normalizeContextWindowMode(profile?.contextWindowMode);
     _isDefault = profile?.isDefault ?? false;
     _modelMetadata = profile?.modelMetadata ?? const {};
   }
@@ -400,6 +402,27 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 if (value != null) setState(() => _reasoningEffort = value);
               },
             ),
+            DropdownButtonFormField<String>(
+              initialValue: _contextWindowMode,
+              decoration: const InputDecoration(labelText: '上下文窗口'),
+              items: [
+                for (final mode in contextWindowModeOptions)
+                  DropdownMenuItem(
+                    value: mode,
+                    child: Text(contextWindowModeLabel(mode)),
+                  ),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => _contextWindowMode = value);
+                }
+              },
+            ),
+            Text(
+              '默认使用 Codex 的 context_window；扩展使用模型提供的 '
+              'max_context_window。模型没有更大上限时两档相同。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             TextFormField(
               controller: _secret,
               obscureText: true,
@@ -458,6 +481,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         model: _model.text.trim(),
         reasoningEffort: _reasoningEffort,
         wireApi: _wireApi,
+        contextWindowMode: _contextWindowMode,
         secret: _secret.text,
         isDefault: _isDefault,
         modelMetadata: _modelMetadata,
@@ -481,6 +505,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       model: _model.text.trim().isEmpty ? 'unknown' : _model.text.trim(),
       reasoningEffort: _reasoningEffort,
       wireApi: _wireApi,
+      contextWindowMode: _contextWindowMode,
       apiKeyRef: widget.existing?.apiKeyRef,
       isDefault: _isDefault,
     );

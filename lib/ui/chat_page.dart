@@ -289,7 +289,7 @@ class ChatPageState extends State<ChatPage> {
                     ),
               if (task != null)
                 Positioned(
-                  right: 8,
+                  left: 8,
                   bottom: 8,
                   child: IgnorePointer(
                     child: _TaskStatusBar(task: task, events: events),
@@ -546,6 +546,8 @@ class ChatPageState extends State<ChatPage> {
       builder: (_) => _ContextStatusDialog(
         usage: usage,
         wireApi: provider?.wireApi,
+        contextWindowMode:
+            provider?.contextWindowMode ?? defaultContextWindowMode,
         isTaskRunning: () => widget.controller.isTaskRunning(task.id),
         onCompact:
             provider?.wireApi == 'responses' && !widget.controller.previewMode
@@ -1724,15 +1726,25 @@ class _ContextBar extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(10, 2, 6, 2),
           child: Row(
             children: [
-              Icon(_workModeIcon(workMode), size: 16, color: colors.primary),
-              const SizedBox(width: 4),
-              Flexible(
-                child: Text(
-                  contextLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall
-                      ?.copyWith(fontSize: 11),
+              Expanded(
+                child: Row(
+                  children: [
+                    Icon(
+                      _workModeIcon(workMode),
+                      size: 16,
+                      color: colors.primary,
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        contextLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall
+                            ?.copyWith(fontSize: 11),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(width: 4),
@@ -1888,12 +1900,14 @@ class _ContextStatusDialog extends StatefulWidget {
   const _ContextStatusDialog({
     required this.usage,
     required this.wireApi,
+    this.contextWindowMode = defaultContextWindowMode,
     required this.onCompact,
     required this.isTaskRunning,
   });
 
   final TaskContextUsage? usage;
   final String? wireApi;
+  final String contextWindowMode;
   final Future<TaskContextUsage> Function()? onCompact;
   final bool Function()? isTaskRunning;
 
@@ -1963,6 +1977,10 @@ class _ContextStatusDialogState extends State<_ContextStatusDialog> {
             ),
             const SizedBox(height: 12),
             _ContextStat(label: '模型', value: _usage?.model ?? '未知'),
+            _ContextStat(
+              label: '窗口模式',
+              value: contextWindowModeLabel(widget.contextWindowMode),
+            ),
             _ContextStat(
               label: compatibilityMode ? '本次用量' : '当前用量',
               value: _formatUsage(last?.totalTokens),

@@ -16,6 +16,30 @@ const reasoningEffortOptions = <String>[
 
 const wireApiOptions = <String>['responses', 'chat-completions'];
 
+const defaultContextWindowMode = 'default';
+const maximumContextWindowMode = 'maximum';
+const contextWindowModeOptions = <String>[
+  defaultContextWindowMode,
+  maximumContextWindowMode,
+];
+
+String contextWindowModeLabel(String value) {
+  switch (value) {
+    case defaultContextWindowMode:
+      return '默认窗口';
+    case maximumContextWindowMode:
+      return '扩展窗口';
+    default:
+      return value;
+  }
+}
+
+String normalizeContextWindowMode(String? value) {
+  return contextWindowModeOptions.contains(value)
+      ? value!
+      : defaultContextWindowMode;
+}
+
 String wireApiLabel(String value) {
   switch (value) {
     case 'responses':
@@ -202,6 +226,7 @@ class ProviderProfile {
   final String model;
   final String reasoningEffort;
   final String wireApi;
+  final String contextWindowMode;
   final String? apiKeyRef;
   final bool isDefault;
   final Map<String, ProviderModelMetadata> modelMetadata;
@@ -213,6 +238,7 @@ class ProviderProfile {
     required this.model,
     this.reasoningEffort = 'default',
     this.wireApi = 'responses',
+    this.contextWindowMode = defaultContextWindowMode,
     required this.apiKeyRef,
     required this.isDefault,
     this.modelMetadata = const {},
@@ -226,6 +252,9 @@ class ProviderProfile {
       model: map['model'] as String,
       reasoningEffort: map['reasoningEffort'] as String? ?? 'default',
       wireApi: map['wireApi'] as String? ?? 'responses',
+      contextWindowMode: normalizeContextWindowMode(
+        map['contextWindowMode'] as String?,
+      ),
       apiKeyRef: map['apiKeyRef'] as String?,
       isDefault: map['isDefault'] as bool,
       modelMetadata: _readProviderModelMetadata(map['modelMetadata']),
@@ -239,6 +268,7 @@ class ProviderProfile {
     'model': model,
     'reasoningEffort': reasoningEffort,
     'wireApi': wireApi,
+    'contextWindowMode': normalizeContextWindowMode(contextWindowMode),
     'apiKeyRef': apiKeyRef,
     'isDefault': isDefault,
     'modelMetadata': jsonEncode({
@@ -252,6 +282,7 @@ class ProviderProfile {
     String? model,
     String? reasoningEffort,
     String? wireApi,
+    String? contextWindowMode,
     String? apiKeyRef,
     bool? isDefault,
     Map<String, ProviderModelMetadata>? modelMetadata,
@@ -263,6 +294,7 @@ class ProviderProfile {
       model: model ?? this.model,
       reasoningEffort: reasoningEffort ?? this.reasoningEffort,
       wireApi: wireApi ?? this.wireApi,
+      contextWindowMode: contextWindowMode ?? this.contextWindowMode,
       apiKeyRef: apiKeyRef ?? this.apiKeyRef,
       isDefault: isDefault ?? this.isDefault,
       modelMetadata: modelMetadata ?? this.modelMetadata,
@@ -405,28 +437,49 @@ class ProviderModelMetadata {
     if (compHash != null) 'compHash': compHash,
   };
 
-  /// Codex reports this effective value as model window × 95% by default.
+  /// Resolves the Codex default window or the optional maximum window.
   /// Ignore non-positive metadata so a malformed catalog cannot make the
   /// request client emit an invalid compaction threshold.
-  int? get resolvedContextWindowTokens {
-    final context = contextWindowTokens;
-    if (context != null && context > 0) return context;
-    final maximum = maxContextWindowTokens;
-    return maximum != null && maximum > 0 ? maximum : null;
+  int? resolveContextWindowTokens({
+    String contextWindowMode = defaultContextWindowMode,
+  }) {
+    final useMaximum =
+        normalizeContextWindowMode(contextWindowMode) ==
+        maximumContextWindowMode;
+    final candidates = useMaximum
+        ? [maxContextWindowTokens, contextWindowTokens]
+        : [contextWindowTokens, maxContextWindowTokens];
+    for (final candidate in candidates) {
+      if (candidate != null && candidate > 0) return candidate;
+    }
+    return null;
   }
 
-  int? get effectiveContextWindowTokens {
-    final window = resolvedContextWindowTokens;
+  int? get resolvedContextWindowTokens => resolveContextWindowTokens();
+
+  int? resolveEffectiveContextWindowTokens({
+    String contextWindowMode = defaultContextWindowMode,
+  }) {
+    final window = resolveContextWindowTokens(
+      contextWindowMode: contextWindowMode,
+    );
     if (window == null) return null;
     final percent = effectiveContextWindowPercent.clamp(0, 100).toInt();
     return window * percent ~/ 100;
   }
 
+  int? get effectiveContextWindowTokens =>
+      resolveEffectiveContextWindowTokens();
+
   /// Codex derives the automatic threshold as 90% of the raw context window
   /// and clamps an explicitly supplied threshold to that value.
-  int? get resolvedAutoCompactTokenLimit {
+  int? resolveAutoCompactTokenLimit({
+    String contextWindowMode = defaultContextWindowMode,
+  }) {
     if (compactionMode == 'disabled') return null;
-    final window = resolvedContextWindowTokens;
+    final window = resolveContextWindowTokens(
+      contextWindowMode: contextWindowMode,
+    );
     final windowLimit = window == null ? null : window * 9 ~/ 10;
     final configured =
         autoCompactTokenLimit != null && autoCompactTokenLimit! > 0
@@ -435,6 +488,17 @@ class ProviderModelMetadata {
     if (windowLimit == null) return configured;
     if (configured == null) return windowLimit;
     return configured < windowLimit ? configured : windowLimit;
+  }
+
+  int? get resolvedAutoCompactTokenLimit => resolveAutoCompactTokenLimit();
+
+  bool get hasExpandedContextWindow {
+    final defaultWindow = resolveContextWindowTokens();
+    final maximumWindow = resolveContextWindowTokens(
+      contextWindowMode: maximumContextWindowMode,
+    );
+    return maximumWindow != null &&
+        (defaultWindow == null || maximumWindow > defaultWindow);
   }
 
   /// Codex supplies this policy in its fallback model descriptor when a model
@@ -494,6 +558,70 @@ class ProviderModelMetadata {
       compHash: remote.compHash ?? compHash,
     );
   }
+}
+
+/// The Codex model catalog supplies these values even when a compatible
+/// provider's `/models` endpoint returns only model ids. Unknown models use
+/// the same generic fallback as Codex; explicit provider metadata still wins.
+ProviderModelMetadata? codexCatalogMetadataForModel(String model) {
+  switch (model.trim()) {
+    case 'gpt-5.6':
+    case 'gpt-5.6-sol':
+    case 'gpt-5.6-terra':
+    case 'gpt-5.6-luna':
+      return ProviderModelMetadata(
+        model: model.trim(),
+        contextWindowTokens: 272000,
+        maxContextWindowTokens: 872000,
+        source: 'codex-catalog',
+        inputModalities: const ['text', 'image'],
+        truncationPolicy: const ProviderTruncationPolicy(
+          mode: 'tokens',
+          limit: 10000,
+        ),
+      );
+    default:
+      return null;
+  }
+}
+
+ProviderModelMetadata codexFallbackMetadataForModel(String model) {
+  return ProviderModelMetadata(
+    model: model.trim(),
+    contextWindowTokens: 272000,
+    maxContextWindowTokens: 272000,
+    source: 'codex-fallback',
+    inputModalities: const ['text', 'image'],
+    truncationPolicy: const ProviderTruncationPolicy(
+      mode: 'bytes',
+      limit: 10000,
+    ),
+  );
+}
+
+ProviderModelMetadata? resolveProviderModelMetadata(
+  ProviderProfile provider,
+  String model,
+) {
+  final normalizedModel = model.trim();
+  ProviderModelMetadata? configured;
+  for (final entry in provider.modelMetadata.entries) {
+    if (entry.key == model ||
+        entry.key.trim() == normalizedModel ||
+        entry.value.model.trim() == normalizedModel) {
+      configured = entry.value;
+      break;
+    }
+  }
+  if (normalizedModel.isEmpty) return configured;
+  final fallback =
+      codexCatalogMetadataForModel(normalizedModel) ??
+      codexFallbackMetadataForModel(normalizedModel);
+  if (configured == null) return fallback;
+
+  // A provider may return only {id: ...}. Keep the known Codex catalog
+  // values in that case, while letting real provider fields override them.
+  return fallback.mergedWith(configured);
 }
 
 /// One entry from Codex's `supported_reasoning_levels` catalog field.

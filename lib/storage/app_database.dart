@@ -21,7 +21,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 10,
+      version: 11,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -46,6 +46,7 @@ class AppDatabase {
             model TEXT NOT NULL,
             reasoningEffort TEXT NOT NULL DEFAULT 'default',
             wireApi TEXT NOT NULL DEFAULT 'responses',
+            contextWindowMode TEXT NOT NULL DEFAULT 'default',
             apiKeyRef TEXT,
             isDefault INTEGER NOT NULL,
             modelMetadata TEXT NOT NULL DEFAULT '{}'
@@ -182,6 +183,11 @@ class AppDatabase {
         if (oldVersion < 10) {
           await db.execute(
             "ALTER TABLE providers ADD COLUMN modelMetadata TEXT NOT NULL DEFAULT '{}'",
+          );
+        }
+        if (oldVersion < 11) {
+          await db.execute(
+            "ALTER TABLE providers ADD COLUMN contextWindowMode TEXT NOT NULL DEFAULT 'default'",
           );
         }
       },

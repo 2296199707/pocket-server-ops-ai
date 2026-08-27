@@ -92,6 +92,12 @@ void main() {
       expect(metadata.effectiveContextWindowTokens, 258400);
       expect(metadata.resolvedAutoCompactTokenLimit, 244800);
       expect(
+        metadata.resolveContextWindowTokens(
+          contextWindowMode: maximumContextWindowMode,
+        ),
+        272000,
+      );
+      expect(
         const ProviderModelMetadata(
           model: 'custom',
           contextWindowTokens: 272000,
@@ -120,6 +126,78 @@ void main() {
     },
   );
 
+  test('Codex model can switch between default and maximum windows', () {
+    const metadata = ProviderModelMetadata(
+      model: 'gpt-5.6-luna',
+      contextWindowTokens: 272000,
+      maxContextWindowTokens: 872000,
+    );
+
+    expect(metadata.hasExpandedContextWindow, isTrue);
+    expect(
+      metadata.resolveContextWindowTokens(
+        contextWindowMode: defaultContextWindowMode,
+      ),
+      272000,
+    );
+    expect(
+      metadata.resolveContextWindowTokens(
+        contextWindowMode: maximumContextWindowMode,
+      ),
+      872000,
+    );
+    expect(
+      metadata.resolveEffectiveContextWindowTokens(
+        contextWindowMode: maximumContextWindowMode,
+      ),
+      828400,
+    );
+    expect(
+      metadata.resolveAutoCompactTokenLimit(
+        contextWindowMode: maximumContextWindowMode,
+      ),
+      784800,
+    );
+
+    const aliasProvider = ProviderProfile(
+      id: 'provider-alias',
+      name: 'GPT alias',
+      baseUrl: 'https://provider.example/v1',
+      model: 'gpt-5.6',
+      apiKeyRef: 'provider-alias:key',
+      isDefault: true,
+    );
+    expect(
+      resolveProviderModelMetadata(aliasProvider, aliasProvider.model)
+          ?.maxContextWindowTokens,
+      872000,
+    );
+  });
+
+  test('provider context window mode survives round-trip and invalid values use default', () {
+    const provider = ProviderProfile(
+      id: 'provider-window',
+      name: '窗口供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'gpt-5.6-luna',
+      contextWindowMode: maximumContextWindowMode,
+      apiKeyRef: 'provider-window:key',
+      isDefault: true,
+    );
+
+    expect(
+      ProviderProfile.fromMap(provider.toMap()).contextWindowMode,
+      maximumContextWindowMode,
+    );
+    expect(
+      ProviderProfile.fromMap({
+        ...provider.toMap(),
+        'contextWindowMode': 'unknown',
+      }).contextWindowMode,
+      defaultContextWindowMode,
+    );
+  });
+
   test('model metadata falls back to max window and keeps explicit policy', () {
     const fallback = ProviderModelMetadata(
       model: 'fallback',
@@ -140,6 +218,50 @@ void main() {
     expect(merged.contextWindowTokens, 272000);
     expect(merged.autoCompactTokenLimit, 200000);
     expect(merged.compactionMode, 'disabled');
+  });
+
+  test('id-only provider metadata keeps the known Codex model window', () {
+    const provider = ProviderProfile(
+      id: 'provider-codex',
+      name: 'Codex 兼容供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'gpt-5.6-luna',
+      apiKeyRef: 'provider-codex:key',
+      isDefault: true,
+      modelMetadata: {
+        'gpt-5.6-luna': ProviderModelMetadata(
+          model: 'gpt-5.6-luna',
+          source: 'api',
+        ),
+      },
+    );
+
+    final metadata = resolveProviderModelMetadata(provider, provider.model);
+
+    expect(metadata?.resolvedContextWindowTokens, 272000);
+    expect(metadata?.maxContextWindowTokens, 872000);
+    expect(metadata?.effectiveContextWindowTokens, 258400);
+    expect(metadata?.resolvedAutoCompactTokenLimit, 244800);
+    expect(metadata?.inputModalities, ['text', 'image']);
+  });
+
+  test('unknown provider models use the Codex fallback window by default', () {
+    const provider = ProviderProfile(
+      id: 'provider-default',
+      name: '通用供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'deepseek-chat',
+      apiKeyRef: 'provider-default:key',
+      isDefault: true,
+    );
+
+    final metadata = resolveProviderModelMetadata(provider, provider.model);
+
+    expect(metadata?.resolvedContextWindowTokens, 272000);
+    expect(metadata?.maxContextWindowTokens, 272000);
+    expect(metadata?.effectiveContextWindowTokens, 258400);
+    expect(metadata?.resolvedAutoCompactTokenLimit, 244800);
+    expect(metadata?.source, 'codex-fallback');
   });
 
   test('missing tool-output metadata uses Codex fallback policy', () {
@@ -214,7 +336,7 @@ void main() {
     expect(merged.supportsSearchTool, isTrue);
   });
 
-  test('unknown model metadata leaves context percentage unknown', () {
+  test('context usage without resolved metadata remains unknown', () {
     const usage = TaskContextUsage(
       last: TokenUsageSnapshot(
         inputTokens: 1,

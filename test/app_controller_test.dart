@@ -312,6 +312,7 @@ void main() {
       model: 'model-a',
       secret: 'secret',
       isDefault: true,
+      contextWindowMode: maximumContextWindowMode,
       modelMetadata: const {
         'model-a': ProviderModelMetadata(
           model: 'model-a',
@@ -327,6 +328,10 @@ void main() {
     );
     await restored.load();
     expect(
+      restored.providers.single.contextWindowMode,
+      maximumContextWindowMode,
+    );
+    expect(
       restored
           .providers
           .single
@@ -334,7 +339,154 @@ void main() {
           ?.resolvedContextWindowTokens,
       128000,
     );
+    await restored.saveProvider(
+      existing: restored.providers.single,
+      name: restored.providers.single.name,
+      baseUrl: restored.providers.single.baseUrl,
+      model: restored.providers.single.model,
+      secret: '',
+      isDefault: true,
+    );
+    expect(
+      restored.providers.single.contextWindowMode,
+      maximumContextWindowMode,
+    );
     restored.dispose();
+  });
+
+  test(
+    'context usage resolves Codex fallback for id-only provider metadata',
+    () async {
+      final database = MemoryAppDatabase();
+      const provider = ProviderProfile(
+        id: 'provider-luna',
+        name: 'Luna 供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'gpt-5.6-luna',
+        apiKeyRef: 'provider-luna:key',
+        isDefault: true,
+        modelMetadata: {
+          'gpt-5.6-luna': ProviderModelMetadata(
+            model: 'gpt-5.6-luna',
+            source: 'api',
+          ),
+        },
+      );
+      const taskId = 'task-luna-context';
+      final now = DateTime.utc(2026, 8, 27);
+      await database.saveProvider(provider);
+      await database.saveTask(
+        Task(
+          id: taskId,
+          mode: 'chat',
+          serverId: null,
+          providerId: provider.id,
+          title: 'Luna 上下文',
+          workingDirectory: null,
+          executionMode: 'confirm',
+          status: 'completed',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'luna-context-event',
+          taskId: taskId,
+          sequence: 1,
+          type: 'assistant.completed',
+          timestamp: now,
+          payload: const {
+            'provider_id': 'provider-luna',
+            'wire_api': 'responses',
+            'model': 'gpt-5.6-luna',
+            'usage': {
+              'input_tokens': 120000,
+              'output_tokens': 9200,
+              'total_tokens': 129200,
+            },
+          },
+        ),
+      );
+
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+
+      final usage = await controller.loadTaskContextUsage(
+        controller.tasks.single,
+      );
+
+      expect(usage.rawContextWindow, 272000);
+      expect(usage.effectiveContextWindow, 258400);
+      expect(usage.autoCompactTokenLimit, 244800);
+      expect(usage.remainingPercent, 52);
+    },
+  );
+
+  test('context usage follows the provider window mode', () async {
+    final database = MemoryAppDatabase();
+    const provider = ProviderProfile(
+      id: 'provider-maximum-window',
+      name: '扩展窗口供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'gpt-5.6-luna',
+      contextWindowMode: maximumContextWindowMode,
+      apiKeyRef: 'provider-maximum-window:key',
+      isDefault: true,
+    );
+    final now = DateTime.utc(2026, 8, 27);
+    await database.saveProvider(provider);
+    await database.saveTask(
+      Task(
+        id: 'task-maximum-window',
+        mode: 'chat',
+        serverId: null,
+        providerId: provider.id,
+        title: '扩展窗口',
+        workingDirectory: null,
+        executionMode: 'confirm',
+        status: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'maximum-window-event',
+        taskId: 'task-maximum-window',
+        sequence: 1,
+        type: 'assistant.completed',
+        timestamp: now,
+        payload: const {
+          'provider_id': 'provider-maximum-window',
+          'wire_api': 'responses',
+          'model': 'gpt-5.6-luna',
+          'usage': {
+            'input_tokens': 120000,
+            'output_tokens': 9200,
+            'total_tokens': 129200,
+          },
+        },
+      ),
+    );
+
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    final usage = await controller.loadTaskContextUsage(
+      controller.tasks.single,
+    );
+
+    expect(usage.rawContextWindow, 872000);
+    expect(usage.effectiveContextWindow, 828400);
+    expect(usage.autoCompactTokenLimit, 784800);
   });
 
   test('explicit work modes are persisted with their task bindings', () async {
