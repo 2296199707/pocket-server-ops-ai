@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 // `default` is an app-only sentinel: omitting reasoning.effort lets the
 // selected model use its documented default. The other values are the
 // official Responses API effort values; individual models support subsets.
@@ -202,6 +204,7 @@ class ProviderProfile {
   final String wireApi;
   final String? apiKeyRef;
   final bool isDefault;
+  final Map<String, ProviderModelMetadata> modelMetadata;
 
   const ProviderProfile({
     required this.id,
@@ -212,6 +215,7 @@ class ProviderProfile {
     this.wireApi = 'responses',
     required this.apiKeyRef,
     required this.isDefault,
+    this.modelMetadata = const {},
   });
 
   factory ProviderProfile.fromMap(Map<String, Object?> map) {
@@ -224,6 +228,7 @@ class ProviderProfile {
       wireApi: map['wireApi'] as String? ?? 'responses',
       apiKeyRef: map['apiKeyRef'] as String?,
       isDefault: map['isDefault'] as bool,
+      modelMetadata: _readProviderModelMetadata(map['modelMetadata']),
     );
   }
 
@@ -236,7 +241,362 @@ class ProviderProfile {
     'wireApi': wireApi,
     'apiKeyRef': apiKeyRef,
     'isDefault': isDefault,
+    'modelMetadata': jsonEncode({
+      for (final entry in modelMetadata.entries) entry.key: entry.value.toMap(),
+    }),
   };
+
+  ProviderProfile copyWith({
+    String? name,
+    String? baseUrl,
+    String? model,
+    String? reasoningEffort,
+    String? wireApi,
+    String? apiKeyRef,
+    bool? isDefault,
+    Map<String, ProviderModelMetadata>? modelMetadata,
+  }) {
+    return ProviderProfile(
+      id: id,
+      name: name ?? this.name,
+      baseUrl: baseUrl ?? this.baseUrl,
+      model: model ?? this.model,
+      reasoningEffort: reasoningEffort ?? this.reasoningEffort,
+      wireApi: wireApi ?? this.wireApi,
+      apiKeyRef: apiKeyRef ?? this.apiKeyRef,
+      isDefault: isDefault ?? this.isDefault,
+      modelMetadata: modelMetadata ?? this.modelMetadata,
+    );
+  }
+}
+
+/// Metadata used by the Codex-compatible context policy for one provider
+/// model. The window is the model's raw window; the effective window reserves
+/// the same percentage of headroom used by Codex for prompts, tools, and
+/// output. All values are optional because a normal OpenAI-compatible
+/// /models response often contains only model ids.
+class ProviderModelMetadata {
+  const ProviderModelMetadata({
+    required this.model,
+    this.contextWindowTokens,
+    this.maxContextWindowTokens,
+    this.effectiveContextWindowPercent = 95,
+    this.autoCompactTokenLimit,
+    this.compactionMode = 'auto',
+    this.source = 'manual',
+    this.defaultReasoningLevel,
+    this.supportedReasoningLevels,
+    this.inputModalities,
+    this.truncationPolicy,
+    this.shellType,
+    this.applyPatchToolType,
+    this.webSearchToolType,
+    this.toolMode,
+    this.experimentalSupportedTools,
+    this.supportsSearchTool,
+    this.supportsImageDetailOriginal,
+    this.compHash,
+  });
+
+  final String model;
+  final int? contextWindowTokens;
+  final int? maxContextWindowTokens;
+  final int effectiveContextWindowPercent;
+  final int? autoCompactTokenLimit;
+  final String compactionMode;
+  final String source;
+  final String? defaultReasoningLevel;
+  final List<ProviderReasoningLevel>? supportedReasoningLevels;
+  final List<String>? inputModalities;
+  final ProviderTruncationPolicy? truncationPolicy;
+  final String? shellType;
+  final String? applyPatchToolType;
+  final String? webSearchToolType;
+  final String? toolMode;
+  final List<String>? experimentalSupportedTools;
+  final bool? supportsSearchTool;
+  final bool? supportsImageDetailOriginal;
+  final String? compHash;
+
+  factory ProviderModelMetadata.fromMap(Map<String, Object?> map) {
+    return ProviderModelMetadata(
+      model: map['model'] as String,
+      contextWindowTokens: _readOptionalInt(
+        map['contextWindowTokens'] ?? map['context_window'],
+      ),
+      maxContextWindowTokens: _readOptionalInt(
+        map['maxContextWindowTokens'] ?? map['max_context_window'],
+      ),
+      effectiveContextWindowPercent:
+          _readOptionalInt(
+            map['effectiveContextWindowPercent'] ??
+                map['effective_context_window_percent'],
+          ) ??
+          95,
+      autoCompactTokenLimit: _readOptionalInt(
+        map['autoCompactTokenLimit'] ?? map['auto_compact_token_limit'],
+      ),
+      compactionMode:
+          (map['compactionMode'] ?? map['compaction_mode']) as String? ??
+          'auto',
+      source: map['source'] as String? ?? 'manual',
+      defaultReasoningLevel: _readOptionalString(
+        map['defaultReasoningLevel'] ?? map['default_reasoning_level'],
+      ),
+      supportedReasoningLevels: _readOptionalReasoningLevels(
+        map['supportedReasoningLevels'] ?? map['supported_reasoning_levels'],
+      ),
+      inputModalities: _readOptionalStringList(
+        map['inputModalities'] ?? map['input_modalities'],
+      ),
+      truncationPolicy: ProviderTruncationPolicy.fromMap(
+        map['truncationPolicy'] ?? map['truncation_policy'],
+      ),
+      shellType: _readOptionalString(map['shellType'] ?? map['shell_type']),
+      applyPatchToolType: _readOptionalString(
+        map['applyPatchToolType'] ?? map['apply_patch_tool_type'],
+      ),
+      webSearchToolType: _readOptionalString(
+        map['webSearchToolType'] ?? map['web_search_tool_type'],
+      ),
+      toolMode: _readOptionalString(map['toolMode'] ?? map['tool_mode']),
+      experimentalSupportedTools: _readOptionalStringList(
+        map['experimentalSupportedTools'] ??
+            map['experimental_supported_tools'],
+      ),
+      supportsSearchTool: _readOptionalBool(
+        map['supportsSearchTool'] ?? map['supports_search_tool'],
+      ),
+      supportsImageDetailOriginal: _readOptionalBool(
+        map['supportsImageDetailOriginal'] ??
+            map['supports_image_detail_original'],
+      ),
+      compHash: _readOptionalString(map['compHash'] ?? map['comp_hash']),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'model': model,
+    if (contextWindowTokens != null) 'contextWindowTokens': contextWindowTokens,
+    if (maxContextWindowTokens != null)
+      'maxContextWindowTokens': maxContextWindowTokens,
+    'effectiveContextWindowPercent': effectiveContextWindowPercent,
+    if (autoCompactTokenLimit != null)
+      'autoCompactTokenLimit': autoCompactTokenLimit,
+    'compactionMode': compactionMode,
+    'source': source,
+    if (defaultReasoningLevel != null)
+      'defaultReasoningLevel': defaultReasoningLevel,
+    if (supportedReasoningLevels != null)
+      'supportedReasoningLevels': [
+        for (final level in supportedReasoningLevels!) level.toMap(),
+      ],
+    if (inputModalities != null) 'inputModalities': inputModalities,
+    if (truncationPolicy != null) 'truncationPolicy': truncationPolicy!.toMap(),
+    if (shellType != null) 'shellType': shellType,
+    if (applyPatchToolType != null) 'applyPatchToolType': applyPatchToolType,
+    if (webSearchToolType != null) 'webSearchToolType': webSearchToolType,
+    if (toolMode != null) 'toolMode': toolMode,
+    if (experimentalSupportedTools != null)
+      'experimentalSupportedTools': experimentalSupportedTools,
+    if (supportsSearchTool != null) 'supportsSearchTool': supportsSearchTool,
+    if (supportsImageDetailOriginal != null)
+      'supportsImageDetailOriginal': supportsImageDetailOriginal,
+    if (compHash != null) 'compHash': compHash,
+  };
+
+  /// Codex reports this effective value as model window × 95% by default.
+  /// Ignore non-positive metadata so a malformed catalog cannot make the
+  /// request client emit an invalid compaction threshold.
+  int? get resolvedContextWindowTokens {
+    final context = contextWindowTokens;
+    if (context != null && context > 0) return context;
+    final maximum = maxContextWindowTokens;
+    return maximum != null && maximum > 0 ? maximum : null;
+  }
+
+  int? get effectiveContextWindowTokens {
+    final window = resolvedContextWindowTokens;
+    if (window == null) return null;
+    final percent = effectiveContextWindowPercent.clamp(0, 100).toInt();
+    return window * percent ~/ 100;
+  }
+
+  /// Codex derives the automatic threshold as 90% of the raw context window
+  /// and clamps an explicitly supplied threshold to that value.
+  int? get resolvedAutoCompactTokenLimit {
+    if (compactionMode == 'disabled') return null;
+    final window = resolvedContextWindowTokens;
+    final windowLimit = window == null ? null : window * 9 ~/ 10;
+    final configured =
+        autoCompactTokenLimit != null && autoCompactTokenLimit! > 0
+        ? autoCompactTokenLimit
+        : null;
+    if (windowLimit == null) return configured;
+    if (configured == null) return windowLimit;
+    return configured < windowLimit ? configured : windowLimit;
+  }
+
+  ProviderModelMetadata mergedWith(ProviderModelMetadata remote) {
+    // A normal OpenAI-compatible /models response often returns only an id.
+    // Keep a manually supplied window in that case, while allowing a Codex
+    // model catalog to replace it when it supplies real limits.
+    final hasRemoteWindow =
+        (remote.contextWindowTokens ?? 0) > 0 ||
+        (remote.maxContextWindowTokens ?? 0) > 0 ||
+        (remote.autoCompactTokenLimit ?? 0) > 0;
+    final hasRemotePolicy =
+        hasRemoteWindow ||
+        remote.effectiveContextWindowPercent != 95 ||
+        remote.compactionMode != 'auto';
+    // Merge optional capability fields independently. An ordinary /models
+    // response containing only an id has null values for these fields and
+    // therefore cannot erase manually configured metadata.
+    return ProviderModelMetadata(
+      model: model,
+      contextWindowTokens: hasRemotePolicy
+          ? remote.contextWindowTokens ?? contextWindowTokens
+          : contextWindowTokens,
+      maxContextWindowTokens: hasRemotePolicy
+          ? remote.maxContextWindowTokens ?? maxContextWindowTokens
+          : maxContextWindowTokens,
+      effectiveContextWindowPercent:
+          hasRemotePolicy && remote.effectiveContextWindowPercent != 95
+          ? remote.effectiveContextWindowPercent
+          : effectiveContextWindowPercent,
+      autoCompactTokenLimit: hasRemotePolicy
+          ? remote.autoCompactTokenLimit ?? autoCompactTokenLimit
+          : autoCompactTokenLimit,
+      compactionMode: hasRemotePolicy && remote.compactionMode != 'auto'
+          ? remote.compactionMode
+          : compactionMode,
+      source: remote.source,
+      defaultReasoningLevel:
+          remote.defaultReasoningLevel ?? defaultReasoningLevel,
+      supportedReasoningLevels:
+          remote.supportedReasoningLevels ?? supportedReasoningLevels,
+      inputModalities: remote.inputModalities ?? inputModalities,
+      truncationPolicy: remote.truncationPolicy ?? truncationPolicy,
+      shellType: remote.shellType ?? shellType,
+      applyPatchToolType: remote.applyPatchToolType ?? applyPatchToolType,
+      webSearchToolType: remote.webSearchToolType ?? webSearchToolType,
+      toolMode: remote.toolMode ?? toolMode,
+      experimentalSupportedTools:
+          remote.experimentalSupportedTools ?? experimentalSupportedTools,
+      supportsSearchTool: remote.supportsSearchTool ?? supportsSearchTool,
+      supportsImageDetailOriginal:
+          remote.supportsImageDetailOriginal ?? supportsImageDetailOriginal,
+      compHash: remote.compHash ?? compHash,
+    );
+  }
+}
+
+/// One entry from Codex's `supported_reasoning_levels` catalog field.
+class ProviderReasoningLevel {
+  const ProviderReasoningLevel({required this.effort, this.description});
+
+  final String effort;
+  final String? description;
+
+  factory ProviderReasoningLevel.fromMap(Object? value) {
+    if (value is String) return ProviderReasoningLevel(effort: value);
+    if (value is Map) {
+      final effort = value['effort'] ?? value['reasoning_effort'];
+      if (effort is String && effort.isNotEmpty) {
+        final description = value['description'];
+        return ProviderReasoningLevel(
+          effort: effort,
+          description: description is String ? description : null,
+        );
+      }
+    }
+    throw const FormatException('推理强度元数据格式无效');
+  }
+
+  Map<String, Object?> toMap() => {
+    'effort': effort,
+    if (description != null) 'description': description,
+  };
+}
+
+/// Codex's per-model tool-output truncation policy.
+class ProviderTruncationPolicy {
+  const ProviderTruncationPolicy({required this.mode, required this.limit});
+
+  final String mode;
+  final int limit;
+
+  static ProviderTruncationPolicy? fromMap(Object? value) {
+    if (value is! Map) return null;
+    final mode = value['mode'];
+    final limit = _readOptionalInt(value['limit']);
+    if (mode is! String || limit == null) return null;
+    return ProviderTruncationPolicy(mode: mode, limit: limit);
+  }
+
+  Map<String, Object?> toMap() => {'mode': mode, 'limit': limit};
+}
+
+int? _readOptionalInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value);
+  return null;
+}
+
+String? _readOptionalString(Object? value) =>
+    value is String && value.isNotEmpty ? value : null;
+
+bool? _readOptionalBool(Object? value) => value is bool ? value : null;
+
+List<String>? _readOptionalStringList(Object? value) {
+  if (value is! List) return null;
+  return List.unmodifiable([
+    for (final item in value)
+      if (item is String) item,
+  ]);
+}
+
+List<ProviderReasoningLevel>? _readOptionalReasoningLevels(Object? value) {
+  if (value is! List) return null;
+  final levels = <ProviderReasoningLevel>[];
+  for (final item in value) {
+    try {
+      levels.add(ProviderReasoningLevel.fromMap(item));
+    } on FormatException {
+      // Ignore malformed entries while retaining the valid catalog entries.
+    }
+  }
+  return List.unmodifiable(levels);
+}
+
+Map<String, ProviderModelMetadata> _readProviderModelMetadata(Object? value) {
+  Object? decoded = value;
+  if (value is String && value.isNotEmpty) {
+    try {
+      decoded = jsonDecode(value);
+    } on FormatException {
+      return const {};
+    }
+  }
+  if (decoded is! Map) return const {};
+  final result = <String, ProviderModelMetadata>{};
+  for (final entry in decoded.entries) {
+    if (entry.key is! String || entry.value is! Map) continue;
+    try {
+      final item = Map<String, Object?>.from(entry.value as Map);
+      final model = item['model'] is String
+          ? item['model'] as String
+          : entry.key as String;
+      result[entry.key as String] = ProviderModelMetadata.fromMap({
+        ...item,
+        'model': model,
+      });
+    } on Object {
+      // Ignore one malformed optional metadata entry and keep the provider.
+    }
+  }
+  return Map.unmodifiable(result);
 }
 
 class ProviderBalance {

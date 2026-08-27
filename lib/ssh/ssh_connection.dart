@@ -131,12 +131,23 @@ class SshFileChunk {
 
 class SshCommandStream {
   SshCommandStream(this._session) {
-    unawaited(_session.done.then((_) => _sessionDone = true));
+    unawaited(
+      _session.done.then<void>(
+        (_) => _sessionDone = true,
+        onError: (Object error, StackTrace stackTrace) {
+          // A failed channel is no longer usable and must not leave
+          // termination waiting for a completion that will never arrive.
+          _sessionDone = true;
+        },
+      ),
+    );
   }
 
   final SSHSession _session;
   var _sessionDone = false;
   var _closed = false;
+  Future<void>? _termination;
+  final _closedSignal = Completer<void>();
 
   Stream<Uint8List> get stdout => _session.stdout;
   Stream<Uint8List> get stderr => _session.stderr;
@@ -164,9 +175,56 @@ class SshCommandStream {
     }
   }
 
+  /// Ask the remote command to exit, then force the channel down if it does
+  /// not report completion promptly. Closing an SSH channel alone does not
+  /// reliably stop a child process on every server.
+  Future<void> terminate({
+    Duration termGrace = const Duration(seconds: 2),
+    Duration killGrace = const Duration(seconds: 1),
+  }) {
+    final existing = _termination;
+    if (existing != null) return existing;
+    final future = _terminate(termGrace: termGrace, killGrace: killGrace);
+    _termination = future;
+    return future;
+  }
+
+  Future<void> _terminate({
+    required Duration termGrace,
+    required Duration killGrace,
+  }) async {
+    if (_closed || _sessionDone) return;
+    stop();
+    await _waitForDone(termGrace);
+    if (!_sessionDone && !_closed) {
+      try {
+        _session.kill(SSHSignal.KILL);
+      } catch (_) {
+        // The session can close between the TERM and KILL signals.
+      }
+      await _waitForDone(killGrace);
+    }
+    if (!_sessionDone) close();
+  }
+
+  Future<void> _waitForDone(Duration timeout) async {
+    if (_sessionDone || _closed) return;
+    try {
+      await Future.any<void>([_session.done, _closedSignal.future])
+          .timeout(timeout);
+      if (!_closed) _sessionDone = true;
+    } on TimeoutException {
+      // The caller will escalate to SIGKILL after the grace period.
+    } catch (_) {
+      // A failed session is already unusable and must be treated as done.
+      _sessionDone = true;
+    }
+  }
+
   void close() {
     if (_closed) return;
     _closed = true;
+    if (!_closedSignal.isCompleted) _closedSignal.complete();
     try {
       _session.close();
     } catch (_) {
@@ -390,14 +448,13 @@ class DartSshConnection implements SshConnection {
         );
         if (timedOut) {
           try {
-            stream.stop();
+            await stream.terminate();
           } catch (_) {}
-          stream.close();
           throw SshCommandTimeout(timeout);
         }
         activeStream = stream;
-        final stdoutBuffer = _TextBuffer();
-        final stderrBuffer = _TextBuffer();
+        final stdoutBuffer = SshOutputBuffer();
+        final stderrBuffer = SshOutputBuffer();
         final stdoutDone = stream.stdout
             .cast<List<int>>()
             .transform(const Utf8Decoder(allowMalformed: true))
@@ -423,7 +480,7 @@ class DartSshConnection implements SshConnection {
     } on TimeoutException {
       timedOut = true;
       try {
-        activeStream?.stop();
+        await activeStream?.terminate();
       } catch (_) {}
       try {
         activeStream?.close();
@@ -580,23 +637,10 @@ class DartSshConnection implements SshConnection {
             SftpFileAttrs(mode: existingMode),
           );
         }
-        try {
-          await sftp.rename(temporaryFilePath, writePath);
-        } on SftpStatusError {
-          // Some SFTP servers do not support replacing an existing path with
-          // the standard rename operation. The resolved target is safe to
-          // update directly and still preserves symbolic-link semantics.
-          final directFile = await sftp.open(
-            writePath,
-            mode: SftpFileOpenMode.write | SftpFileOpenMode.truncate,
-          );
-          try {
-            await directFile.writeBytes(contents);
-          } finally {
-            await directFile.close();
-          }
-          await sftp.remove(temporaryFilePath);
-        }
+        // Never fall back to truncating the target in place. If this server
+        // cannot replace an existing path with rename, fail while the
+        // original file is still intact.
+        await sftp.rename(temporaryFilePath, writePath);
         committed = true;
       } finally {
         if (!committed && temporaryPath != null) {
@@ -688,16 +732,71 @@ const _defaultFileChunkBytes = 64 * 1024;
 const _maxSymlinkDepth = 16;
 const _sftpTimeout = Duration(minutes: 2);
 
-class _TextBuffer {
-  final StringBuffer _buffer = StringBuffer();
+/// Keeps command output bounded while preserving logical offsets for polling.
+/// The beginning and end are retained so a long-running command remains
+/// useful to the model without keeping an unbounded string in memory.
+class SshOutputBuffer {
+  SshOutputBuffer({this.maxCharacters = 1024 * 1024})
+    : assert(maxCharacters > 0);
 
-  bool get truncated => false;
+  final int maxCharacters;
+  late final int _headLimit = maxCharacters ~/ 2;
+  late final int _tailLimit = maxCharacters - _headLimit;
+
+  StringBuffer? _all = StringBuffer();
+  String _head = '';
+  String _tail = '';
+  var _length = 0;
+  var _truncated = false;
+
+  bool get truncated => _truncated;
+  int get length => _length;
 
   void add(String value) {
-    _buffer.write(value);
+    if (value.isEmpty) return;
+    _length += value.length;
+    final all = _all;
+    if (!_truncated && all != null) {
+      if (all.length + value.length <= maxCharacters) {
+        all.write(value);
+        return;
+      }
+      final existing = all.toString();
+      _head = existing.substring(
+        0,
+        existing.length < _headLimit ? existing.length : _headLimit,
+      );
+      final tailSource = value.length >= _tailLimit ? value : '$existing$value';
+      _tail = _last(tailSource, _tailLimit);
+      _all = null;
+      _truncated = true;
+      return;
+    }
+
+    _tail = _last('$_tail$value', _tailLimit);
   }
 
-  String get value => _buffer.toString();
+  String get value => substring(0);
+
+  String substring(int start) {
+    final offset = start.clamp(0, _length).toInt();
+    final all = _all;
+    if (!_truncated && all != null) {
+      return all.toString().substring(offset);
+    }
+    final tailStart = _length - _tail.length;
+    const omitted = '\n[…输出中间部分已省略…]\n';
+    if (offset < _head.length) {
+      return '${_head.substring(offset)}$omitted$_tail';
+    }
+    if (offset < tailStart) return omitted + _tail;
+    return _tail.substring(offset - tailStart);
+  }
+
+  static String _last(String value, int length) {
+    if (value.length <= length) return value;
+    return value.substring(value.length - length);
+  }
 }
 
 String _joinRemotePath(String directory, String name) {
@@ -708,6 +807,7 @@ String _joinRemotePath(String directory, String name) {
 
 class TaskSshConnectionPool {
   final Map<String, Future<SshConnection>> _connections = {};
+  final Set<String> _pendingConnections = {};
 
   Future<SshConnection> acquire(
     String taskId,
@@ -717,16 +817,29 @@ class TaskSshConnectionPool {
       final existing = _connections[taskId];
       if (existing != null) {
         final connection = await existing;
+        if (!identical(_connections[taskId], existing)) {
+          if (_connections[taskId] == null) {
+            throw StateError('SSH connection acquisition was aborted');
+          }
+          continue;
+        }
         if (!connection.isClosed) return connection;
-        if (!identical(_connections[taskId], existing)) continue;
         _connections.remove(taskId);
       }
 
       final pending = connect();
       _connections[taskId] = pending;
+      _pendingConnections.add(taskId);
       try {
-        return await pending;
+        final connection = await pending;
+        _pendingConnections.remove(taskId);
+        if (!identical(_connections[taskId], pending)) {
+          await connection.close();
+          throw StateError('SSH connection acquisition was aborted');
+        }
+        return connection;
       } catch (_) {
+        _pendingConnections.remove(taskId);
         if (identical(_connections[taskId], pending)) {
           _connections.remove(taskId);
         }
@@ -737,6 +850,7 @@ class TaskSshConnectionPool {
 
   void abort(String taskId) {
     final pending = _connections.remove(taskId);
+    _pendingConnections.remove(taskId);
     if (pending == null) return;
     unawaited(
       pending.then<void>(
@@ -748,14 +862,31 @@ class TaskSshConnectionPool {
 
   Future<void> release(String taskId) async {
     final pending = _connections.remove(taskId);
+    _pendingConnections.remove(taskId);
     final connection = await pending;
     await connection?.close();
   }
 
   Future<void> close() async {
     final taskIds = _connections.keys.toList();
+    final established = <Future<void>>[];
     for (final taskId in taskIds) {
-      await release(taskId);
+      final pending = _connections.remove(taskId);
+      final isPending = _pendingConnections.remove(taskId);
+      if (pending == null) continue;
+      final closing = pending.then<void>(
+        (connection) => connection.close(),
+        onError: (Object error, StackTrace stackTrace) {},
+      );
+      if (isPending) {
+        // A connector may be waiting on a socket timeout. Do not make app
+        // shutdown wait for that timeout; close the connection if it ever
+        // arrives.
+        unawaited(closing);
+      } else {
+        established.add(closing);
+      }
     }
+    await Future.wait(established, eagerError: false);
   }
 }

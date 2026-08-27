@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path_util;
@@ -10,9 +11,12 @@ import 'package:sqflite/sqflite.dart';
 import 'agent/agent_loop.dart';
 import 'agent/agent_tools.dart';
 import 'agent/ai_client_factory.dart';
+import 'agent/context_usage.dart';
 import 'agent/ai_protocol.dart';
 import 'agent/auto_review.dart';
 import 'agent/openai_compatible_client.dart';
+import 'agent/remote_instructions.dart';
+import 'agent/remote_write_queue.dart';
 import 'credentials/credential_store.dart';
 import 'domain/models.dart';
 import 'local/local_preview.dart';
@@ -70,18 +74,22 @@ class AppController extends ChangeNotifier {
   final AttachmentStore _attachmentStore;
   final bool previewMode;
   final ProjectFileStore _projectFiles = const ProjectFileStore();
+  final RemoteProjectInstructions _remoteInstructions =
+      const RemoteProjectInstructions();
   final LocalPreviewServer _localPreview = LocalPreviewServer();
   final TaskSshConnectionPool _sshPool = TaskSshConnectionPool();
   final Map<String, AgentCancellation> _runningTasks = {};
   final Map<String, Future<AgentResult>> _taskRuns = {};
+  final Map<String, String> _taskRunIds = {};
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
   final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
   final Map<String, List<ProjectFileEntry>> _projectDirectoryCache = {};
   final Map<String, Future<List<ProjectFileEntry>>> _projectDirectoryLoads = {};
-  final Map<String, Future<void>> _remoteWriteTails = {};
+  final RemoteWriteQueue _remoteWriteQueue = RemoteWriteQueue();
   final Map<String, Future<void>> _taskEventTails = {};
+  final Map<String, Future<void>> _taskStatusTails = {};
   final Map<String, Future<void>> _eventLoads = {};
   final Map<String, Future<void>> _attachmentMigrations = {};
   final Set<String> _loadedTaskEvents = {};
@@ -89,6 +97,9 @@ class AppController extends ChangeNotifier {
   final Map<String, String> _streamingAssistantText = {};
   final Map<String, ProviderUsageSnapshot> _providerUsages = {};
   final Map<String, Future<ProviderUsageSnapshot>> _providerUsageLoads = {};
+  final Map<String, TaskContextUsage> _taskContextUsages = {};
+  final Map<String, Future<TaskContextUsage>> _taskContextLoads = {};
+  final Map<String, int> _taskContextGenerations = {};
   Future<void> _loadTail = Future<void>.value();
   int _idSequence = 0;
 
@@ -121,6 +132,46 @@ class AppController extends ChangeNotifier {
   ProviderUsageSnapshot? providerUsageFor(String providerId) =>
       _providerUsages[providerId];
 
+  ProviderModelMetadata? modelMetadataFor(
+    ProviderProfile provider,
+    String model,
+  ) => provider.modelMetadata[model];
+
+  TaskContextUsage? contextUsageFor(Task task, {ProviderProfile? provider}) {
+    final cached = _taskContextUsages[task.id];
+    if (cached == null) return null;
+    final activeProvider = _contextProviderFor(task, provider);
+    return cached.withMetadata(
+      _contextMetadataForTask(task, activeProvider),
+      selectedModel: _modelForTask(task, activeProvider),
+    );
+  }
+
+  Future<TaskContextUsage> loadTaskContextUsage(
+    Task task, {
+    ProviderProfile? provider,
+  }) async {
+    final activeProvider = _contextProviderFor(task, provider);
+    final metadata = _contextMetadataForTask(task, activeProvider);
+    final model = _modelForTask(task, activeProvider);
+    final cached = _taskContextUsages[task.id];
+    if (cached != null) {
+      return cached.withMetadata(metadata, selectedModel: model);
+    }
+    final pending = _taskContextLoads[task.id];
+    if (pending != null) return pending;
+    final generation = _taskContextGenerations[task.id] ?? 0;
+    final load = _loadTaskContextUsage(task, metadata, model, generation);
+    _taskContextLoads[task.id] = load;
+    try {
+      return await load;
+    } finally {
+      if (identical(_taskContextLoads[task.id], load)) {
+        _taskContextLoads.remove(task.id);
+      }
+    }
+  }
+
   ProviderProfile? imageProviderFor(Task task) {
     final selectedId = _imageProviderId ?? task.providerId;
     if (selectedId != null) {
@@ -145,9 +196,15 @@ class AppController extends ChangeNotifier {
   bool hasEarlierTaskEvents(String taskId) =>
       _hasEarlierTaskEvents[taskId] ?? false;
 
-  Future<Uint8List> loadAttachmentBytes(String attachmentId) async {
+  Future<Uint8List> loadAttachmentBytes(
+    String attachmentId, {
+    required String taskId,
+  }) async {
     final record = await _database.loadAttachment(attachmentId);
     if (record == null) throw StateError('附件记录不存在');
+    if (record.taskId != taskId) {
+      throw StateError('附件不属于当前对话');
+    }
     return _attachmentStore.read(record);
   }
 
@@ -420,7 +477,10 @@ class AppController extends ChangeNotifier {
     return updated;
   }
 
-  Future<void> deleteProject(Project project) async {
+  Future<void> deleteProject(
+    Project project, {
+    bool deleteFiles = false,
+  }) async {
     if (_tasks.any((task) => task.projectId == project.id)) {
       throw StateError('项目仍有对话，不能删除');
     }
@@ -432,6 +492,13 @@ class AppController extends ChangeNotifier {
         if (item.id != project.id) item,
     ];
     _notify();
+    if (deleteFiles) {
+      try {
+        await _projectFiles.deleteContents(project);
+      } catch (error) {
+        throw StateError('项目配置已删除，但绑定文件夹内容未能完全清理：$error');
+      }
+    }
   }
 
   Future<Task> createTask({
@@ -632,12 +699,38 @@ class AppController extends ChangeNotifier {
     final normalizedReasoningEffortOverride = reasoningEffortOverride == null
         ? current.reasoningEffortOverride
         : _normalizeOptionalValue(reasoningEffortOverride);
-    final contextChanged =
+    final previousProvider = _contextProviderFor(current, null);
+    final nextProvider = _providerForOptionalId(providerId);
+    final previousModel = _modelForTask(current, previousProvider);
+    final nextModel = normalizedModelOverride ?? nextProvider?.model ?? '';
+    final previousMetadata = previousProvider == null
+        ? null
+        : previousProvider.modelMetadata[previousModel];
+    final nextMetadata = nextProvider == null
+        ? null
+        : nextProvider.modelMetadata[nextModel];
+    final providerContextChanged =
+        _providerContextIdentity(
+          providerId: current.providerId,
+          modelOverride: current.modelOverride,
+          providers: _providers,
+        ) !=
+        _providerContextIdentity(
+          providerId: providerId,
+          modelOverride: normalizedModelOverride,
+          providers: _providers,
+        );
+    final providerTransportChanged =
+        _providerTransportIdentity(previousProvider) !=
+        _providerTransportIdentity(nextProvider);
+    final compHashChanged =
+        previousMetadata?.compHash != nextMetadata?.compHash;
+    final historyBoundaryChanged =
         current.mode != normalizedMode ||
         current.effectiveWorkMode != normalizedWorkMode ||
         current.projectId != normalizedProjectId ||
-        current.serverId != normalizedServerId ||
-        current.providerId != providerId;
+        current.serverId != normalizedServerId;
+    final modelChanged = previousModel != nextModel;
     final now = DateTime.now().toUtc();
     final updated = Task(
       id: current.id,
@@ -662,8 +755,9 @@ class AppController extends ChangeNotifier {
       for (final task in _tasks) task.id == updated.id ? updated : task,
     ];
 
-    if (contextChanged) {
+    if (historyBoundaryChanged) {
       _localAccess.remove(taskId);
+      _invalidateTaskContextUsage(taskId);
       await appendTaskEvent(
         taskId: taskId,
         type: 'task.context_changed',
@@ -674,6 +768,35 @@ class AppController extends ChangeNotifier {
           'project_id': normalizedProjectId,
           'server_id': normalizedServerId,
           'provider_id': providerId,
+          'model_override': normalizedModelOverride,
+          'previous_provider_id': previousProvider?.id,
+          'previous_model': previousModel,
+          if (compHashChanged) 'comp_hash_changed': true,
+        },
+      );
+    } else if (providerContextChanged || modelChanged) {
+      // Codex keeps the transcript when the model changes and appends a
+      // model-switch context item. A provider/transport switch uses the same
+      // boundary-free event, but history reconstruction drops opaque provider
+      // state before the next request.
+      _invalidateTaskContextUsage(taskId);
+      await appendTaskEvent(
+        taskId: taskId,
+        type: 'task.context_changed',
+        payload: {
+          'history_boundary': false,
+          'history_projection': providerTransportChanged ? 'provider' : 'model',
+          'reason': providerTransportChanged
+              ? 'provider_changed'
+              : 'model_changed',
+          'previous_provider_id': previousProvider?.id,
+          'provider_id': nextProvider?.id,
+          'previous_model': previousModel,
+          'model': nextModel,
+          'wire_api': nextProvider?.wireApi,
+          'model_changed': modelChanged,
+          'previous_model_override': current.modelOverride,
+          'model_override': normalizedModelOverride,
         },
       );
     }
@@ -681,8 +804,41 @@ class AppController extends ChangeNotifier {
     return _tasks.firstWhere((task) => task.id == taskId);
   }
 
-  Future<void> updateTaskStatus(String taskId, String status) async {
+  Future<void> updateTaskStatus(
+    String taskId,
+    String status, {
+    String? turnId,
+  }) {
+    final previous = _taskStatusTails[taskId] ?? Future<void>.value();
+    late Future<void> current;
+    current = previous.then<void>(
+      (_) => _updateTaskStatusNow(taskId, status, turnId: turnId),
+    );
+    final settled = current.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    _taskStatusTails[taskId] = settled;
+    unawaited(
+      settled.then<void>((_) {
+        if (identical(_taskStatusTails[taskId], settled)) {
+          _taskStatusTails.remove(taskId);
+        }
+      }),
+    );
+    return current;
+  }
+
+  Future<void> _updateTaskStatusNow(
+    String taskId,
+    String status, {
+    String? turnId,
+  }) async {
+    if (turnId != null && _taskRunIds[taskId] != turnId) return;
     final current = _tasks.firstWhere((task) => task.id == taskId);
+    if (status == 'stopping' && _isTerminalTaskStatus(current.status)) {
+      return;
+    }
     final updated = current.copyWith(
       status: status,
       updatedAt: DateTime.now().toUtc(),
@@ -724,6 +880,8 @@ class AppController extends ChangeNotifier {
     required String type,
     required Map<String, Object?> payload,
   }) async {
+    final statusTail = _taskStatusTails[taskId];
+    if (statusTail != null) await statusTail;
     final event = TaskEvent(
       eventId: _newId('event'),
       taskId: taskId,
@@ -766,6 +924,9 @@ class AppController extends ChangeNotifier {
     final migration = _attachmentMigrations[task.id];
     if (migration != null) await migration;
     _localAccess.remove(task.id);
+    final statusTail = _taskStatusTails[task.id];
+    if (statusTail != null) await statusTail;
+    _invalidateTaskContextUsage(task.id);
     _streamingAssistantText.remove(task.id);
     await _database.deleteTask(task.id);
     try {
@@ -789,6 +950,27 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
+  Future<AttachmentCleanupResult> cleanupStorage() async {
+    if (_runningTasks.isNotEmpty) {
+      throw StateError('任务运行中，完成或停止任务后再清理空间');
+    }
+    if (_attachmentMigrations.isNotEmpty) {
+      await Future.wait(_attachmentMigrations.values);
+    }
+    final records = await _database.loadAttachments();
+    final referencedIds = await _database.loadReferencedAttachmentIds();
+    final retainedPaths = {
+      for (final record in records)
+        if (referencedIds.contains(record.id)) record.storagePath,
+    };
+    await _database.deleteAttachments([
+      for (final record in records)
+        if (!referencedIds.contains(record.id)) record.id,
+    ]);
+    final result = await _attachmentStore.removeExcept(retainedPaths);
+    return result;
+  }
+
   Future<AgentResult> runTask(
     Task task, {
     required String prompt,
@@ -801,8 +983,11 @@ class AppController extends ChangeNotifier {
     if (_taskRuns.containsKey(task.id)) {
       throw StateError('任务正在运行');
     }
+    final turnId = _newId('turn');
+    _taskRunIds[task.id] = turnId;
     final future = _runTask(
       task,
+      turnId: turnId,
       prompt: prompt,
       attachments: attachments,
       confirm: confirm,
@@ -812,9 +997,9 @@ class AppController extends ChangeNotifier {
     _taskRuns[task.id] = future;
     unawaited(
       future.then<void>(
-        (_) => _finishTask(task.id),
+        (_) => _finishTask(task.id, turnId, future),
         onError: (Object error, StackTrace stackTrace) {
-          _finishTask(task.id);
+          _finishTask(task.id, turnId, future);
         },
       ),
     );
@@ -823,6 +1008,7 @@ class AppController extends ChangeNotifier {
 
   Future<AgentResult> _runTask(
     Task task, {
+    required String turnId,
     required String prompt,
     required List<AiAttachment> attachments,
     Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
@@ -830,15 +1016,22 @@ class AppController extends ChangeNotifier {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
     SshUserInfoHandler? onUserInfoRequest,
   }) async {
+    Future<TaskEvent> appendTurnEvent(
+      String type,
+      Map<String, Object?> payload,
+    ) {
+      return appendTaskEvent(
+        taskId: task.id,
+        type: type,
+        payload: {'turn_id': turnId, ...payload},
+      );
+    }
+
     if (task.mode != 'chat' && task.mode != 'agent') {
       final error = UnsupportedError('不支持的任务模式：${task.mode}');
       try {
-        await appendTaskEvent(
-          taskId: task.id,
-          type: 'task.failed',
-          payload: {'error': '$error'},
-        );
-        await updateTaskStatus(task.id, 'failed');
+        await appendTurnEvent('task.failed', {'error': '$error'});
+        await updateTaskStatus(task.id, 'failed', turnId: turnId);
       } catch (_) {
         // Keep the original invalid-task error when old data is incomplete.
       }
@@ -867,7 +1060,7 @@ class AppController extends ChangeNotifier {
       if (cancellation.isCancelled) return;
       final current = _tasks.firstWhere((value) => value.id == task.id);
       if (current.status != 'waiting') {
-        await updateTaskStatus(task.id, 'waiting');
+        await updateTaskStatus(task.id, 'waiting', turnId: turnId);
       }
     }
 
@@ -875,7 +1068,7 @@ class AppController extends ChangeNotifier {
       if (cancellation.isCancelled) return;
       final current = _tasks.firstWhere((value) => value.id == task.id);
       if (current.status == 'waiting') {
-        await updateTaskStatus(task.id, 'running');
+        await updateTaskStatus(task.id, 'running', turnId: turnId);
       }
     }
 
@@ -926,14 +1119,12 @@ class AppController extends ChangeNotifier {
         task.id,
         useCompactionBoundary: useResponsesHistory,
       );
-      if (provider != null) {
-        _validateHistoryProtocol(previousEvents, provider.wireApi);
-      }
       requestAttachments = await _persistAttachments(task.id, attachments);
       await appendTaskEvent(
         taskId: task.id,
         type: 'user.message',
         payload: {
+          'turn_id': turnId,
           'text': prompt,
           if (requestAttachments.isNotEmpty)
             'attachments': requestAttachments
@@ -947,19 +1138,17 @@ class AppController extends ChangeNotifier {
           prompt: prompt,
           attachments: requestAttachments,
           initialHistory: await _localHistory(
+            task.id,
             _systemPrompt(task),
             previousEvents,
             useResponsesCompaction: true,
           ),
           cancellation: cancellation,
+          turnId: turnId,
         );
       }
-      await updateTaskStatus(task.id, 'running');
-      await appendTaskEvent(
-        taskId: task.id,
-        type: 'task.started',
-        payload: {'mode': task.mode},
-      );
+      await updateTaskStatus(task.id, 'running', turnId: turnId);
+      await appendTurnEvent('task.started', {'mode': task.mode});
       if (task.mode == 'agent') {
         await _taskService.start(task.id);
         serviceStarted = true;
@@ -999,6 +1188,7 @@ class AppController extends ChangeNotifier {
               _serializeRemoteWrites(
                 projectTools.tools,
                 'project\u0000${project.id}',
+                cancellation: cancellation,
               ),
             );
           }
@@ -1041,6 +1231,7 @@ class AppController extends ChangeNotifier {
             _serializeRemoteWrites(
               remoteTools.tools,
               '${server.id}\u0000$workingDirectory',
+              cancellation: cancellation,
             ),
           );
         }
@@ -1052,6 +1243,16 @@ class AppController extends ChangeNotifier {
           project: useLocalTools ? project : null,
           workingDirectory: useServerTools ? workingDirectory : null,
         );
+        if (useServerTools && connection != null) {
+          final instructions = await _remoteInstructions.load(
+            connection,
+            workingDirectory,
+          );
+          if (instructions != null) {
+            systemPrompt =
+                '$systemPrompt\n\n--- project-doc ---\n\n$instructions';
+          }
+        }
         if (tools.isEmpty) {
           throw StateError('Agent 没有可用的项目或服务器工具');
         }
@@ -1059,7 +1260,14 @@ class AppController extends ChangeNotifier {
 
       final imageProvider = imageProviderFor(task);
       if (imageProvider != null) {
-        tools.add(_imageGenerationTool(imageProvider, taskProject, task.id));
+        tools.add(
+          _imageGenerationTool(
+            imageProvider,
+            taskProject,
+            task.id,
+            cancellation: cancellation,
+          ),
+        );
       }
 
       client = createAiClient(
@@ -1069,12 +1277,26 @@ class AppController extends ChangeNotifier {
         model: task.modelOverride ?? activeProvider.model,
         reasoningEffort:
             task.reasoningEffortOverride ?? activeProvider.reasoningEffort,
+        compactThreshold: activeProvider.wireApi == 'responses'
+            ? activeProvider
+                  .modelMetadata[task.modelOverride ?? activeProvider.model]
+                  ?.resolvedAutoCompactTokenLimit
+            : null,
+        inputModalities: activeProvider.wireApi == 'responses'
+            ? activeProvider
+                  .modelMetadata[task.modelOverride ?? activeProvider.model]
+                  ?.inputModalities
+            : null,
       );
+      final modelMetadata = activeProvider
+          .modelMetadata[task.modelOverride ?? activeProvider.model];
       final loop = AgentLoop(client: client, tools: tools);
       final initialMessages = await _localHistory(
+        task.id,
         systemPrompt,
         previousEvents,
         useResponsesCompaction: activeProvider.wireApi == 'responses',
+        providerId: activeProvider.id,
       );
       var eventQueue = Future<void>.value();
       final result = await loop.run(
@@ -1083,15 +1305,23 @@ class AppController extends ChangeNotifier {
         initialMessages: initialMessages,
         executionMode: task.executionMode,
         cancellation: cancellation,
+        toolOutputLimit: modelMetadata?.truncationPolicy?.limit,
+        toolOutputLimitInTokens:
+            modelMetadata?.truncationPolicy?.mode == 'tokens',
         confirm: waitingConfirm,
         review: task.executionMode == 'auto_review'
             ? (tool, arguments) =>
                   _reviewTool(task, tool, arguments, cancellation: cancellation)
             : null,
+        onRemoteOperationStarted: (tool) {
+          if (tool.writesRemoteState) remoteOperationStarted = true;
+        },
         onEvent: (type, payload) {
           if (type == 'assistant.delta') {
             final delta = payload['text'];
-            if (delta is String && delta.isNotEmpty) {
+            if (_taskRunIds[task.id] == turnId &&
+                delta is String &&
+                delta.isNotEmpty) {
               _streamingAssistantText[task.id] =
                   '${_streamingAssistantText[task.id] ?? ''}$delta';
               _notify();
@@ -1103,20 +1333,41 @@ class AppController extends ChangeNotifier {
               type == 'task.failed' ||
               type == 'task.cancelled' ||
               type == 'task.unknown') {
-            _streamingAssistantText.remove(task.id);
-            _notify();
+            if (_taskRunIds[task.id] == turnId) {
+              _streamingAssistantText.remove(task.id);
+              _notify();
+            }
           }
-          if (type == 'tool.completed' || type == 'task.unknown') {
-            remoteOperationStarted = true;
-          }
-          eventQueue = eventQueue.then(
-            (_) =>
-                appendTaskEvent(taskId: task.id, type: type, payload: payload),
-          );
+          if (type == 'task.unknown') remoteOperationStarted = true;
+          eventQueue = eventQueue.then((_) async {
+            var eventPayload = payload;
+            _ContextUsageEvent? contextUsageEvent;
+            if (type == 'assistant.completed') {
+              try {
+                contextUsageEvent = await _appendContextUsage(
+                  task,
+                  activeProvider,
+                  payload,
+                );
+                eventPayload = contextUsageEvent.payload;
+              } catch (_) {
+                // Usage is telemetry. Keep the assistant event durable even
+                // if its optional usage summary cannot be rebuilt.
+              }
+              eventPayload = {
+                ...eventPayload,
+                'provider_id': activeProvider.id,
+              };
+            }
+            await appendTurnEvent(type, eventPayload);
+            if (contextUsageEvent != null && _taskRunIds[task.id] == turnId) {
+              _taskContextUsages[task.id] = contextUsageEvent.usage;
+            }
+          });
           return eventQueue;
         },
       );
-      await updateTaskStatus(task.id, result.status);
+      await updateTaskStatus(task.id, result.status, turnId: turnId);
       return result;
     } catch (error) {
       // A setup or persistence failure may happen before AgentLoop can return
@@ -1131,15 +1382,13 @@ class AppController extends ChangeNotifier {
           : status == 'unknown'
           ? 'task.unknown'
           : 'task.failed';
-      await appendTaskEvent(
-        taskId: task.id,
-        type: eventType,
-        payload: {'error': '$error'},
-      );
-      await updateTaskStatus(task.id, status);
+      await appendTurnEvent(eventType, {'error': '$error'});
+      await updateTaskStatus(task.id, status, turnId: turnId);
       return AgentResult(status: status, messages: const [], error: error);
     } finally {
-      _streamingAssistantText.remove(task.id);
+      if (_taskRunIds[task.id] == turnId) {
+        _streamingAssistantText.remove(task.id);
+      }
       if (client != null) closeAiClient(client);
       if (task.mode == 'agent' && serviceStarted) {
         if (connection == null && cancellation.isCancelled) {
@@ -1159,16 +1408,22 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  void _finishTask(String taskId) {
+  void _finishTask(String taskId, String turnId, Future<AgentResult> future) {
+    if (_taskRunIds[taskId] != turnId ||
+        !identical(_taskRuns[taskId], future)) {
+      return;
+    }
     _taskRuns.remove(taskId);
+    _taskRunIds.remove(taskId);
     _runningTasks.remove(taskId);
     _notify();
   }
 
   List<AgentTool> _serializeRemoteWrites(
     List<AgentTool> tools,
-    String leaseKey,
-  ) {
+    String leaseKey, {
+    required AgentCancellation cancellation,
+  }) {
     return [
       for (final tool in tools)
         if (!tool.writesRemoteState)
@@ -1178,33 +1433,20 @@ class AppController extends ChangeNotifier {
             definition: tool.definition,
             requiresConfirmation: tool.requiresConfirmation,
             requiresUserApproval: tool.requiresUserApproval,
-            writesRemoteState: true,
-            call: (arguments) =>
-                _withRemoteWriteLease(leaseKey, () => tool.call(arguments)),
+            isRemote: tool.isRemote,
+            writesRemoteState: tool.writesRemoteState,
+            call: (arguments) => _remoteWriteQueue.run(
+              leaseKey,
+              () => tool.call(arguments),
+              cancellation: cancellation,
+            ),
+            callWithOperationStart: (arguments, onOperationStarted) =>
+                _remoteWriteQueue.run(leaseKey, () {
+                  onOperationStarted();
+                  return tool.call(arguments);
+                }, cancellation: cancellation),
           ),
     ];
-  }
-
-  Future<Object?> _withRemoteWriteLease(
-    String leaseKey,
-    Future<Object?> Function() operation,
-  ) {
-    final previous = _remoteWriteTails[leaseKey] ?? Future<void>.value();
-    late Future<Object?> current;
-    current = previous.then<Object?>((_) => operation());
-    final settled = current.then<void>(
-      (_) {},
-      onError: (Object error, StackTrace stack) {},
-    );
-    _remoteWriteTails[leaseKey] = settled;
-    unawaited(
-      settled.then<void>((_) {
-        if (identical(_remoteWriteTails[leaseKey], settled)) {
-          _remoteWriteTails.remove(leaseKey);
-        }
-      }),
-    );
-    return current;
   }
 
   void _notify() {
@@ -1214,19 +1456,20 @@ class AppController extends ChangeNotifier {
   void stopTask(String taskId) {
     final cancellation = _runningTasks[taskId];
     if (cancellation == null) return;
+    final turnId = _taskRunIds[taskId];
     cancellation.cancel();
-    unawaited(updateTaskStatus(taskId, 'stopping'));
-    unawaited(_recordCancellationRequest(taskId));
+    unawaited(updateTaskStatus(taskId, 'stopping', turnId: turnId));
+    unawaited(_recordCancellationRequest(taskId, turnId));
     _notify();
   }
 
-  Future<void> _recordCancellationRequest(String taskId) async {
-    if (!_taskRuns.containsKey(taskId)) return;
+  Future<void> _recordCancellationRequest(String taskId, String? turnId) async {
+    if (turnId == null || _taskRunIds[taskId] != turnId) return;
     try {
       await appendTaskEvent(
         taskId: taskId,
         type: 'task.cancel_requested',
-        payload: const {},
+        payload: {'turn_id': turnId},
       );
     } catch (_) {
       // The task result records the terminal state; this marker is only for
@@ -1771,7 +2014,9 @@ class AppController extends ChangeNotifier {
     String wireApi = 'responses',
     required String secret,
     required bool isDefault,
+    Map<String, ProviderModelMetadata>? modelMetadata,
   }) async {
+    final previousProviders = List<ProviderProfile>.unmodifiable(_providers);
     final id = existing?.id ?? _newId('provider');
     final apiKeyRef = existing?.apiKeyRef ?? 'provider:$id:api';
     if (secret.isNotEmpty) {
@@ -1789,34 +2034,26 @@ class AppController extends ChangeNotifier {
       wireApi: wireApi,
       apiKeyRef: apiKeyRef,
       isDefault: isDefault,
+      modelMetadata: modelMetadata ?? existing?.modelMetadata ?? const {},
     );
     await _database.saveProvider(saved);
     final providers = [
       for (final provider in _providers)
         if (provider.id != id)
-          isDefault
-              ? ProviderProfile(
-                  id: provider.id,
-                  name: provider.name,
-                  baseUrl: provider.baseUrl,
-                  model: provider.model,
-                  reasoningEffort: provider.reasoningEffort,
-                  wireApi: provider.wireApi,
-                  apiKeyRef: provider.apiKeyRef,
-                  isDefault: false,
-                )
-              : provider,
+          isDefault ? provider.copyWith(isDefault: false) : provider,
       saved,
     ]..sort((left, right) => left.name.compareTo(right.name));
     _providers = providers;
+    await _isolateProviderContextChanges(previousProviders, providers);
     _notify();
   }
 
   Future<void> deleteProvider(ProviderProfile profile) async {
+    final implicitProvider = _providerForTaskFrom(null, _providers);
     if (_tasks.any(
       (task) =>
           task.providerId == profile.id ||
-          (task.providerId == null && profile.isDefault),
+          (task.providerId == null && implicitProvider?.id == profile.id),
     )) {
       throw StateError('AI 供应商仍被历史任务使用，请先删除相关任务');
     }
@@ -1907,9 +2144,94 @@ class AppController extends ChangeNotifier {
     String? secret,
   }) async {
     if (previewMode) return const ['demo-model', 'demo-coder'];
+    final models = await loadProviderModelMetadata(profile, secret: secret);
+    return [for (final model in models) model.model];
+  }
+
+  Future<List<ProviderModelMetadata>> loadProviderModelMetadata(
+    ProviderProfile profile, {
+    String? secret,
+  }) async {
+    if (previewMode) return const [];
     final apiKey =
         secret ?? await _readCredential(profile.apiKeyRef, 'API Key 不可用');
-    return _providerTester.listModels(profile, apiKey);
+    final models = await _providerTester.listModelMetadata(profile, apiKey);
+    await _mergeProviderModelMetadata(profile.id, models);
+    return models;
+  }
+
+  Future<void> _mergeProviderModelMetadata(
+    String providerId,
+    List<ProviderModelMetadata> metadata,
+  ) async {
+    if (metadata.isEmpty) return;
+    ProviderProfile? current;
+    for (final provider in _providers) {
+      if (provider.id == providerId) {
+        current = provider;
+        break;
+      }
+    }
+    if (current == null) return;
+    final previousProviders = List<ProviderProfile>.unmodifiable(_providers);
+    final merged = <String, ProviderModelMetadata>{...current.modelMetadata};
+    for (final item in metadata) {
+      final previous = merged[item.model];
+      merged[item.model] = previous == null ? item : previous.mergedWith(item);
+    }
+    final updated = current.copyWith(modelMetadata: merged);
+    await _database.saveProvider(updated);
+    _providers = [
+      for (final provider in _providers)
+        provider.id == providerId ? updated : provider,
+    ];
+    await _isolateProviderContextChanges(previousProviders, _providers);
+    _notify();
+  }
+
+  Future<void> _isolateProviderContextChanges(
+    List<ProviderProfile> previousProviders,
+    List<ProviderProfile> nextProviders,
+  ) async {
+    for (final task in _tasks) {
+      final previousIdentity = _providerContextIdentity(
+        providerId: task.providerId,
+        modelOverride: task.modelOverride,
+        providers: previousProviders,
+      );
+      final nextIdentity = _providerContextIdentity(
+        providerId: task.providerId,
+        modelOverride: task.modelOverride,
+        providers: nextProviders,
+      );
+      if (previousIdentity == nextIdentity) continue;
+
+      _invalidateTaskContextUsage(task.id);
+      final previousProvider = _providerForTaskFrom(
+        task.providerId,
+        previousProviders,
+      );
+      final provider = _providerForTaskFrom(task.providerId, nextProviders);
+      final previousModel = _modelForTask(task, previousProvider);
+      final nextModel = _modelForTask(task, provider);
+      final transportChanged =
+          _providerTransportIdentity(previousProvider) !=
+          _providerTransportIdentity(provider);
+      await appendTaskEvent(
+        taskId: task.id,
+        type: 'task.context_changed',
+        payload: {
+          'history_boundary': false,
+          'history_projection': transportChanged ? 'provider' : 'model',
+          'reason': 'provider_configuration_changed',
+          'previous_provider_id': previousProvider?.id,
+          'provider_id': provider?.id,
+          'previous_model': previousModel,
+          'wire_api': provider?.wireApi,
+          'model': nextModel,
+        },
+      );
+    }
   }
 
   Future<AgentReviewDecision> _reviewTool(
@@ -1920,7 +2242,7 @@ class AppController extends ChangeNotifier {
   }) async {
     final reviewProviderId = task.reviewProviderId;
     if (reviewProviderId == null || reviewProviderId.isEmpty) {
-      return AgentReviewDecision.askUser('未配置审查供应商');
+      return AgentReviewDecision.failure('未配置审查供应商');
     }
     ProviderProfile? provider;
     for (final value in _providers) {
@@ -1930,11 +2252,11 @@ class AppController extends ChangeNotifier {
       }
     }
     if (provider == null) {
-      return AgentReviewDecision.askUser('审查供应商不存在');
+      return AgentReviewDecision.failure('审查供应商不存在');
     }
     final model = task.reviewModelOverride ?? provider.model;
     if (model.trim().isEmpty) {
-      return AgentReviewDecision.askUser('未配置审查模型');
+      return AgentReviewDecision.failure('未配置审查模型');
     }
 
     AiChatClient? client;
@@ -1949,6 +2271,12 @@ class AppController extends ChangeNotifier {
         apiKey: apiKey,
         model: model,
         reasoningEffort: provider.reasoningEffort,
+        compactThreshold: provider.wireApi == 'responses'
+            ? provider.modelMetadata[model]?.resolvedAutoCompactTokenLimit
+            : null,
+        inputModalities: provider.wireApi == 'responses'
+            ? provider.modelMetadata[model]?.inputModalities
+            : null,
       );
       final request = jsonEncode({
         'conversation': task.title,
@@ -1978,7 +2306,7 @@ class AppController extends ChangeNotifier {
       );
       return parseAgentReviewDecision(response.content ?? '');
     } catch (error) {
-      return AgentReviewDecision.askUser('审查请求失败：$error');
+      return AgentReviewDecision.failure('审查请求失败：$error');
     } finally {
       if (client != null) closeAiClient(client);
     }
@@ -1986,13 +2314,211 @@ class AppController extends ChangeNotifier {
 
   ProviderProfile _providerForTask(Task task) {
     if (_providers.isEmpty) throw StateError('请先配置 AI 供应商');
-    if (task.providerId != null) {
-      return _providers.firstWhere((value) => value.id == task.providerId);
+    return _providerForTaskFrom(task.providerId, _providers) ??
+        (throw StateError('请先配置 AI 供应商'));
+  }
+
+  ProviderProfile? _providerForOptionalId(String? providerId) {
+    return _providerForTaskFrom(providerId, _providers);
+  }
+
+  static ProviderProfile? _providerForTaskFrom(
+    String? providerId,
+    List<ProviderProfile> providers,
+  ) {
+    if (providerId != null) {
+      for (final provider in providers) {
+        if (provider.id == providerId) return provider;
+      }
+      return null;
     }
-    for (final provider in _providers) {
+    for (final provider in providers) {
       if (provider.isDefault) return provider;
     }
-    return _providers.first;
+    return providers.isEmpty ? null : providers.first;
+  }
+
+  static String _providerContextIdentity({
+    required String? providerId,
+    required String? modelOverride,
+    required List<ProviderProfile> providers,
+  }) {
+    final provider = _providerForTaskFrom(providerId, providers);
+    if (provider == null) return jsonEncode(const [null]);
+    final model = modelOverride ?? provider.model;
+    final metadata = provider.modelMetadata[model];
+    return jsonEncode([
+      provider.id,
+      provider.baseUrl,
+      provider.wireApi,
+      model,
+      metadata?.compHash,
+      metadata?.resolvedContextWindowTokens,
+      metadata?.effectiveContextWindowPercent,
+      metadata?.resolvedAutoCompactTokenLimit,
+      metadata?.compactionMode,
+      metadata?.inputModalities,
+      metadata?.truncationPolicy?.toMap(),
+    ]);
+  }
+
+  static String _providerTransportIdentity(ProviderProfile? provider) {
+    if (provider == null) return jsonEncode(const [null]);
+    return jsonEncode([provider.id, provider.baseUrl, provider.wireApi]);
+  }
+
+  String _modelForTask(Task task, ProviderProfile? provider) {
+    return task.modelOverride ?? provider?.model ?? '';
+  }
+
+  ProviderProfile? _contextProviderFor(Task task, ProviderProfile? provider) {
+    if (provider != null) return provider;
+    return _providerForTaskFrom(task.providerId, _providers);
+  }
+
+  ProviderModelMetadata? _contextMetadataForTask(
+    Task task,
+    ProviderProfile? provider,
+  ) {
+    final model = _modelForTask(task, provider);
+    if (provider == null || model.isEmpty) return null;
+    return provider.modelMetadata[model];
+  }
+
+  Future<TaskContextUsage> _loadTaskContextUsage(
+    Task task,
+    ProviderModelMetadata? metadata,
+    String model,
+    int generation,
+  ) async {
+    TokenUsageSnapshot? last;
+    TokenUsageSnapshot? total;
+    String? lastModel;
+    var compactionCount = 0;
+    final payloads = await _database.loadAssistantUsagePayloads(task.id);
+    for (final payload in payloads) {
+      final stored = payload['context_usage'];
+      if (stored is Map) {
+        final snapshot = TaskContextUsage.fromMap(
+          Map<String, Object?>.from(stored),
+        );
+        final eventModel = _eventModel(payload, snapshot.model);
+        if (snapshot.last != null) {
+          last = snapshot.last;
+          lastModel = eventModel;
+        }
+        if (snapshot.total != null) total = snapshot.total;
+        compactionCount = math.max(compactionCount, snapshot.compactionCount);
+      } else {
+        final rawUsage = payload['usage'];
+        final usage = rawUsage is Map
+            ? TokenUsageSnapshot.fromProviderUsage(
+                Map<String, Object?>.from(rawUsage),
+              )
+            : null;
+        if (usage != null) {
+          last = usage;
+          lastModel = _eventModel(payload);
+          total =
+              (total ??
+                  const TokenUsageSnapshot(
+                    inputTokens: 0,
+                    cachedInputTokens: 0,
+                    outputTokens: 0,
+                    reasoningOutputTokens: 0,
+                    totalTokens: 0,
+                  )) +
+              usage;
+        }
+        compactionCount += _compactionCountInPayload(payload);
+      }
+    }
+    // A model switch keeps the session total, but a previous model's latest
+    // request must not be displayed as the current model's context usage.
+    if (_isDifferentModel(lastModel, model)) last = null;
+    final result = TaskContextUsage(
+      last: last,
+      total: total,
+      model: model.isEmpty ? null : model,
+      rawContextWindow: metadata?.resolvedContextWindowTokens,
+      effectiveContextWindow: metadata?.effectiveContextWindowTokens,
+      autoCompactTokenLimit: metadata?.resolvedAutoCompactTokenLimit,
+      compactionCount: compactionCount,
+      metadataSource: metadata?.source,
+    );
+    if ((_taskContextGenerations[task.id] ?? 0) == generation) {
+      _taskContextUsages[task.id] = result;
+    }
+    return result;
+  }
+
+  Future<_ContextUsageEvent> _appendContextUsage(
+    Task task,
+    ProviderProfile provider,
+    Map<String, Object?> payload,
+  ) async {
+    final current =
+        _taskContextUsages[task.id] ??
+        await loadTaskContextUsage(task, provider: provider);
+    final rawUsage = payload['usage'];
+    final usage = rawUsage is Map
+        ? TokenUsageSnapshot.fromProviderUsage(
+            Map<String, Object?>.from(rawUsage),
+          )
+        : null;
+    const zero = TokenUsageSnapshot(
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    );
+    final metadata = _contextMetadataForTask(task, provider);
+    final snapshot = TaskContextUsage(
+      last: usage ?? current.last,
+      total: usage == null ? current.total : (current.total ?? zero) + usage,
+      model: _modelForTask(task, provider),
+      rawContextWindow: metadata?.resolvedContextWindowTokens,
+      effectiveContextWindow: metadata?.effectiveContextWindowTokens,
+      autoCompactTokenLimit: metadata?.resolvedAutoCompactTokenLimit,
+      compactionCount:
+          current.compactionCount + _compactionCountInPayload(payload),
+      metadataSource: metadata?.source,
+    );
+    return _ContextUsageEvent(
+      payload: {...payload, 'context_usage': snapshot.toMap()},
+      usage: snapshot,
+    );
+  }
+
+  void _invalidateTaskContextUsage(String taskId) {
+    _taskContextGenerations[taskId] =
+        (_taskContextGenerations[taskId] ?? 0) + 1;
+    _taskContextUsages.remove(taskId);
+    // An in-flight read cannot be cancelled. Removing it lets the next UI
+    // request start a read for the new model/boundary; the generation check
+    // prevents the old read from repopulating the cache.
+    _taskContextLoads.remove(taskId);
+  }
+
+  static String? _eventModel(Map<String, Object?> payload, [String? fallback]) {
+    final value = payload['model'];
+    return value is String && value.isNotEmpty ? value : fallback;
+  }
+
+  static bool _isDifferentModel(String? eventModel, String selectedModel) {
+    return selectedModel.isNotEmpty &&
+        eventModel != null &&
+        eventModel.isNotEmpty &&
+        eventModel != selectedModel;
+  }
+
+  static int _compactionCountInPayload(Map<String, Object?> payload) {
+    final items = payload['responses_output_items'];
+    if (items is! List) return 0;
+    return items
+        .where((item) => item is Map && item['type'] == 'compaction')
+        .length;
   }
 
   String _systemPrompt(
@@ -2048,24 +2574,25 @@ class AppController extends ChangeNotifier {
 
   Future<AgentResult> _runPreviewTask(
     Task task, {
+    required String turnId,
     required String prompt,
     required List<AiAttachment> attachments,
     required List<AiMessage> initialHistory,
     required AgentCancellation cancellation,
   }) async {
-    await updateTaskStatus(task.id, 'running');
+    await updateTaskStatus(task.id, 'running', turnId: turnId);
     await appendTaskEvent(
       taskId: task.id,
       type: 'task.started',
-      payload: {'mode': task.mode},
+      payload: {'turn_id': turnId, 'mode': task.mode},
     );
     if (cancellation.isCancelled) {
       await appendTaskEvent(
         taskId: task.id,
         type: 'task.cancelled',
-        payload: const {},
+        payload: {'turn_id': turnId},
       );
-      await updateTaskStatus(task.id, 'cancelled');
+      await updateTaskStatus(task.id, 'cancelled', turnId: turnId);
       return const AgentResult(status: 'cancelled', messages: []);
     }
     final text = task.mode == 'chat'
@@ -2079,14 +2606,14 @@ class AppController extends ChangeNotifier {
     await appendTaskEvent(
       taskId: task.id,
       type: 'assistant.completed',
-      payload: {'text': text},
+      payload: {'turn_id': turnId, 'text': text},
     );
     await appendTaskEvent(
       taskId: task.id,
       type: 'task.completed',
-      payload: {'text': text},
+      payload: {'turn_id': turnId, 'text': text},
     );
-    await updateTaskStatus(task.id, 'completed');
+    await updateTaskStatus(task.id, 'completed', turnId: turnId);
     return AgentResult(
       status: 'completed',
       messages: List.unmodifiable(messages),
@@ -2095,9 +2622,11 @@ class AppController extends ChangeNotifier {
   }
 
   Future<List<AiMessage>> _localHistory(
+    String taskId,
     String systemPrompt,
     List<TaskEvent> events, {
     required bool useResponsesCompaction,
+    String? providerId,
   }) async {
     final messages = <AiMessage>[
       AiMessage(role: 'system', content: systemPrompt),
@@ -2106,6 +2635,15 @@ class AppController extends ChangeNotifier {
     // Responses uses the output item id for the assistant call and a
     // separate call_id for the function_call_output.
     var activeToolCallIds = <String, String>{};
+    int? latestProviderProjectionSequence;
+    for (final event in events) {
+      if (event.type == 'task.context_changed' &&
+          _requiresProviderProjection(event.payload) &&
+          (latestProviderProjectionSequence == null ||
+              event.sequence > latestProviderProjectionSequence)) {
+        latestProviderProjectionSequence = event.sequence;
+      }
+    }
     for (final event in events) {
       switch (event.type) {
         case 'user.message':
@@ -2124,40 +2662,66 @@ class AppController extends ChangeNotifier {
         case 'assistant.completed':
           final isChatCompletions =
               event.payload['wire_api'] == 'chat-completions';
+          final eventProviderId = event.payload['provider_id'];
+          final isCurrentProvider =
+              providerId == null ||
+              eventProviderId is! String ||
+              eventProviderId.isEmpty ||
+              eventProviderId == providerId;
+          final preserveResponsesOutputItems =
+              useResponsesCompaction &&
+              !isChatCompletions &&
+              isCurrentProvider &&
+              (latestProviderProjectionSequence == null ||
+                  event.sequence > latestProviderProjectionSequence);
           final calls = _readToolCalls(
             event.payload['tool_calls'],
-            requireCallId: !isChatCompletions,
+            requireCallId: !isChatCompletions && preserveResponsesOutputItems,
           );
+          final normalizedCalls = [
+            for (final call in calls)
+              AiToolCall(
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+                callId: useResponsesCompaction
+                    ? call.callId ?? call.id
+                    : call.id,
+              ),
+          ];
           final text = event.payload['text'];
           messages.add(
             AiMessage(
               role: 'assistant',
               content: text is String ? text : '',
-              toolCalls: calls,
+              toolCalls: normalizedCalls,
               finishReason: event.payload['finish_reason'] is String
                   ? event.payload['finish_reason'] as String
                   : null,
-              responsesOutputItems: _readResponsesOutputItems(
-                event.payload['responses_output_items'],
-              ),
+              responsesOutputItems:
+                  preserveResponsesOutputItems && !isChatCompletions
+                  ? _readResponsesOutputItems(
+                      event.payload['responses_output_items'],
+                    )
+                  : const [],
             ),
           );
           assistantIndex = messages.length - 1;
           activeToolCallIds = {
-            for (final call in calls) call.id: call.toolResultId,
+            for (final call in normalizedCalls) call.id: call.toolResultId,
           };
         case 'tool.started':
           final id = event.payload['id'];
           final name = event.payload['name'];
           final callId = event.payload['call_id'];
           final index = assistantIndex;
-          final isChatCompletions =
-              event.payload['wire_api'] == 'chat-completions' ||
-              (callId is! String || callId.isEmpty);
-          final resolvedCallId = callId is String && callId.isNotEmpty
-              ? callId
-              : id is String
-              ? id
+          final resolvedCallId = id is String
+              ? activeToolCallIds[id] ??
+                    (useResponsesCompaction
+                        ? callId is String && callId.isNotEmpty
+                              ? callId
+                              : id
+                        : id)
               : null;
           if (id is String &&
               name is String &&
@@ -2176,7 +2740,7 @@ class AppController extends ChangeNotifier {
                   arguments: jsonEncode(
                     event.payload['arguments'] ?? const <String, Object?>{},
                   ),
-                  callId: isChatCompletions ? null : resolvedCallId,
+                  callId: useResponsesCompaction ? resolvedCallId : id,
                 ),
               ],
               responsesOutputItems: assistant.responsesOutputItems,
@@ -2197,10 +2761,7 @@ class AppController extends ChangeNotifier {
           final content = event.type == 'tool.completed'
               ? jsonEncode(event.payload['result'])
               : '${event.payload['error'] ?? 'Tool call failed'}';
-          final callId = event.payload['call_id'];
-          final resolvedCallId = callId is String && callId.isNotEmpty
-              ? callId
-              : activeToolCallIds[id];
+          final resolvedCallId = activeToolCallIds[id];
           if (resolvedCallId == null || resolvedCallId.isEmpty) {
             throw StateError('Stored Responses tool result is missing call_id');
           }
@@ -2242,7 +2803,7 @@ class AppController extends ChangeNotifier {
             'The task failed before the tool result was recorded.',
           );
         case 'task.context_changed':
-          if (event.payload['history_boundary'] == true) {
+          if (_isHistoryBoundary(event.payload)) {
             messages
               ..clear()
               ..add(AiMessage(role: 'system', content: systemPrompt))
@@ -2257,6 +2818,21 @@ class AppController extends ChangeNotifier {
               );
             assistantIndex = null;
             activeToolCallIds = <String, String>{};
+          } else {
+            _appendPendingToolResults(
+              messages,
+              activeToolCallIds,
+              'The previous AI context was interrupted during a provider '
+              'change. Inspect the current state before continuing.',
+            );
+            messages.add(
+              AiMessage(
+                role: 'developer',
+                content: _contextChangeMessage(event.payload),
+              ),
+            );
+            assistantIndex = null;
+            activeToolCallIds = <String, String>{};
           }
       }
     }
@@ -2268,7 +2844,7 @@ class AppController extends ChangeNotifier {
       if (message.attachments.isEmpty) continue;
       final resolved = <AiAttachment>[];
       for (final attachment in message.attachments) {
-        resolved.add(await _resolveAttachment(attachment));
+        resolved.add(await _resolveAttachment(taskId, attachment));
       }
       messages[index] = AiMessage(
         role: message.role,
@@ -2331,14 +2907,39 @@ class AppController extends ChangeNotifier {
     return calls;
   }
 
-  static void _validateHistoryProtocol(List<TaskEvent> events, String wireApi) {
-    for (final event in events) {
-      if (event.type != 'assistant.completed') continue;
-      final storedWireApi = event.payload['wire_api'];
-      if (storedWireApi is String && storedWireApi != wireApi) {
-        throw StateError('对话历史协议与当前供应商协议不一致，请新建对话或重新选择供应商');
-      }
+  static bool _isHistoryBoundary(Map<String, Object?> payload) {
+    // Missing history_boundary is treated as a boundary for events written by
+    // older app versions.
+    return payload['history_boundary'] != false;
+  }
+
+  static bool _requiresProviderProjection(Map<String, Object?> payload) {
+    return payload['history_boundary'] == false &&
+        payload['history_projection'] == 'provider';
+  }
+
+  static String _contextChangeMessage(Map<String, Object?> payload) {
+    if (payload['history_projection'] == 'provider') {
+      return '<model_switch>\n'
+          'The conversation is continuing with a different AI provider. '
+          'Continue from the retained transcript, but do not rely on hidden '
+          'reasoning or provider-specific response state.\n'
+          '</model_switch>';
     }
+    final previousModel = payload['previous_model'];
+    final model = payload['model'];
+    final modelDescription =
+        previousModel is String &&
+            previousModel.isNotEmpty &&
+            model is String &&
+            model.isNotEmpty
+        ? ' The active model changed from $previousModel to $model.'
+        : '';
+    return '<model_switch>\n'
+        'The user was previously using a different model. Please continue '
+        'the conversation according to the current model capabilities.'
+        '$modelDescription\n'
+        '</model_switch>';
   }
 
   static List<AiAttachment> _readAttachments(Object? value) {
@@ -2359,7 +2960,17 @@ class AppController extends ChangeNotifier {
     try {
       for (final attachment in attachments) {
         if (attachment.id != null) {
-          persisted.add(attachment);
+          final record = await _loadAttachmentForTask(taskId, attachment.id!);
+          final bytes = await _attachmentStore.read(record);
+          persisted.add(
+            AiAttachment(
+              id: record.id,
+              name: record.name,
+              mimeType: record.mimeType,
+              byteLength: record.byteLength,
+              base64Data: base64Encode(bytes),
+            ),
+          );
           continue;
         }
         final stored = await _writeAttachment(taskId, attachment);
@@ -2447,14 +3058,28 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<AiAttachment> _resolveAttachment(AiAttachment attachment) async {
-    if (attachment.base64Data != null) return attachment;
+  Future<AttachmentRecord> _loadAttachmentForTask(
+    String taskId,
+    String attachmentId,
+  ) async {
+    final record = await _database.loadAttachment(attachmentId);
+    if (record == null) throw StateError('附件记录不存在');
+    if (record.taskId != taskId) {
+      throw StateError('附件不属于当前对话');
+    }
+    return record;
+  }
+
+  Future<AiAttachment> _resolveAttachment(
+    String taskId,
+    AiAttachment attachment,
+  ) async {
     final id = attachment.id;
     if (id == null || id.isEmpty) {
+      if (attachment.base64Data != null) return attachment;
       throw StateError('附件引用无效：${attachment.name}');
     }
-    final record = await _database.loadAttachment(id);
-    if (record == null) throw StateError('附件记录不存在：${attachment.name}');
+    final record = await _loadAttachmentForTask(taskId, id);
     try {
       final bytes = await _attachmentStore.read(record);
       return AiAttachment(
@@ -2682,8 +3307,9 @@ class AppController extends ChangeNotifier {
   AgentTool _imageGenerationTool(
     ProviderProfile provider,
     Project? project,
-    String taskId,
-  ) {
+    String taskId, {
+    required AgentCancellation cancellation,
+  }) {
     return AgentTool(
       definition: const AiToolDefinition(
         name: 'image.generate',
@@ -2705,7 +3331,13 @@ class AppController extends ChangeNotifier {
         },
       ),
       requiresConfirmation: true,
-      call: (arguments) => _generateImage(provider, project, taskId, arguments),
+      call: (arguments) => _generateImage(
+        provider,
+        project,
+        taskId,
+        arguments,
+        cancellation: cancellation,
+      ),
     );
   }
 
@@ -2713,8 +3345,9 @@ class AppController extends ChangeNotifier {
     ProviderProfile provider,
     Project? project,
     String taskId,
-    Map<String, Object?> arguments,
-  ) async {
+    Map<String, Object?> arguments, {
+    required AgentCancellation cancellation,
+  }) async {
     final prompt = arguments['prompt'];
     if (prompt is! String || prompt.trim().isEmpty) {
       throw ArgumentError('prompt is required');
@@ -2743,6 +3376,7 @@ class AppController extends ChangeNotifier {
         model: model,
         size: size,
         responseFormat: 'b64_json',
+        cancellation: cancellation.whenCancelled,
       );
       Uint8List bytes;
       String mimeType;
@@ -2751,7 +3385,10 @@ class AppController extends ChangeNotifier {
         bytes = Uint8List.fromList(base64Decode(encoded));
         mimeType = 'image/png';
       } else if (generated.url != null) {
-        final downloaded = await client.download(generated.url!);
+        final downloaded = await client.download(
+          generated.url!,
+          cancellation: cancellation.whenCancelled,
+        );
         bytes = downloaded.bytes;
         mimeType = downloaded.mimeType;
       } else {
@@ -2948,11 +3585,22 @@ class AppController extends ChangeNotifier {
       List<Future<void>>.of(_taskEventTails.values),
       eagerError: false,
     );
+    await Future.wait(
+      List<Future<void>>.of(_taskStatusTails.values),
+      eagerError: false,
+    );
     await _localPreview.close();
     _providerUsageClient.close();
     _localAccess.clear();
     await _database.close();
   }
+}
+
+class _ContextUsageEvent {
+  const _ContextUsageEvent({required this.payload, required this.usage});
+
+  final Map<String, Object?> payload;
+  final TaskContextUsage usage;
 }
 
 const _agentAutoExecuteSetting = 'agent_auto_execute';
@@ -2982,6 +3630,14 @@ String _normalizeExecutionMode(String value) {
       return 'confirm';
   }
 }
+
+bool _isTerminalTaskStatus(String status) => const {
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'unknown',
+}.contains(status);
 
 String? _statusForTerminalEvent(String type) {
   switch (type) {

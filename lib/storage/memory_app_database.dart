@@ -70,16 +70,7 @@ class MemoryAppDatabase extends AppDatabase {
   Future<void> clearProviderDefaults() async {
     for (final entry in _providers.entries.toList()) {
       final profile = entry.value;
-      _providers[entry.key] = ProviderProfile(
-        id: profile.id,
-        name: profile.name,
-        baseUrl: profile.baseUrl,
-        model: profile.model,
-        reasoningEffort: profile.reasoningEffort,
-        wireApi: profile.wireApi,
-        apiKeyRef: profile.apiKeyRef,
-        isDefault: false,
-      );
+      _providers[entry.key] = profile.copyWith(isDefault: false);
     }
   }
 
@@ -151,6 +142,37 @@ class MemoryAppDatabase extends AppDatabase {
   }
 
   @override
+  Future<Set<String>> loadReferencedAttachmentIds() async {
+    final ids = <String>{};
+    for (final event in _events.values) {
+      _collectAttachmentIds(event.payload, ids);
+    }
+    return Set.unmodifiable(ids);
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> loadAssistantUsagePayloads(
+    String taskId,
+  ) async {
+    final events = await loadEvents(taskId);
+    final boundary = events
+        .where(
+          (event) =>
+              event.type == 'task.context_changed' &&
+              _isHistoryBoundary(event.payload),
+        )
+        .fold<int>(
+          0,
+          (value, event) => event.sequence > value ? event.sequence : value,
+        );
+    return [
+      for (final event in events)
+        if (event.type == 'assistant.completed' && event.sequence > boundary)
+          event.payload,
+    ];
+  }
+
+  @override
   Future<List<TaskEvent>> loadModelEvents(
     String taskId, {
     bool useCompactionBoundary = true,
@@ -158,12 +180,23 @@ class MemoryAppDatabase extends AppDatabase {
     final values = await loadEvents(taskId);
     var startSequence = 0;
     for (final event in values) {
-      if (event.type == 'task.context_changed') {
+      if (event.type == 'task.context_changed' &&
+          _isHistoryBoundary(event.payload)) {
         startSequence = event.sequence;
       }
+    }
+    var providerProjectionSequence = startSequence;
+    for (final event in values) {
+      if (event.sequence > providerProjectionSequence &&
+          event.type == 'task.context_changed' &&
+          _requiresProviderProjection(event.payload)) {
+        providerProjectionSequence = event.sequence;
+      }
+    }
+    for (final event in values) {
       final items = event.payload['responses_output_items'];
       if (useCompactionBoundary &&
-          event.sequence >= startSequence &&
+          event.sequence >= providerProjectionSequence &&
           items is List &&
           items.any((item) => item is Map && item['type'] == 'compaction')) {
         startSequence = event.sequence;
@@ -234,6 +267,13 @@ class MemoryAppDatabase extends AppDatabase {
   Future<AttachmentRecord?> loadAttachment(String id) async => _attachments[id];
 
   @override
+  Future<List<AttachmentRecord>> loadAttachments() async {
+    final values = _attachments.values.toList()
+      ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
+    return values;
+  }
+
+  @override
   Future<List<TaskEvent>> loadLegacyAttachmentEvents(String taskId) async {
     return (await loadEvents(taskId))
         .where(
@@ -257,5 +297,39 @@ class MemoryAppDatabase extends AppDatabase {
   ) async {
     await saveAttachments(records);
     _events[event.eventId] = event;
+  }
+
+  @override
+  Future<void> deleteAttachments(List<String> ids) async {
+    for (final id in ids) {
+      _attachments.remove(id);
+    }
+  }
+
+  static void _collectAttachmentIds(Object? value, Set<String> ids) {
+    if (value is Map) {
+      for (final entry in value.entries) {
+        if (entry.key == 'attachment_id' && entry.value is String) {
+          ids.add(entry.value as String);
+        } else {
+          _collectAttachmentIds(entry.value, ids);
+        }
+      }
+    } else if (value is Iterable) {
+      for (final item in value) {
+        _collectAttachmentIds(item, ids);
+      }
+    }
+  }
+
+  static bool _isHistoryBoundary(Map<String, Object?> payload) {
+    // Missing history_boundary is treated as a boundary for events written by
+    // older app versions.
+    return payload['history_boundary'] != false;
+  }
+
+  static bool _requiresProviderProjection(Map<String, Object?> payload) {
+    return payload['history_boundary'] == false &&
+        payload['history_projection'] == 'provider';
   }
 }

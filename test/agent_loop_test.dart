@@ -6,6 +6,7 @@ import 'package:mobile_agent/agent/agent_tools.dart';
 import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/agent/auto_review.dart';
 import 'package:mobile_agent/agent/openai_compatible_client.dart';
+import 'package:mobile_agent/agent/remote_write_queue.dart';
 
 void main() {
   test('cancellation stops an in-flight AI request', () async {
@@ -55,6 +56,8 @@ void main() {
                 description: 'test',
                 parameters: {'type': 'object'},
               ),
+              isRemote: true,
+              writesRemoteState: true,
               call: (_) async => const {'ok': true},
             ),
           ],
@@ -112,6 +115,131 @@ void main() {
   });
 
   test(
+    'remote write failure stops before requesting the model again',
+    () async {
+      final client = _ToolThenTextClient(toolName: 'remote.write');
+      final result = await AgentLoop(
+        client: client,
+        tools: [
+          AgentTool(
+            definition: const AiToolDefinition(
+              name: 'remote.write',
+              description: 'test',
+              parameters: {'type': 'object'},
+            ),
+            isRemote: true,
+            writesRemoteState: true,
+            call: (_) async => throw StateError('remote write failed'),
+          ),
+        ],
+      ).run(prompt: '执行', executionMode: 'auto');
+
+      expect(result.status, 'unknown');
+      expect(client.calls, 1);
+    },
+  );
+
+  test(
+    'structured tool results keep a bounded head and tail preview',
+    () async {
+      final events = <Map<String, Object?>>[];
+      final result =
+          await AgentLoop(
+            client: _ToolThenTextClient(),
+            tools: [
+              AgentTool(
+                definition: const AiToolDefinition(
+                  name: 'test.tool',
+                  description: 'test',
+                  parameters: {'type': 'object'},
+                ),
+                call: (_) async => {
+                  'items': [
+                    for (var index = 0; index < 100; index++) 'item-$index',
+                  ],
+                },
+              ),
+            ],
+          ).run(
+            prompt: '读取',
+            executionMode: 'auto',
+            toolOutputLimit: 512,
+            onEvent: (type, payload) {
+              if (type == 'tool.completed') events.add(payload);
+              return Future.value();
+            },
+          );
+
+      expect(result.status, 'completed');
+      final items = (events.single['result'] as Map)['items'] as List;
+      expect(items.first, 'item-0');
+      expect(items[8], {
+        '__mobile_agent_truncated': true,
+        '__mobile_agent_omitted_items': 84,
+      });
+      expect(items.last, 'item-99');
+    },
+  );
+
+  test(
+    'rebounded structured tool results accumulate omitted entries',
+    () async {
+      final events = <Map<String, Object?>>[];
+      final result =
+          await AgentLoop(
+            client: _ToolThenTextClient(),
+            tools: [
+              AgentTool(
+                definition: const AiToolDefinition(
+                  name: 'test.tool',
+                  description: 'test',
+                  parameters: {'type': 'object'},
+                ),
+                call: (_) async => {
+                  'items': [
+                    for (var index = 0; index < 20; index++) 'item-$index',
+                    {
+                      '__mobile_agent_truncated': true,
+                      '__mobile_agent_omitted_items': 10,
+                    },
+                  ],
+                  'entries': {
+                    for (var index = 0; index < 20; index++)
+                      'key-$index': 'value-$index',
+                    '__mobile_agent_truncated': true,
+                    '__mobile_agent_omitted_entries': 10,
+                  },
+                },
+              ),
+            ],
+          ).run(
+            prompt: '读取',
+            executionMode: 'auto',
+            toolOutputLimit: 4096,
+            onEvent: (type, payload) {
+              if (type == 'tool.completed') events.add(payload);
+              return Future.value();
+            },
+          );
+
+      expect(result.status, 'completed');
+      final bounded = events.single['result'] as Map;
+      final boundedItems = bounded['items'] as List;
+      expect(boundedItems.first, 'item-0');
+      expect(boundedItems[8], {
+        '__mobile_agent_truncated': true,
+        '__mobile_agent_omitted_items': 14,
+      });
+      expect(boundedItems.last, 'item-19');
+      final boundedEntries = bounded['entries'] as Map;
+      expect(boundedEntries['key-0'], 'value-0');
+      expect(boundedEntries['__mobile_agent_truncated'], true);
+      expect(boundedEntries['__mobile_agent_omitted_entries'], 14);
+      expect(boundedEntries['key-19'], 'value-19');
+    },
+  );
+
+  test(
     'Responses tool results use call_id rather than output item id',
     () async {
       final client = _ResponsesToolThenTextClient();
@@ -165,6 +293,8 @@ void main() {
                   description: 'test',
                   parameters: {'type': 'object'},
                 ),
+                isRemote: true,
+                writesRemoteState: true,
                 call: (_) {
                   toolStarted.complete();
                   return toolResult.future;
@@ -231,6 +361,30 @@ void main() {
     expect(result.status, 'cancelled');
     expect(executions, 0);
   });
+
+  test(
+    'queued remote write is cancelled before its operation starts',
+    () async {
+      final queue = RemoteWriteQueue();
+      final firstCancellation = AgentCancellation();
+      final secondCancellation = AgentCancellation();
+      final firstFinished = Completer<void>();
+      var secondStarted = false;
+
+      final first = queue.run<void>('server:/srv/app', () async {
+        await firstFinished.future;
+      }, cancellation: firstCancellation);
+      final second = queue.run<void>('server:/srv/app', () async {
+        secondStarted = true;
+      }, cancellation: secondCancellation);
+
+      secondCancellation.cancel();
+      firstFinished.complete();
+      await first;
+      await expectLater(second, throwsA(isA<StateError>()));
+      expect(secondStarted, isFalse);
+    },
+  );
 
   test('unknown execution modes fall back to confirmation', () async {
     var confirmations = 0;
@@ -340,6 +494,93 @@ void main() {
     },
   );
 
+  test(
+    'review failure is surfaced and requires explicit user approval',
+    () async {
+      final events = <String>[];
+      var confirmations = 0;
+      var executions = 0;
+      final result =
+          await AgentLoop(
+            client: _ToolThenTextClient(),
+            tools: [
+              AgentTool(
+                definition: const AiToolDefinition(
+                  name: 'test.tool',
+                  description: 'test',
+                  parameters: {'type': 'object'},
+                ),
+                call: (_) async {
+                  executions++;
+                  return const {'ok': true};
+                },
+              ),
+            ],
+          ).run(
+            prompt: '执行',
+            executionMode: 'auto_review',
+            review: (_, _) async => AgentReviewDecision.failure('审查服务不可用'),
+            confirm: (_, _) async {
+              confirmations++;
+              return false;
+            },
+            onEvent: (type, payload) {
+              events.add(type);
+              return Future.value();
+            },
+          );
+
+      expect(result.status, 'completed');
+      expect(confirmations, 1);
+      expect(executions, 0);
+      expect(events, contains('review.failed'));
+      expect(events, isNot(contains('review.completed')));
+    },
+  );
+
+  test(
+    'local tool failure after cancellation is not marked as remote unknown',
+    () async {
+      final cancellation = AgentCancellation();
+      final started = Completer<void>();
+      final pending = Completer<Object?>();
+      final events = <String>[];
+      final future =
+          AgentLoop(
+            client: _ToolThenTextClient(toolName: 'local.tool'),
+            tools: [
+              AgentTool(
+                definition: const AiToolDefinition(
+                  name: 'local.tool',
+                  description: 'test',
+                  parameters: {'type': 'object'},
+                ),
+                call: (_) {
+                  started.complete();
+                  return pending.future;
+                },
+              ),
+            ],
+          ).run(
+            prompt: '执行',
+            executionMode: 'auto',
+            cancellation: cancellation,
+            onEvent: (type, payload) {
+              events.add(type);
+              return Future.value();
+            },
+          );
+      await started.future;
+      cancellation.cancel();
+      final result = await future;
+      pending.complete(null);
+
+      expect(result.status, 'cancelled');
+      expect(events, contains('task.cancelled'));
+      expect(events, isNot(contains('task.unknown')));
+    },
+  );
+
   test('boundary permission requests always require the user', () async {
     var confirmations = 0;
     var executions = 0;
@@ -403,6 +644,8 @@ void main() {
             description: 'test',
             parameters: {'type': 'object'},
           ),
+          isRemote: true,
+          writesRemoteState: true,
           call: (_) async {
             executions++;
             return const {'ok': true};

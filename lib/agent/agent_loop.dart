@@ -38,6 +38,11 @@ class AgentResult {
 class AgentLoop {
   const AgentLoop({required this.client, required this.tools});
 
+  static const _maxStructuredPreviewItems = 16;
+  static const _truncatedMarkerKey = '__mobile_agent_truncated';
+  static const _omittedItemsKey = '__mobile_agent_omitted_items';
+  static const _omittedEntriesKey = '__mobile_agent_omitted_entries';
+
   final AiChatClient client;
   final List<AgentTool> tools;
 
@@ -50,6 +55,8 @@ class AgentLoop {
     int maxSteps = 64,
     int maxToolCalls = 128,
     int? maxContextCharacters,
+    int? toolOutputLimit,
+    bool toolOutputLimitInTokens = false,
     Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
     confirm,
     Future<AgentReviewDecision> Function(
@@ -57,6 +64,7 @@ class AgentLoop {
       Map<String, Object?> arguments,
     )?
     review,
+    void Function(AgentTool tool)? onRemoteOperationStarted,
     Future<void> Function(String type, Map<String, Object?> payload)? onEvent,
   }) async {
     final messages = <AiMessage>[
@@ -72,6 +80,10 @@ class AgentLoop {
     var remoteOperationStarted = false;
     var deltaEvents = Future<void>.value();
     final handledToolCallIds = <String>{};
+    final outputCharacterLimit = _toolOutputCharacterLimit(
+      toolOutputLimit,
+      inTokens: toolOutputLimitInTokens,
+    );
 
     String toolResultId(AiToolCall call) {
       return _wireApi(client) == 'responses' ? call.effectiveCallId : call.id;
@@ -96,7 +108,7 @@ class AgentLoop {
           'name': call.name,
           'error': content,
         });
-        addToolResult(call, _toolResultContent(content));
+        addToolResult(call, _truncateToolResult(content, outputCharacterLimit));
       }
     }
 
@@ -187,6 +199,7 @@ class AgentLoop {
       await _emit(onEvent, 'assistant.completed', {
         'text': assistantForHistory.content ?? '',
         'wire_api': _wireApi(client),
+        'model': _model(client),
         'tools': assistantForHistory.toolCalls
             .map((call) => _findTool(call.name)?.definition.name ?? call.name)
             .toList(),
@@ -318,7 +331,7 @@ class AgentLoop {
             });
             try {
               final reviewFuture = review == null
-                  ? Future.value(AgentReviewDecision.askUser('未配置自动审查模型'))
+                  ? Future.value(AgentReviewDecision.failure('未配置自动审查模型'))
                   : review(tool, arguments);
               decision = await Future.any<AgentReviewDecision>([
                 reviewFuture,
@@ -326,23 +339,29 @@ class AgentLoop {
                   (_) => AgentReviewDecision.deny('任务已取消'),
                 ),
               ]);
-              await _emit(onEvent, 'review.completed', {
-                'id': call.id,
-                'call_id': toolResultId(call),
-                'name': tool.definition.name,
-                'decision': decision.decision,
-                'reason': decision.reason,
-              });
+              if (!decision.isFailure) {
+                await _emit(onEvent, 'review.completed', {
+                  'id': call.id,
+                  'call_id': toolResultId(call),
+                  'name': tool.definition.name,
+                  'decision': decision.decision,
+                  'reason': decision.reason,
+                });
+              }
             } catch (error) {
-              decision = AgentReviewDecision.askUser('自动审查失败：$error');
+              decision = AgentReviewDecision.failure('自动审查失败：$error');
+            }
+            if (decision.isFailure) {
               await _emit(onEvent, 'review.failed', {
                 'id': call.id,
                 'call_id': toolResultId(call),
                 'name': tool.definition.name,
-                'error': '$error',
+                'error': decision.reason,
+                'failure_code': decision.failureCode,
               });
-            }
-            if (decision.isAllow) {
+              allowed = await askUser();
+              if (!allowed) deniedReason = decision.reason;
+            } else if (decision.isAllow) {
               allowed = true;
             } else if (decision.isAskUser) {
               allowed = await askUser();
@@ -385,43 +404,71 @@ class AgentLoop {
         }
 
         if (stop.isCancelled) break;
-        remoteOperationStarted = true;
+        var callOperationStarted = false;
+        void markOperationStarted() {
+          if (callOperationStarted || !tool.writesRemoteState) return;
+          callOperationStarted = true;
+          remoteOperationStarted = true;
+          onRemoteOperationStarted?.call(tool);
+        }
+
         Future<Object?>? pendingTool;
         try {
-          pendingTool = tool.call(arguments);
+          final callWithOperationStart = tool.callWithOperationStart;
+          if (callWithOperationStart == null) {
+            markOperationStarted();
+            pendingTool = tool.call(arguments);
+          } else {
+            pendingTool = callWithOperationStart(
+              arguments,
+              markOperationStarted,
+            );
+          }
           final result = await Future.any<Object?>([
             pendingTool,
             stop.whenCancelled.then<Object?>((_) {
               throw StateError(
-                'Task cancelled after remote execution started; result is unknown.',
+                callOperationStarted
+                    ? 'Task cancelled after remote execution started; result is unknown.'
+                    : 'Task cancelled before tool execution completed.',
               );
             }),
           ]);
-          final serialized = jsonEncode(result);
+          final eventResult = _boundedToolResultValue(
+            result,
+            outputCharacterLimit,
+          );
+          final serialized = jsonEncode(eventResult);
           await _emit(onEvent, 'tool.completed', {
             'id': call.id,
             'call_id': toolResultId(call),
             'name': tool.definition.name,
-            'result': result,
+            'result': eventResult,
           });
           addToolResult(call, _toolResultContent(serialized));
           if (stop.isCancelled) {
-            const message =
-                'Task cancelled after remote execution started; result is unknown.';
+            final isUnknown = remoteOperationStarted;
+            final message = isUnknown
+                ? 'Task cancelled after remote execution started; result is unknown.'
+                : 'Task cancelled during local tool execution.';
             await appendUnresolvedToolResults(
               assistantForHistory.toolCalls,
               message,
             );
-            await _emit(onEvent, 'task.unknown', {
-              'id': call.id,
-              'call_id': toolResultId(call),
-              'name': call.name,
-              'error': message,
-            });
+            await _emit(
+              onEvent,
+              isUnknown ? 'task.unknown' : 'task.cancelled',
+              {
+                'id': call.id,
+                'call_id': toolResultId(call),
+                'name': call.name,
+                'error': message,
+              },
+            );
             return AgentResult(
-              status: 'unknown',
+              status: isUnknown ? 'unknown' : 'cancelled',
               messages: List.unmodifiable(messages),
-              error: StateError(message),
+              error: isUnknown ? StateError(message) : null,
             );
           }
         } catch (error) {
@@ -438,19 +485,47 @@ class AgentLoop {
             'name': tool.definition.name,
             'error': message,
           });
-          addToolResult(call, _toolResultContent(message));
+          addToolResult(
+            call,
+            _truncateToolResult(message, outputCharacterLimit),
+          );
           if (stop.isCancelled) {
-            const cancellationMessage =
-                'Task cancelled after remote execution started; result is unknown.';
+            final isUnknown = remoteOperationStarted;
+            final cancellationMessage = isUnknown
+                ? 'Task cancelled after remote execution started; result is unknown.'
+                : 'Task cancelled during local tool execution.';
             await appendUnresolvedToolResults(
               assistantForHistory.toolCalls,
               cancellationMessage,
+            );
+            await _emit(
+              onEvent,
+              isUnknown ? 'task.unknown' : 'task.cancelled',
+              {
+                'id': call.id,
+                'call_id': toolResultId(call),
+                'name': call.name,
+                'error': cancellationMessage,
+              },
+            );
+            return AgentResult(
+              status: isUnknown ? 'unknown' : 'cancelled',
+              messages: List.unmodifiable(messages),
+              error: isUnknown ? error : null,
+            );
+          }
+          if (callOperationStarted) {
+            const unknownMessage =
+                'Remote write tool failed; the final server state is unknown.';
+            await appendUnresolvedToolResults(
+              assistantForHistory.toolCalls,
+              unknownMessage,
             );
             await _emit(onEvent, 'task.unknown', {
               'id': call.id,
               'call_id': toolResultId(call),
               'name': call.name,
-              'error': cancellationMessage,
+              'error': unknownMessage,
             });
             return AgentResult(
               status: 'unknown',
@@ -500,6 +575,298 @@ class AgentLoop {
 
   static String _toolResultContent(String value) {
     return value;
+  }
+
+  static int? _toolOutputCharacterLimit(int? limit, {required bool inTokens}) {
+    if (limit == null || limit <= 0) return null;
+    final characters = inTokens ? limit * 4 : limit;
+    return characters > 0 ? characters : null;
+  }
+
+  static String _truncateToolResult(String value, int? limit) {
+    if (limit == null || _utf8Length(value) <= limit) return value;
+    const marker = '\n[…tool output truncated…]\n';
+    final markerLength = _utf8Length(marker);
+    if (markerLength >= limit) return _utf8Prefix(value, limit);
+    final contentLimit = limit - markerLength;
+    final headLimit = contentLimit ~/ 2;
+    final tailLimit = contentLimit - headLimit;
+    return '${_utf8Prefix(value, headLimit)}$marker'
+        '${_utf8Suffix(value, tailLimit)}';
+  }
+
+  static Object? _boundedToolResultValue(Object? value, int? limit) {
+    if (limit == null) return value;
+    return _boundToolResultValue(value, limit);
+  }
+
+  static Object? _boundToolResultValue(Object? value, int limit) {
+    if (value is String) return _truncateToolResult(value, limit);
+    if (value is List) {
+      final items = [
+        for (final item in value)
+          if (!_isListTruncationMarker(item)) item,
+      ];
+      final originalItemCount = _listOriginalItemCount(value);
+      final visibleCount = items.length;
+      final childLimit = _childToolOutputLimit(
+        limit,
+        visibleCount <= _maxStructuredPreviewItems
+            ? visibleCount
+            : _maxStructuredPreviewItems,
+      );
+      if (visibleCount <= _maxStructuredPreviewItems) {
+        return _fitBoundedToolValue([
+          for (final item in items) _boundToolResultValue(item, childLimit),
+          if (originalItemCount > visibleCount)
+            {
+              _truncatedMarkerKey: true,
+              _omittedItemsKey: originalItemCount - visibleCount,
+            },
+        ], limit);
+      }
+      final headCount = _maxStructuredPreviewItems ~/ 2;
+      final tailCount = _maxStructuredPreviewItems - headCount;
+      return _fitBoundedToolValue([
+        for (var index = 0; index < headCount; index++)
+          _boundToolResultValue(items[index], childLimit),
+        {
+          _truncatedMarkerKey: true,
+          _omittedItemsKey: originalItemCount - headCount - tailCount,
+        },
+        for (
+          var index = visibleCount - tailCount;
+          index < visibleCount;
+          index++
+        )
+          _boundToolResultValue(items[index], childLimit),
+      ], limit);
+    }
+    if (value is Map) {
+      final entries = [
+        for (final entry in value.entries)
+          if (!_isMapTruncationMarkerEntry(entry)) entry,
+      ];
+      final originalEntryCount = _mapOriginalEntryCount(value);
+      final visibleCount = entries.length;
+      final childLimit = _childToolOutputLimit(
+        limit,
+        visibleCount <= _maxStructuredPreviewItems
+            ? visibleCount
+            : _maxStructuredPreviewItems,
+      );
+      if (visibleCount <= _maxStructuredPreviewItems) {
+        return _fitBoundedToolValue({
+          for (final entry in entries)
+            '${entry.key}': _boundToolResultValue(entry.value, childLimit),
+          if (originalEntryCount > visibleCount) ...{
+            _truncatedMarkerKey: true,
+            _omittedEntriesKey: originalEntryCount - visibleCount,
+          },
+        }, limit);
+      }
+      final headCount = _maxStructuredPreviewItems ~/ 2;
+      final tailCount = _maxStructuredPreviewItems - headCount;
+      return _fitBoundedToolValue({
+        for (var index = 0; index < headCount; index++)
+          '${entries[index].key}': _boundToolResultValue(
+            entries[index].value,
+            childLimit,
+          ),
+        _truncatedMarkerKey: true,
+        _omittedEntriesKey: originalEntryCount - headCount - tailCount,
+        for (
+          var index = visibleCount - tailCount;
+          index < visibleCount;
+          index++
+        )
+          '${entries[index].key}': _boundToolResultValue(
+            entries[index].value,
+            childLimit,
+          ),
+      }, limit);
+    }
+    return value;
+  }
+
+  static int _childToolOutputLimit(int limit, int itemCount) {
+    if (itemCount <= 0) return limit;
+    final share = limit ~/ itemCount;
+    return share < 32 ? 32 : share;
+  }
+
+  static Object? _fitBoundedToolValue(Object? value, int limit) {
+    if (_jsonUtf8Length(value) <= limit) return value;
+    if (value is List) {
+      final originalItemCount = _listOriginalItemCount(value);
+      final entries = value.toList(growable: false);
+      var keep = entries.length;
+      while (keep > 0) {
+        final headCount = keep ~/ 2;
+        final tailCount = keep - headCount;
+        final childLimit = _childToolOutputLimit(limit, keep);
+        final selected = <Object?>[
+          for (var index = 0; index < headCount; index++) entries[index],
+          for (
+            var index = entries.length - tailCount;
+            index < entries.length;
+            index++
+          )
+            entries[index],
+        ];
+        final selectedVisibleItemCount = selected.fold<int>(
+          0,
+          (sum, item) => sum + (_isListTruncationMarker(item) ? 0 : 1),
+        );
+        final omitted = originalItemCount - selectedVisibleItemCount;
+        final head = <Object?>[];
+        final tail = <Object?>[];
+        for (final item in selected.take(headCount)) {
+          if (!_isListTruncationMarker(item)) {
+            head.add(_boundToolResultValue(item, childLimit));
+          }
+        }
+        for (final item in selected.skip(headCount)) {
+          if (!_isListTruncationMarker(item)) {
+            tail.add(_boundToolResultValue(item, childLimit));
+          }
+        }
+        final candidate = <Object?>[
+          ...head,
+          if (omitted > 0)
+            {_truncatedMarkerKey: true, _omittedItemsKey: omitted},
+          ...tail,
+        ];
+        if (_jsonUtf8Length(candidate) <= limit) return candidate;
+        if (keep == 1) break;
+        keep = keep ~/ 2;
+      }
+      if (_jsonUtf8Length({
+            _truncatedMarkerKey: true,
+            _omittedItemsKey: originalItemCount,
+          }) <=
+          limit) {
+        return [
+          {_truncatedMarkerKey: true, _omittedItemsKey: originalItemCount},
+        ];
+      }
+      return [_truncateToolResult(jsonEncode(value), limit)];
+    }
+    if (value is Map) {
+      final entries = [
+        for (final entry in value.entries)
+          if (!_isMapTruncationMarkerEntry(entry)) entry,
+      ];
+      final originalEntryCount = _mapOriginalEntryCount(value);
+      var keep = entries.length;
+      while (keep > 0) {
+        final headCount = keep ~/ 2;
+        final tailCount = keep - headCount;
+        final childLimit = _childToolOutputLimit(limit, keep);
+        final omitted = originalEntryCount - keep;
+        final candidate = <String, Object?>{};
+        for (var index = 0; index < headCount; index++) {
+          final entry = entries[index];
+          candidate['${entry.key}'] = _boundToolResultValue(
+            entry.value,
+            childLimit,
+          );
+        }
+        if (omitted > 0) {
+          candidate[_truncatedMarkerKey] = true;
+          candidate[_omittedEntriesKey] = omitted;
+        }
+        for (
+          var index = entries.length - tailCount;
+          index < entries.length;
+          index++
+        ) {
+          final entry = entries[index];
+          candidate['${entry.key}'] = _boundToolResultValue(
+            entry.value,
+            childLimit,
+          );
+        }
+        if (_jsonUtf8Length(candidate) <= limit) return candidate;
+        if (keep == 1) break;
+        keep = keep ~/ 2;
+      }
+      final marker = {
+        _truncatedMarkerKey: true,
+        _omittedEntriesKey: originalEntryCount,
+      };
+      if (_jsonUtf8Length(marker) <= limit) return marker;
+      return _truncateToolResult(jsonEncode(value), limit);
+    }
+    return _truncateToolResult(jsonEncode(value), limit);
+  }
+
+  static bool _isListTruncationMarker(Object? value) {
+    if (value is! Map) return false;
+    return value[_truncatedMarkerKey] == true &&
+        value[_omittedItemsKey] is int &&
+        (value[_omittedItemsKey] as int) > 0;
+  }
+
+  static int _listItemRepresentationCount(Object? value) {
+    if (_isListTruncationMarker(value)) {
+      return (value as Map)[_omittedItemsKey] as int;
+    }
+    return 1;
+  }
+
+  static int _listOriginalItemCount(List value) {
+    return value.fold<int>(
+      0,
+      (sum, item) => sum + _listItemRepresentationCount(item),
+    );
+  }
+
+  static bool _isMapTruncationMarkerEntry(MapEntry<dynamic, dynamic> entry) {
+    return entry.key == _truncatedMarkerKey || entry.key == _omittedEntriesKey;
+  }
+
+  static int _mapOriginalEntryCount(Map value) {
+    final omitted = value[_omittedEntriesKey];
+    final omittedCount = omitted is int && omitted > 0 ? omitted : 0;
+    final visible = value.keys
+        .where((key) => key != _truncatedMarkerKey && key != _omittedEntriesKey)
+        .length;
+    return visible + omittedCount;
+  }
+
+  static int _jsonUtf8Length(Object? value) {
+    return utf8.encode(jsonEncode(value)).length;
+  }
+
+  static int _utf8Length(String value) => utf8.encode(value).length;
+
+  static String _utf8Prefix(String value, int maxBytes) {
+    if (maxBytes <= 0) return '';
+    final result = StringBuffer();
+    var used = 0;
+    for (final rune in value.runes) {
+      final character = String.fromCharCode(rune);
+      final size = _utf8Length(character);
+      if (used + size > maxBytes) break;
+      result.write(character);
+      used += size;
+    }
+    return result.toString();
+  }
+
+  static String _utf8Suffix(String value, int maxBytes) {
+    if (maxBytes <= 0) return '';
+    final selected = <int>[];
+    var used = 0;
+    for (final rune in value.runes.toList().reversed) {
+      final character = String.fromCharCode(rune);
+      final size = _utf8Length(character);
+      if (used + size > maxBytes) break;
+      selected.add(rune);
+      used += size;
+    }
+    return String.fromCharCodes(selected.reversed);
   }
 
   /// A server-side compaction item carries the prior context window. Keep the
@@ -576,4 +943,10 @@ class AgentLoop {
 
 String _wireApi(AiChatClient client) {
   return client is ChatCompletionsClient ? 'chat-completions' : 'responses';
+}
+
+String _model(AiChatClient client) {
+  if (client is ChatCompletionsClient) return client.model;
+  if (client is OpenAiCompatibleClient) return client.model;
+  return '';
 }

@@ -21,7 +21,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 9,
+      version: 10,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -47,7 +47,8 @@ class AppDatabase {
             reasoningEffort TEXT NOT NULL DEFAULT 'default',
             wireApi TEXT NOT NULL DEFAULT 'responses',
             apiKeyRef TEXT,
-            isDefault INTEGER NOT NULL
+            isDefault INTEGER NOT NULL,
+            modelMetadata TEXT NOT NULL DEFAULT '{}'
           )
         ''');
         await db.execute('''
@@ -176,6 +177,11 @@ class AppDatabase {
           ''');
           await db.execute(
             'CREATE INDEX attachments_task ON attachments(taskId)',
+          );
+        }
+        if (oldVersion < 10) {
+          await db.execute(
+            "ALTER TABLE providers ADD COLUMN modelMetadata TEXT NOT NULL DEFAULT '{}'",
           );
         }
       },
@@ -319,22 +325,95 @@ class AppDatabase {
     return rows.map(_eventFromRow).toList(growable: false);
   }
 
+  /// Scans only event payloads that may contain attachment references, in
+  /// small pages. Cleanup needs the references, not the complete event
+  /// history, so a long conversation does not create a large temporary list.
+  Future<Set<String>> loadReferencedAttachmentIds() async {
+    final database = await _db;
+    const pageSize = 128;
+    var offset = 0;
+    final ids = <String>{};
+    while (true) {
+      final rows = await database.query(
+        'task_events',
+        columns: ['payload'],
+        where: 'payload LIKE ?',
+        whereArgs: ['%"attachment_id"%'],
+        orderBy: 'eventId',
+        limit: pageSize,
+        offset: offset,
+      );
+      for (final row in rows) {
+        final decoded = jsonDecode(row['payload'] as String);
+        _collectAttachmentIds(decoded, ids);
+      }
+      if (rows.length < pageSize) break;
+      offset += rows.length;
+    }
+    return Set.unmodifiable(ids);
+  }
+
+  /// Reads only assistant payloads needed to rebuild context usage. This keeps
+  /// the context indicator independent from the UI's paged event list and
+  /// avoids loading old user attachments into memory.
+  Future<List<Map<String, Object?>>> loadAssistantUsagePayloads(
+    String taskId,
+  ) async {
+    final database = await _db;
+    final contextRows = await database.query(
+      'task_events',
+      columns: ['sequence', 'payload'],
+      where: "taskId = ? AND type = 'task.context_changed'",
+      whereArgs: [taskId],
+      orderBy: 'sequence',
+    );
+    var startSequence = 0;
+    for (final row in contextRows) {
+      final payload = _decodePayload(row['payload']);
+      if (_isHistoryBoundary(payload)) {
+        startSequence = row['sequence'] as int;
+      }
+    }
+    final rows = await database.query(
+      'task_events',
+      columns: ['payload'],
+      where: "taskId = ? AND type = 'assistant.completed' AND sequence > ?",
+      whereArgs: [taskId, startSequence],
+      orderBy: 'sequence',
+    );
+    return [
+      for (final row in rows)
+        Map<String, Object?>.from(jsonDecode(row['payload'] as String) as Map),
+    ];
+  }
+
   Future<List<TaskEvent>> loadModelEvents(
     String taskId, {
     bool useCompactionBoundary = true,
   }) async {
     final database = await _db;
-    final boundaryRows = await database.query(
+    final contextRows = await database.query(
       'task_events',
-      columns: ['sequence'],
+      columns: ['sequence', 'payload'],
       where: "taskId = ? AND type = 'task.context_changed'",
       whereArgs: [taskId],
-      orderBy: 'sequence DESC',
-      limit: 1,
+      orderBy: 'sequence',
     );
-    var startSequence = boundaryRows.isEmpty
-        ? 0
-        : boundaryRows.first['sequence'] as int;
+    var startSequence = 0;
+    for (final row in contextRows) {
+      final payload = _decodePayload(row['payload']);
+      if (_isHistoryBoundary(payload)) {
+        startSequence = row['sequence'] as int;
+      }
+    }
+    var providerProjectionSequence = startSequence;
+    for (final row in contextRows) {
+      final sequence = row['sequence'] as int;
+      if (sequence > providerProjectionSequence &&
+          _requiresProviderProjection(_decodePayload(row['payload']))) {
+        providerProjectionSequence = sequence;
+      }
+    }
     if (useCompactionBoundary) {
       const scanPageSize = 32;
       var offset = 0;
@@ -345,7 +424,7 @@ class AppDatabase {
           columns: ['sequence', 'payload'],
           where:
               "taskId = ? AND type = 'assistant.completed' AND sequence >= ?",
-          whereArgs: [taskId, startSequence],
+          whereArgs: [taskId, providerProjectionSequence],
           orderBy: 'sequence DESC',
           limit: scanPageSize,
           offset: offset,
@@ -478,6 +557,23 @@ class AppDatabase {
         : AttachmentRecord.fromMap(Map<String, Object?>.from(rows.first));
   }
 
+  Future<List<AttachmentRecord>> loadAttachments() async {
+    final rows = await (await _db).query('attachments', orderBy: 'createdAt');
+    return rows
+        .map((row) => AttachmentRecord.fromMap(Map<String, Object?>.from(row)))
+        .toList(growable: false);
+  }
+
+  Future<void> deleteAttachments(List<String> ids) async {
+    if (ids.isEmpty) return;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await (await _db).delete(
+      'attachments',
+      where: 'id IN ($placeholders)',
+      whereArgs: ids,
+    );
+  }
+
   Future<List<TaskEvent>> loadLegacyAttachmentEvents(String taskId) async {
     final rows = await (await _db).query(
       'task_events',
@@ -524,6 +620,37 @@ class AppDatabase {
     final items = payload['responses_output_items'];
     return items is List &&
         items.any((item) => item is Map && item['type'] == 'compaction');
+  }
+
+  static Map<String, Object?> _decodePayload(Object? value) {
+    return Map<String, Object?>.from(jsonDecode(value as String) as Map);
+  }
+
+  static bool _isHistoryBoundary(Map<String, Object?> payload) {
+    // Missing history_boundary is treated as a boundary for events written by
+    // older app versions.
+    return payload['history_boundary'] != false;
+  }
+
+  static bool _requiresProviderProjection(Map<String, Object?> payload) {
+    return payload['history_boundary'] == false &&
+        payload['history_projection'] == 'provider';
+  }
+
+  static void _collectAttachmentIds(Object? value, Set<String> ids) {
+    if (value is Map) {
+      for (final entry in value.entries) {
+        if (entry.key == 'attachment_id' && entry.value is String) {
+          ids.add(entry.value as String);
+        } else {
+          _collectAttachmentIds(entry.value, ids);
+        }
+      }
+    } else if (value is Iterable) {
+      for (final item in value) {
+        _collectAttachmentIds(item, ids);
+      }
+    }
   }
 
   Future<void> close() async {

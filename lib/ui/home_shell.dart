@@ -230,6 +230,11 @@ class _HomeShellState extends State<HomeShell> {
                                 size: 20,
                               ),
                             ),
+                            IconButton(
+                              tooltip: '删除项目',
+                              onPressed: () => _deleteProject(context, project),
+                              icon: const Icon(Icons.delete_outline, size: 20),
+                            ),
                             const Icon(Icons.expand_more),
                           ],
                         ),
@@ -296,23 +301,30 @@ class _HomeShellState extends State<HomeShell> {
           _pendingProjectId = task.projectId;
         });
       },
-      trailing: PopupMenuButton<String>(
-        tooltip: '对话操作',
-        onSelected: (value) {
-          if (value == 'rename') {
-            _renameTask(context, task);
-          } else if (value == 'copy_id') {
-            Clipboard.setData(ClipboardData(text: task.id));
-            ScaffoldMessenger.of(context)
-                .showSnackBar(const SnackBar(content: Text('对话 ID 已复制')));
-          } else {
-            _deleteTask(context, task);
-          }
-        },
-        itemBuilder: (context) => const [
-          PopupMenuItem(value: 'rename', child: Text('重命名')),
-          PopupMenuItem(value: 'copy_id', child: Text('复制对话 ID')),
-          PopupMenuItem(value: 'delete', child: Text('删除')),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: '删除对话',
+            onPressed: () => _deleteTask(context, task),
+            icon: const Icon(Icons.delete_outline, size: 20),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '对话操作',
+            onSelected: (value) {
+              if (value == 'rename') {
+                _renameTask(context, task);
+              } else {
+                Clipboard.setData(ClipboardData(text: task.id));
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(const SnackBar(content: Text('对话 ID 已复制')));
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'rename', child: Text('重命名')),
+              PopupMenuItem(value: 'copy_id', child: Text('复制对话 ID')),
+            ],
+          ),
         ],
       ),
     );
@@ -889,6 +901,74 @@ class _HomeShellState extends State<HomeShell> {
       }
     }
   }
+
+  Future<void> _deleteProject(BuildContext context, Project project) async {
+    final taskCount = widget.controller.tasks
+        .where((task) => task.projectId == project.id)
+        .length;
+    var deleteFiles = false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('删除项目？'),
+          content: taskCount != 0
+              ? Text('项目下还有 $taskCount 个对话，请先删除这些对话后再删除项目。')
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('只删除项目配置，不删除手机项目文件夹。\n\n${project.name}'),
+                    const SizedBox(height: 8),
+                    CheckboxListTile(
+                      value: deleteFiles,
+                      onChanged: (value) {
+                        setDialogState(() => deleteFiles = value ?? false);
+                      },
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: const Text('同时删除绑定文件夹内容'),
+                      subtitle: const Text('永久删除文件夹内全部文件和子目录，保留文件夹本身'),
+                    ),
+                    if (deleteFiles)
+                      Text(
+                        '将清空：${project.localPath}',
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                          fontSize: 12,
+                        ),
+                      ),
+                  ],
+                ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            if (taskCount == 0)
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(deleteFiles ? '删除项目和内容' : '删除项目'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.controller.deleteProject(project, deleteFiles: deleteFiles);
+      if (mounted && _pendingProjectId == project.id) {
+        setState(() => _pendingProjectId = null);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('删除项目失败：$error')));
+      }
+    }
+  }
 }
 
 class _ProjectFormValue {
@@ -1083,7 +1163,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 4,
+              itemCount: 5,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1102,6 +1182,9 @@ class SettingsPage extends StatelessWidget {
                 }
                 if (index == 2) {
                   return _FontScaleSettingsTile(controller: controller);
+                }
+                if (index == 3) {
+                  return _StorageSettingsTile(controller: controller);
                 }
                 return _DeveloperSettingsTile(controller: controller);
               },
@@ -1213,6 +1296,75 @@ class _DeveloperSettingsTile extends StatelessWidget {
       },
     );
   }
+}
+
+class _StorageSettingsTile extends StatelessWidget {
+  const _StorageSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(
+        child: Icon(Icons.cleaning_services_outlined),
+      ),
+      title: const Text('清理空间'),
+      subtitle: const Text('清理未被对话引用的附件和残留临时文件，不删除对话或项目文件'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () async {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('清理空间？'),
+            content: const Text(
+              '将清理未被历史对话引用的附件和残留临时文件。\n'
+              '已被对话引用的图片、文件和项目文件不会删除。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('清理'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true || !context.mounted) return;
+        try {
+          final result = await controller.cleanupStorage();
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                result.removedFiles == 0
+                    ? '没有可清理的文件'
+                    : '已清理 ${result.removedFiles} 个文件，释放 ${_formatBytes(result.removedBytes)}',
+              ),
+            ),
+          );
+        } catch (error) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context)
+                .showSnackBar(SnackBar(content: Text('清理失败：$error')));
+          }
+        }
+      },
+    );
+  }
+}
+
+String _formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
 }
 
 class DeveloperSettingsPage extends StatelessWidget {

@@ -9,6 +9,8 @@ AiChatClient createAiClient({
   required String apiKey,
   required String model,
   String reasoningEffort = 'default',
+  int? compactThreshold,
+  List<String>? inputModalities,
   http.Client? client,
 }) {
   switch (wireApi) {
@@ -18,6 +20,8 @@ AiChatClient createAiClient({
         apiKey: apiKey,
         model: model,
         reasoningEffort: reasoningEffort,
+        compactThreshold: compactThreshold,
+        inputModalities: inputModalities,
         client: client,
       );
     case 'chat-completions':

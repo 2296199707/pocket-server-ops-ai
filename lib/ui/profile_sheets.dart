@@ -252,6 +252,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   bool _saving = false;
   bool _loadingModels = false;
   List<String> _models = const [];
+  Map<String, ProviderModelMetadata> _modelMetadata = const {};
   String? _error;
 
   @override
@@ -265,6 +266,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _reasoningEffort = profile?.reasoningEffort ?? 'default';
     _wireApi = profile?.wireApi ?? 'responses';
     _isDefault = profile?.isDefault ?? false;
+    _modelMetadata = profile?.modelMetadata ?? const {};
   }
 
   @override
@@ -458,6 +460,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         wireApi: _wireApi,
         secret: _secret.text,
         isDefault: _isDefault,
+        modelMetadata: _modelMetadata,
       );
       if (mounted) Navigator.pop(context);
     } catch (error) {
@@ -486,11 +489,20 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       _error = null;
     });
     try {
-      final models = await widget.controller.loadProviderModels(
+      final metadata = await widget.controller.loadProviderModelMetadata(
         profile,
         secret: _secret.text.isEmpty ? null : _secret.text,
       );
-      if (mounted) setState(() => _models = models);
+      if (mounted) {
+        setState(() {
+          _models = [for (final item in metadata) item.model];
+          _modelMetadata = {
+            ..._modelMetadata,
+            for (final item in metadata)
+              item.model: _modelMetadata[item.model]?.mergedWith(item) ?? item,
+          };
+        });
+      }
     } catch (error) {
       if (mounted) setState(() => _error = '读取模型失败：$error');
     } finally {

@@ -55,6 +55,20 @@ class ProjectFileStore {
     await Directory(project.localPath).create(recursive: true);
   }
 
+  /// Delete the contents of the bound project directory but keep the root
+  /// directory itself. Symlinks are listed without following them, so a link
+  /// inside the project is removed as a link rather than traversed.
+  Future<void> deleteContents(Project project) async {
+    final root = await _canonicalProjectRoot(project);
+    if (path_util.posix.dirname(root) == root) {
+      throw StateError('不能删除文件系统根目录的内容');
+    }
+    final directory = Directory(root);
+    await for (final entity in directory.list(followLinks: false)) {
+      await entity.delete(recursive: true);
+    }
+  }
+
   Future<List<ProjectFileEntry>> list(
     Project project,
     String relativePath,

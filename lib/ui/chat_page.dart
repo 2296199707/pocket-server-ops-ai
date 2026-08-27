@@ -7,6 +7,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
 
 import '../agent/agent_tools.dart';
+import '../agent/context_usage.dart';
 import '../agent/ai_protocol.dart';
 import '../app_controller.dart';
 import '../domain/models.dart';
@@ -75,6 +76,7 @@ class ChatPageState extends State<ChatPage> {
   int _lastEventCount = -1;
   bool _loadingEarlier = false;
   String? _usageRequestedFor;
+  String? _contextRequestedFor;
 
   bool get _agentAutoExecute =>
       widget.agentAutoExecute ?? widget.controller.agentAutoExecute;
@@ -110,6 +112,7 @@ class ChatPageState extends State<ChatPage> {
         _modelOverride = null;
         _reasoningEffortOverride = null;
         _pendingAttachments = const [];
+        _contextRequestedFor = null;
       });
       _ensureTaskEvents();
     } else if (_agentAutoExecute !=
@@ -194,6 +197,26 @@ class ChatPageState extends State<ChatPage> {
     final project = widget.controller.projectFor(projectId);
     final activeProject = usesLocal ? project : null;
     final boundServer = usesServer ? _serverFor(serverId) : null;
+    final contextUsage = task == null
+        ? null
+        : widget.controller.contextUsageFor(task, provider: provider);
+    if (task != null && provider != null) {
+      final contextKey =
+          '${task.id}:${provider.id}:${task.modelOverride ?? provider.model}';
+      if (_contextRequestedFor != contextKey) {
+        _contextRequestedFor = contextKey;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          unawaited(
+            widget.controller
+                .loadTaskContextUsage(task, provider: provider)
+                .then((_) {
+                  if (mounted) setState(() {});
+                }),
+          );
+        });
+      }
+    }
     if (_lastEventCount != events.length && !_loadingEarlier) {
       _lastEventCount = events.length;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -211,7 +234,6 @@ class ChatPageState extends State<ChatPage> {
               : widget.controller.providerUsageFor(provider.id),
           onProviderTap: running ? null : _selectProvider,
           onEdit: running ? null : _editContext,
-          onShowContext: () => _showContextStatus(events),
         ),
         if (task?.status == 'unknown')
           const _Notice(
@@ -412,6 +434,7 @@ class ChatPageState extends State<ChatPage> {
                   controller: widget.controller,
                   server: boundServer,
                   task: task,
+                  contextUsage: contextUsage,
                   executionMode: task?.executionMode ?? _executionMode,
                   onOpenDashboard: boundServer == null
                       ? null
@@ -419,6 +442,9 @@ class ChatPageState extends State<ChatPage> {
                   onFirstHostKey: task == null
                       ? null
                       : (key) => widget.onConfirmHostKey(task, key),
+                  onShowContext: task == null
+                      ? null
+                      : () => _showContextStatus(task, provider),
                 ),
               ],
             ),
@@ -490,13 +516,15 @@ class ChatPageState extends State<ChatPage> {
     });
   }
 
-  Future<void> _showContextStatus(List<TaskEvent> events) {
-    return showDialog<void>(
+  Future<void> _showContextStatus(Task task, ProviderProfile? provider) async {
+    final usage = await widget.controller.loadTaskContextUsage(
+      task,
+      provider: provider,
+    );
+    if (!mounted) return;
+    await showDialog<void>(
       context: context,
-      builder: (_) => _ContextStatusDialog(
-        usage: _latestUsage(events),
-        compactionCount: _compactionCount(events),
-      ),
+      builder: (_) => _ContextStatusDialog(usage: usage),
     );
   }
 
@@ -1635,7 +1663,6 @@ class _ContextBar extends StatelessWidget {
     required this.usage,
     required this.onProviderTap,
     required this.onEdit,
-    required this.onShowContext,
   });
 
   final Project? project;
@@ -1645,7 +1672,6 @@ class _ContextBar extends StatelessWidget {
   final ProviderUsageSnapshot? usage;
   final VoidCallback? onProviderTap;
   final VoidCallback? onEdit;
-  final VoidCallback onShowContext;
 
   @override
   Widget build(BuildContext context) {
@@ -1703,18 +1729,6 @@ class _ContextBar extends StatelessWidget {
                     style: Theme.of(context).textTheme.labelSmall,
                   ),
                 ],
-                const SizedBox(width: 4),
-                IconButton(
-                  tooltip: '上下文状态',
-                  onPressed: onShowContext,
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 32,
-                    height: 32,
-                  ),
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.data_usage_outlined, size: 17),
-                ),
                 IconButton(
                   tooltip: '对话设置',
                   onPressed: onEdit,
@@ -1845,19 +1859,14 @@ class _ModelReasoningSelection {
 }
 
 class _ContextStatusDialog extends StatelessWidget {
-  const _ContextStatusDialog({
-    required this.usage,
-    required this.compactionCount,
-  });
+  const _ContextStatusDialog({required this.usage});
 
-  final Map<String, Object?>? usage;
-  final int compactionCount;
+  final TaskContextUsage? usage;
 
   @override
   Widget build(BuildContext context) {
-    final inputTokens = _usageNumber(usage, 'input_tokens');
-    final outputTokens = _usageNumber(usage, 'output_tokens');
-    final totalTokens = _usageNumber(usage, 'total_tokens');
+    final last = usage?.last;
+    final total = usage?.total;
     return AlertDialog(
       title: const Text('上下文状态'),
       content: SizedBox(
@@ -1867,17 +1876,37 @@ class _ContextStatusDialog extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              usage == null ? '供应商未返回 Token 用量' : '最近一次 AI 响应',
+              usage == null || last == null ? '供应商未返回 Token 用量' : '当前上下文',
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 12),
-            _ContextStat(label: '输入 Token', value: _formatUsage(inputTokens)),
-            _ContextStat(label: '输出 Token', value: _formatUsage(outputTokens)),
-            _ContextStat(label: '总 Token', value: _formatUsage(totalTokens)),
-            _ContextStat(label: '已记录压缩次数', value: '$compactionCount 次'),
+            _ContextStat(label: '模型', value: usage?.model ?? '未知'),
+            _ContextStat(label: '当前用量', value: _formatUsage(last?.totalTokens)),
+            _ContextStat(
+              label: '剩余',
+              value: usage?.remainingPercent == null
+                  ? '未知'
+                  : '${usage!.remainingPercent}%',
+            ),
+            _ContextStat(
+              label: '有效窗口',
+              value: _formatUsage(usage?.effectiveContextWindow),
+            ),
+            _ContextStat(
+              label: '自动压缩阈值',
+              value: _formatUsage(usage?.autoCompactTokenLimit),
+            ),
+            _ContextStat(
+              label: '累计用量',
+              value: _formatUsage(total?.totalTokens),
+            ),
+            _ContextStat(
+              label: '已记录压缩',
+              value: '${usage?.compactionCount ?? 0} 次',
+            ),
             const SizedBox(height: 12),
             Text(
-              '上下文窗口总量和百分比需要供应商提供，应用不会用估算值冒充真实数据。',
+              '窗口未知时显示“未知”，不会用估算值冒充供应商数据。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
@@ -1911,33 +1940,6 @@ class _ContextStat extends StatelessWidget {
       ),
     );
   }
-}
-
-Map<String, Object?>? _latestUsage(List<TaskEvent> events) {
-  for (final event in events.reversed) {
-    if (event.type != 'assistant.completed') continue;
-    final value = event.payload['usage'];
-    if (value is Map) return Map<String, Object?>.from(value);
-  }
-  return null;
-}
-
-int _compactionCount(List<TaskEvent> events) {
-  var count = 0;
-  for (final event in events) {
-    if (event.type != 'assistant.completed') continue;
-    final items = event.payload['responses_output_items'];
-    if (items is! List) continue;
-    count += items
-        .where((item) => item is Map && item['type'] == 'compaction')
-        .length;
-  }
-  return count;
-}
-
-int? _usageNumber(Map<String, Object?>? usage, String key) {
-  final value = usage?[key];
-  return value is num ? value.toInt() : null;
 }
 
 String _formatUsage(int? value) {
@@ -2195,17 +2197,21 @@ class _ConversationFooter extends StatelessWidget {
     required this.controller,
     required this.server,
     required this.task,
+    required this.contextUsage,
     required this.executionMode,
     required this.onOpenDashboard,
     required this.onFirstHostKey,
+    required this.onShowContext,
   });
 
   final AppController controller;
   final ServerProfile? server;
   final Task? task;
+  final TaskContextUsage? contextUsage;
   final String executionMode;
   final VoidCallback? onOpenDashboard;
   final FutureOr<bool> Function(SshHostKey key)? onFirstHostKey;
+  final VoidCallback? onShowContext;
 
   @override
   Widget build(BuildContext context) {
@@ -2230,8 +2236,54 @@ class _ConversationFooter extends StatelessWidget {
             )
           else
             const Spacer(),
+          _ContextUsageSummary(usage: contextUsage, onTap: onShowContext),
+          const SizedBox(width: 5),
           _ExecutionModeStatus(executionMode: executionMode),
         ],
+      ),
+    );
+  }
+}
+
+class _ContextUsageSummary extends StatelessWidget {
+  const _ContextUsageSummary({required this.usage, required this.onTap});
+
+  final TaskContextUsage? usage;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final remaining = usage?.remainingPercent;
+    final child = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.data_usage_outlined,
+          size: 10,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        const SizedBox(width: 2),
+        Text(
+          remaining == null ? '--' : '$remaining%',
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            fontSize: 8,
+            height: 1,
+            fontFamily: 'monospace',
+          ),
+        ),
+      ],
+    );
+    if (onTap == null) return child;
+    return Tooltip(
+      message: '上下文剩余 ${remaining == null ? '未知' : '$remaining%'}，点击查看详情',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(3),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+          child: child,
+        ),
       ),
     );
   }
@@ -2783,6 +2835,7 @@ class _EventTile extends StatelessWidget {
       isUser: event.type == 'user.message',
       attachments: _readChatAttachments(event.payload['attachments']),
       controller: controller,
+      taskId: event.taskId,
     );
   }
 }
@@ -2794,6 +2847,7 @@ class _MessageBubble extends StatelessWidget {
     this.streaming = false,
     this.attachments = const [],
     this.controller,
+    this.taskId,
   });
 
   final String text;
@@ -2801,6 +2855,7 @@ class _MessageBubble extends StatelessWidget {
   final bool streaming;
   final List<AiAttachment> attachments;
   final AppController? controller;
+  final String? taskId;
 
   @override
   Widget build(BuildContext context) {
@@ -2857,6 +2912,7 @@ class _MessageBubble extends StatelessWidget {
                               context,
                               controller!,
                               attachment,
+                              taskId!,
                             ),
                     ),
                 ],
@@ -3022,6 +3078,7 @@ class _ToolEventTile extends StatelessWidget {
                 resultValue['mime_type'] is String)
               _GeneratedImagePreview(
                 controller: controller,
+                taskId: result!.taskId,
                 attachment: AiAttachment(
                   id: resultValue['attachment_id'] as String,
                   name: resultValue['name'] is String
@@ -3045,10 +3102,12 @@ class _ToolEventTile extends StatelessWidget {
 class _GeneratedImagePreview extends StatelessWidget {
   const _GeneratedImagePreview({
     required this.controller,
+    required this.taskId,
     required this.attachment,
   });
 
   final AppController controller;
+  final String taskId;
   final AiAttachment attachment;
 
   @override
@@ -3056,7 +3115,8 @@ class _GeneratedImagePreview extends StatelessWidget {
     return Align(
       alignment: Alignment.centerLeft,
       child: TextButton.icon(
-        onPressed: () => _showStoredAttachment(context, controller, attachment),
+        onPressed: () =>
+            _showStoredAttachment(context, controller, attachment, taskId),
         icon: const Icon(Icons.image_outlined, size: 16),
         label: const Text('查看生成图片'),
       ),
@@ -3068,6 +3128,7 @@ Future<void> _showStoredAttachment(
   BuildContext context,
   AppController controller,
   AiAttachment attachment,
+  String taskId,
 ) {
   final attachmentId = attachment.id;
   if (attachmentId == null) return Future.value();
@@ -3078,7 +3139,7 @@ Future<void> _showStoredAttachment(
       content: SizedBox(
         width: 560,
         child: FutureBuilder<Uint8List>(
-          future: controller.loadAttachmentBytes(attachmentId),
+          future: controller.loadAttachmentBytes(attachmentId, taskId: taskId),
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               return const Text('附件文件不可用');

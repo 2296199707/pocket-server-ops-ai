@@ -108,6 +108,32 @@ void main() {
     },
   );
 
+  test('sequential turns keep distinct turn ids in durable events', () async {
+    final controller = AppController(
+      database: MemoryAppDatabase(demoData: true),
+      credentials: MemoryCredentialStore(),
+      previewMode: true,
+    );
+    await controller.load();
+    final task = await controller.createTask(mode: 'chat', title: '连续轮次');
+
+    await controller.runTask(task, prompt: '第一轮');
+    await controller.runTask(task, prompt: '第二轮');
+
+    final userEvents = controller
+        .eventsFor(task.id)
+        .where((event) => event.type == 'user.message')
+        .toList();
+    expect(userEvents, hasLength(2));
+    final firstTurn = userEvents[0].payload['turn_id'];
+    final secondTurn = userEvents[1].payload['turn_id'];
+    expect(firstTurn, isA<String>());
+    expect(secondTurn, isA<String>());
+    expect(secondTurn, isNot(firstTurn));
+    expect(controller.isTaskRunning(task.id), isFalse);
+    controller.dispose();
+  });
+
   test('Agent default execution mode is persisted', () async {
     final database = MemoryAppDatabase();
     final controller = AppController(
@@ -136,6 +162,65 @@ void main() {
     await restored.load();
     expect(restored.agentAutoExecute, isTrue);
     expect(restored.betaUpdatesEnabled, isTrue);
+    restored.dispose();
+  });
+
+  test(
+    'a late stopping status cannot overwrite a terminal task status',
+    () async {
+      final controller = AppController(
+        database: MemoryAppDatabase(),
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      final task = await controller.createTask(title: '取消竞态');
+
+      final stopping = controller.updateTaskStatus(task.id, 'stopping');
+      final terminal = controller.updateTaskStatus(task.id, 'cancelled');
+      await Future.wait([stopping, terminal]);
+      expect(controller.tasks.single.status, 'cancelled');
+
+      await controller.updateTaskStatus(task.id, 'stopping');
+      expect(controller.tasks.single.status, 'cancelled');
+      controller.dispose();
+    },
+  );
+
+  test('provider model metadata survives save and reload', () async {
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    await controller.saveProvider(
+      name: '元数据供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'secret',
+      isDefault: true,
+      modelMetadata: const {
+        'model-a': ProviderModelMetadata(
+          model: 'model-a',
+          contextWindowTokens: 128000,
+        ),
+      },
+    );
+    controller.dispose();
+
+    final restored = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await restored.load();
+    expect(
+      restored
+          .providers
+          .single
+          .modelMetadata['model-a']
+          ?.resolvedContextWindowTokens,
+      128000,
+    );
     restored.dispose();
   });
 
@@ -275,6 +360,14 @@ void main() {
       );
       expect(updated.modelOverride, isNull);
       expect(updated.reasoningEffortOverride, 'high');
+      expect(
+        controller.eventsFor(updated.id).last.type,
+        'task.context_changed',
+      );
+      expect(
+        controller.eventsFor(updated.id).last.payload['history_boundary'],
+        false,
+      );
 
       final continued = await controller.createContinuationTask(updated);
       expect(continued.modelOverride, isNull);
@@ -282,6 +375,384 @@ void main() {
       controller.dispose();
     },
   );
+
+  test(
+    'provider context changes keep the transcript without a history boundary',
+    () async {
+      final database = MemoryAppDatabase();
+      const provider = ProviderProfile(
+        id: 'provider-boundary',
+        name: '边界供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'model-a',
+        reasoningEffort: 'default',
+        wireApi: 'responses',
+        apiKeyRef: 'provider-boundary:key',
+        isDefault: true,
+        modelMetadata: {
+          'model-a': ProviderModelMetadata(
+            model: 'model-a',
+            compHash: 'comp-a',
+          ),
+        },
+      );
+      await database.saveProvider(provider);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      final task = await controller.createTask(
+        providerId: provider.id,
+        title: '供应商边界',
+      );
+
+      await controller.saveProvider(
+        existing: controller.providers.single,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        reasoningEffort: 'high',
+        wireApi: provider.wireApi,
+        secret: '',
+        isDefault: true,
+      );
+      expect(
+        controller
+            .eventsFor(task.id)
+            .where((event) => event.type == 'task.context_changed'),
+        isEmpty,
+      );
+
+      await controller.saveProvider(
+        existing: controller.providers.single,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: 'model-b',
+        reasoningEffort: 'high',
+        wireApi: provider.wireApi,
+        secret: '',
+        isDefault: true,
+      );
+      await controller.saveProvider(
+        existing: controller.providers.single,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: 'model-b',
+        reasoningEffort: 'high',
+        wireApi: 'chat-completions',
+        secret: '',
+        isDefault: true,
+      );
+      await controller.saveProvider(
+        existing: controller.providers.single,
+        name: provider.name,
+        baseUrl: 'https://provider.example/other',
+        model: 'model-b',
+        reasoningEffort: 'high',
+        wireApi: 'chat-completions',
+        secret: '',
+        isDefault: true,
+      );
+
+      final boundaries = controller
+          .eventsFor(task.id)
+          .where((event) => event.type == 'task.context_changed')
+          .toList();
+      expect(boundaries, hasLength(3));
+      expect(
+        boundaries.every((event) => event.payload['history_boundary'] == false),
+        isTrue,
+      );
+      expect(boundaries[0].payload['history_projection'], 'model');
+      expect(boundaries[1].payload['history_projection'], 'provider');
+      controller.dispose();
+    },
+  );
+
+  test(
+    'model compaction metadata changes keep the existing task history',
+    () async {
+      final database = MemoryAppDatabase();
+      const provider = ProviderProfile(
+        id: 'provider-comp-hash',
+        name: '压缩元数据供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'model-a',
+        apiKeyRef: 'provider-comp-hash:key',
+        isDefault: true,
+        modelMetadata: {
+          'model-a': ProviderModelMetadata(
+            model: 'model-a',
+            contextWindowTokens: 128000,
+            compHash: 'same',
+          ),
+        },
+      );
+      await database.saveProvider(provider);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      final task = await controller.createTask(
+        providerId: provider.id,
+        title: '压缩元数据变化',
+      );
+
+      await controller.saveProvider(
+        existing: controller.providers.single,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        secret: '',
+        isDefault: true,
+        modelMetadata: const {
+          'model-a': ProviderModelMetadata(
+            model: 'model-a',
+            contextWindowTokens: 256000,
+            compHash: 'same',
+          ),
+        },
+      );
+
+      final change = controller.eventsFor(task.id).last;
+      expect(change.type, 'task.context_changed');
+      expect(change.payload['history_boundary'], false);
+      expect(change.payload['history_projection'], 'model');
+      controller.dispose();
+    },
+  );
+
+  test(
+    'switching the default provider keeps an unbound task transcript',
+    () async {
+      final database = MemoryAppDatabase();
+      const first = ProviderProfile(
+        id: 'provider-default-a',
+        name: '默认供应商 A',
+        baseUrl: 'https://a.example/v1',
+        model: 'model-a',
+        apiKeyRef: 'provider-default-a:key',
+        isDefault: true,
+      );
+      const second = ProviderProfile(
+        id: 'provider-default-b',
+        name: '默认供应商 B',
+        baseUrl: 'https://b.example/v1',
+        model: 'model-b',
+        apiKeyRef: 'provider-default-b:key',
+        isDefault: false,
+      );
+      await database.saveProvider(first);
+      await database.saveProvider(second);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      final task = await controller.createTask(title: '未固定供应商');
+
+      await controller.saveProvider(
+        existing: controller.providers.firstWhere(
+          (provider) => provider.id == second.id,
+        ),
+        name: second.name,
+        baseUrl: second.baseUrl,
+        model: second.model,
+        secret: '',
+        isDefault: true,
+      );
+
+      final change = controller.eventsFor(task.id).last;
+      expect(change.type, 'task.context_changed');
+      expect(change.payload['history_boundary'], false);
+      expect(change.payload['history_projection'], 'provider');
+      expect(
+        controller.eventsFor(task.id).last.payload['provider_id'],
+        second.id,
+      );
+      controller.dispose();
+    },
+  );
+
+  test(
+    'failed turn keeps history when switching to another provider protocol',
+    () async {
+      final requestBodies = <String>[];
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        requestBodies.add(await utf8.decoder.bind(request).join());
+        if (requestBodies.length == 2) {
+          request.response.statusCode = 503;
+          request.response.write('temporary provider failure');
+          await request.response.close();
+          return;
+        }
+        request.response.headers.contentType = ContentType.json;
+        if (request.uri.path.endsWith('/responses')) {
+          request.response.write(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'reasoning',
+                  'id': 'reasoning-a',
+                  'encrypted_content': 'opaque-a',
+                  'summary': <Object?>[],
+                },
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '第一轮回复'},
+                  ],
+                },
+              ],
+            }),
+          );
+        } else {
+          request.response.write(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {'role': 'assistant', 'content': '第三轮回复'},
+                  'finish_reason': 'stop',
+                },
+              ],
+            }),
+          );
+        }
+        await request.response.close();
+      });
+
+      final database = MemoryAppDatabase();
+      final credentials = MemoryCredentialStore();
+      final controller = AppController(
+        database: database,
+        credentials: credentials,
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      final baseUrl = 'http://127.0.0.1:${server.port}/v1';
+      await controller.saveProvider(
+        name: 'Responses 供应商',
+        baseUrl: baseUrl,
+        model: 'model-a',
+        secret: 'key-a',
+        isDefault: true,
+      );
+      final firstProvider = controller.providers.single;
+      await controller.saveProvider(
+        name: 'Chat 供应商',
+        baseUrl: baseUrl,
+        model: 'model-b',
+        wireApi: 'chat-completions',
+        secret: 'key-b',
+        isDefault: false,
+      );
+      final secondProvider = controller.providers.firstWhere(
+        (provider) => provider.name == 'Chat 供应商',
+      );
+      final task = await controller.createTask(
+        mode: 'chat',
+        providerId: firstProvider.id,
+        title: '切换供应商后继续',
+      );
+
+      await controller.runTask(task, prompt: '第一轮请求');
+      final failed = await controller.runTask(task, prompt: '失败请求');
+      expect(failed.status, 'failed');
+
+      final updated = await controller.updateTaskConfiguration(
+        taskId: task.id,
+        mode: task.mode,
+        workMode: task.effectiveWorkMode,
+        projectId: task.projectId,
+        serverId: task.serverId,
+        providerId: secondProvider.id,
+        workingDirectory: task.workingDirectory,
+        executionMode: task.executionMode,
+      );
+      final continued = await controller.runTask(updated, prompt: '继续请求');
+
+      expect(continued.status, 'completed');
+      expect(requestBodies, hasLength(3));
+      final body = jsonDecode(requestBodies[2]) as Map<String, Object?>;
+      final messages = (body['messages'] as List).cast<Map>();
+      expect(
+        messages.any(
+          (message) =>
+              message['role'] == 'user' && message['content'] == '第一轮请求',
+        ),
+        isTrue,
+      );
+      expect(
+        messages.any(
+          (message) =>
+              message['role'] == 'assistant' && message['content'] == '第一轮回复',
+        ),
+        isTrue,
+      );
+      expect(
+        messages.any(
+          (message) =>
+              message['role'] == 'user' && message['content'] == '失败请求',
+        ),
+        isTrue,
+      );
+      expect(
+        messages.any(
+          (message) =>
+              message['role'] == 'developer' &&
+              '${message['content']}'.contains('different AI provider'),
+        ),
+        isTrue,
+      );
+      expect(jsonEncode(body), isNot(contains('opaque-a')));
+      final contextChange = controller
+          .eventsFor(task.id)
+          .lastWhere((event) => event.type == 'task.context_changed');
+      expect(contextChange.payload['history_boundary'], false);
+      expect(contextChange.payload['history_projection'], 'provider');
+    },
+  );
+
+  test('cannot delete the fallback provider used by an unbound task', () async {
+    final database = MemoryAppDatabase();
+    const first = ProviderProfile(
+      id: 'provider-fallback-a',
+      name: '回退供应商 A',
+      baseUrl: 'https://a.example/v1',
+      model: 'model-a',
+      apiKeyRef: 'provider-fallback-a:key',
+      isDefault: false,
+    );
+    const second = ProviderProfile(
+      id: 'provider-fallback-b',
+      name: '回退供应商 B',
+      baseUrl: 'https://b.example/v1',
+      model: 'model-b',
+      apiKeyRef: 'provider-fallback-b:key',
+      isDefault: false,
+    );
+    await database.saveProvider(first);
+    await database.saveProvider(second);
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    await controller.createTask(title: '使用回退供应商');
+
+    await expectLater(
+      controller.deleteProvider(controller.providers.first),
+      throwsA(isA<StateError>()),
+    );
+    expect(controller.providers, hasLength(2));
+    controller.dispose();
+  });
 
   test('different phone Agent tasks can run concurrently', () async {
     final controller = AppController(
@@ -410,6 +881,159 @@ void main() {
   });
 
   test(
+    'context usage reads all assistant events beyond the visible history page',
+    () async {
+      final database = MemoryAppDatabase();
+      const provider = ProviderProfile(
+        id: 'provider-context',
+        name: '上下文供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'gpt-test',
+        apiKeyRef: 'provider-context:key',
+        isDefault: true,
+        modelMetadata: {
+          'gpt-test': ProviderModelMetadata(
+            model: 'gpt-test',
+            contextWindowTokens: 272000,
+          ),
+        },
+      );
+      const taskId = 'task-context';
+      final now = DateTime.utc(2026, 8, 26);
+      await database.saveProvider(provider);
+      await database.saveTask(
+        Task(
+          id: taskId,
+          mode: 'chat',
+          serverId: null,
+          providerId: provider.id,
+          title: '长对话',
+          workingDirectory: null,
+          status: 'completed',
+          executionMode: 'confirm',
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      for (var index = 0; index < 45; index++) {
+        await database.saveEvent(
+          TaskEvent(
+            eventId: 'context-event-$index',
+            taskId: taskId,
+            sequence: index + 1,
+            type: 'assistant.completed',
+            timestamp: now.add(Duration(seconds: index)),
+            payload: const {
+              'usage': {
+                'prompt_tokens': 100,
+                'completion_tokens': 20,
+                'total_tokens': 120,
+              },
+            },
+          ),
+        );
+      }
+
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      final usage = await controller.loadTaskContextUsage(
+        controller.tasks.single,
+      );
+
+      expect(controller.eventsFor(taskId), isEmpty);
+      expect(usage.last?.totalTokens, 120);
+      expect(usage.total?.totalTokens, 45 * 120);
+      expect(usage.effectiveContextWindow, 258400);
+      expect(usage.remainingPercent, 100);
+      controller.dispose();
+    },
+  );
+
+  test('context usage ignores telemetry from a different model', () async {
+    final database = MemoryAppDatabase();
+    const provider = ProviderProfile(
+      id: 'provider-model-filter',
+      name: '模型过滤供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'selected-model',
+      apiKeyRef: 'provider-model-filter:key',
+      isDefault: true,
+      modelMetadata: {
+        'selected-model': ProviderModelMetadata(
+          model: 'selected-model',
+          contextWindowTokens: 128000,
+        ),
+      },
+    );
+    final timestamp = DateTime.utc(2026, 8, 26);
+    await database.saveProvider(provider);
+    await database.saveTask(
+      Task(
+        id: 'task-model-filter',
+        mode: 'chat',
+        serverId: null,
+        providerId: provider.id,
+        title: '模型过滤',
+        workingDirectory: null,
+        status: 'completed',
+        executionMode: 'confirm',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'old-model-usage',
+        taskId: 'task-model-filter',
+        sequence: 1,
+        type: 'assistant.completed',
+        timestamp: timestamp,
+        payload: const {
+          'model': 'old-model',
+          'usage': {
+            'prompt_tokens': 900,
+            'completion_tokens': 100,
+            'total_tokens': 1000,
+          },
+        },
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'selected-model-usage',
+        taskId: 'task-model-filter',
+        sequence: 2,
+        type: 'assistant.completed',
+        timestamp: timestamp.add(const Duration(seconds: 1)),
+        payload: const {
+          'model': 'selected-model',
+          'usage': {
+            'prompt_tokens': 20,
+            'completion_tokens': 5,
+            'total_tokens': 25,
+          },
+        },
+      ),
+    );
+
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    final usage = await controller.loadTaskContextUsage(
+      controller.tasks.single,
+    );
+
+    expect(usage.last?.totalTokens, 25);
+    expect(usage.total?.totalTokens, 1025);
+    controller.dispose();
+  });
+
+  test(
     'attachments are referenced in events and restored after restart',
     () async {
       final root = await Directory.systemTemp.createTemp('mobile-agent-files-');
@@ -452,7 +1076,7 @@ void main() {
       );
       expect(attachment.id, isNotEmpty);
       expect(
-        await controller.loadAttachmentBytes(attachment.id!),
+        await controller.loadAttachmentBytes(attachment.id!, taskId: task.id),
         utf8.encode('image'),
       );
       controller.dispose();
@@ -529,7 +1153,10 @@ void main() {
         ),
       );
       expect(
-        await controller.loadAttachmentBytes(attachment.id!),
+        await controller.loadAttachmentBytes(
+          attachment.id!,
+          taskId: 'task-legacy',
+        ),
         utf8.encode('old'),
       );
       controller.dispose();
@@ -698,6 +1325,151 @@ void main() {
     controller.dispose();
   });
 
+  test('Responses compaction resumes after a provider projection', () async {
+    final database = MemoryAppDatabase();
+    final timestamp = DateTime.utc(2026, 8, 26);
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'old-provider-compaction',
+        taskId: 'task-provider-compaction',
+        sequence: 1,
+        type: 'assistant.completed',
+        timestamp: timestamp,
+        payload: const {
+          'provider_id': 'provider-a',
+          'wire_api': 'responses',
+          'responses_output_items': [
+            {'type': 'compaction', 'encrypted_content': 'old-opaque'},
+          ],
+        },
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'provider-projection',
+        taskId: 'task-provider-compaction',
+        sequence: 2,
+        type: 'task.context_changed',
+        timestamp: timestamp,
+        payload: const {
+          'history_boundary': false,
+          'history_projection': 'provider',
+        },
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'new-provider-compaction',
+        taskId: 'task-provider-compaction',
+        sequence: 3,
+        type: 'assistant.completed',
+        timestamp: timestamp,
+        payload: const {
+          'provider_id': 'provider-b',
+          'wire_api': 'responses',
+          'responses_output_items': [
+            {'type': 'compaction', 'encrypted_content': 'new-opaque'},
+          ],
+        },
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'after-new-compaction',
+        taskId: 'task-provider-compaction',
+        sequence: 4,
+        type: 'user.message',
+        timestamp: timestamp,
+        payload: const {'text': '继续'},
+      ),
+    );
+
+    expect(
+      (await database.loadModelEvents('task-provider-compaction'))
+          .map((event) => event.eventId),
+      ['new-provider-compaction', 'after-new-compaction'],
+    );
+  });
+
+  test('attachment ids cannot be reused across conversations', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'mobile-agent-attachment-scope-',
+    );
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      attachmentStore: AttachmentStore(rootProvider: () async => root),
+      previewMode: true,
+    );
+    await controller.load();
+    final owner = await controller.createTask(title: '附件拥有者');
+    await controller.runTask(
+      owner,
+      prompt: '保存附件',
+      attachments: const [
+        AiAttachment(
+          name: 'private.txt',
+          mimeType: 'text/plain',
+          base64Data: 'c2VjcmV0',
+        ),
+      ],
+    );
+    final ownerMessage = controller
+        .eventsFor(owner.id)
+        .firstWhere((event) => event.type == 'user.message');
+    final attachment = AiAttachment.fromJson(
+      Map<String, Object?>.from(
+        (ownerMessage.payload['attachments'] as List).single as Map,
+      ),
+    );
+    final other = await controller.createTask(title: '其他对话');
+
+    await expectLater(
+      controller.loadAttachmentBytes(attachment.id!, taskId: other.id),
+      throwsA(isA<StateError>()),
+    );
+    final result = await controller.runTask(
+      other,
+      prompt: '复用附件',
+      attachments: [attachment],
+    );
+    expect(result.status, 'failed');
+    expect(
+      controller
+          .eventsFor(other.id)
+          .where((event) => event.type == 'task.failed'),
+      isNotEmpty,
+    );
+
+    final historical = await controller.createTask(title: '历史引用对话');
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'foreign-history-event',
+        taskId: historical.id,
+        sequence: 1,
+        type: 'user.message',
+        timestamp: DateTime.now().toUtc(),
+        payload: {
+          'text': '历史引用',
+          'attachments': [attachment.toJson()],
+        },
+      ),
+    );
+    final historicalResult = await controller.runTask(historical, prompt: '继续');
+    expect(historicalResult.status, 'failed');
+    expect(
+      controller
+          .eventsFor(historical.id)
+          .where((event) => event.type == 'task.failed'),
+      isNotEmpty,
+    );
+    controller.dispose();
+  });
+
   test('failed task deletion keeps attachment files intact', () async {
     final root = await Directory.systemTemp.createTemp('mobile-agent-delete-');
     addTearDown(() async {
@@ -739,7 +1511,7 @@ void main() {
     await expectLater(controller.deleteTask(task), throwsStateError);
 
     expect(
-      await controller.loadAttachmentBytes(attachment.id!),
+      await controller.loadAttachmentBytes(attachment.id!, taskId: task.id),
       utf8.encode('keep'),
     );
     controller.dispose();
@@ -784,12 +1556,94 @@ void main() {
         ),
       );
       expect(
-        await controller.loadAttachmentBytes(attachment.id!),
+        await controller.loadAttachmentBytes(attachment.id!, taskId: task.id),
         utf8.encode('event'),
       );
       controller.dispose();
     },
   );
+
+  test('storage cleanup removes only unreferenced attachment files', () async {
+    final root = await Directory.systemTemp.createTemp('mobile-agent-cleanup-');
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final database = MemoryAppDatabase();
+    final store = AttachmentStore(rootProvider: () async => root);
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      attachmentStore: store,
+      previewMode: true,
+    );
+    await controller.load();
+    final task = await controller.createTask(title: '清理附件');
+    await controller.runTask(
+      task,
+      prompt: '保留',
+      attachments: const [
+        AiAttachment(
+          name: 'keep.png',
+          mimeType: 'image/png',
+          base64Data: 'a2VlcA==',
+        ),
+      ],
+    );
+    final orphan = AttachmentRecord(
+      id: 'orphan',
+      taskId: task.id,
+      name: 'orphan.png',
+      mimeType: 'image/png',
+      byteLength: 6,
+      storagePath: '${task.id}/orphan.png',
+      createdAt: DateTime.now().toUtc(),
+    );
+    await store.write(orphan, Uint8List.fromList(utf8.encode('orphan')));
+    await database.saveAttachments([orphan]);
+
+    final result = await controller.cleanupStorage();
+
+    expect(result.removedFiles, 1);
+    expect(result.removedBytes, 6);
+    expect(await database.loadAttachment('orphan'), isNull);
+    final userEvent = controller
+        .eventsFor(task.id)
+        .firstWhere((event) => event.type == 'user.message');
+    final retained = AiAttachment.fromJson(
+      Map<String, Object?>.from(
+        (userEvent.payload['attachments'] as List).single as Map,
+      ),
+    );
+    expect(
+      await controller.loadAttachmentBytes(retained.id!, taskId: task.id),
+      utf8.encode('keep'),
+    );
+    controller.dispose();
+  });
+
+  test('deleting a project can clear its bound folder contents', () async {
+    final root = await Directory.systemTemp.createTemp('mobile-agent-project-');
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    final project = await controller.createProject(
+      name: '待删除项目',
+      localPath: root.path,
+    );
+    await File('${root.path}/keep.txt').writeAsString('content');
+
+    await controller.deleteProject(project, deleteFiles: true);
+
+    expect(controller.projects, isEmpty);
+    expect(await root.exists(), isTrue);
+    expect(await root.list().toList(), isEmpty);
+    controller.dispose();
+  });
 
   test('dashboard and file APIs use the direct SSH connection', () async {
     final database = MemoryAppDatabase();

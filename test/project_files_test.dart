@@ -52,6 +52,10 @@ void main() {
         files.writeText(project, 'escape/secret.txt', 'blocked'),
         throwsA(isA<StateError>()),
       );
+      await files.deleteContents(project);
+      expect(await Directory(root.path).exists(), isTrue);
+      expect(await File('${outside.path}/secret.txt').readAsString(), 'secret');
+      expect(await files.list(project, ''), isEmpty);
     } finally {
       if (await root.exists()) await root.delete(recursive: true);
       if (await outside.exists()) await outside.delete(recursive: true);

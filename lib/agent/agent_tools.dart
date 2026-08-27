@@ -15,17 +15,32 @@ class AgentTool {
   const AgentTool({
     required this.definition,
     required this.call,
+    this.callWithOperationStart,
     this.requiresConfirmation = true,
     this.requiresUserApproval = false,
+    this.isRemote = false,
     this.writesRemoteState = false,
   });
 
   final AiToolDefinition definition;
   final Future<Object?> Function(Map<String, Object?> arguments) call;
+
+  /// Optional form used by queued remote writes. The callback must be called
+  /// immediately before the operation that can change remote state starts.
+  final Future<Object?> Function(
+    Map<String, Object?> arguments,
+    void Function() onOperationStarted,
+  )?
+  callWithOperationStart;
   final bool requiresConfirmation;
 
   /// Requests that change the app's technical boundary always need the user.
   final bool requiresUserApproval;
+
+  /// Whether executing this tool contacts or operates on the selected server.
+  /// Read-only remote tools use this flag without setting
+  /// [writesRemoteState].
+  final bool isRemote;
   final bool writesRemoteState;
 }
 
@@ -42,6 +57,9 @@ class RemoteAgentTools {
   final Project? project;
   final ProjectFileStore? projectFiles;
   final Map<String, _ManagedProcess> _processes = {};
+  final List<Future<SshCommandStream>> _startingProcesses = [];
+  Future<void>? _closeFuture;
+  var _closing = false;
 
   bool get isClosed => _connection.isClosed;
 
@@ -63,6 +81,7 @@ class RemoteAgentTools {
         },
       ),
       call: _exec,
+      isRemote: true,
       writesRemoteState: true,
     ),
     AgentTool(
@@ -80,6 +99,7 @@ class RemoteAgentTools {
         },
       ),
       call: _start,
+      isRemote: true,
       writesRemoteState: true,
     ),
     AgentTool(
@@ -106,6 +126,7 @@ class RemoteAgentTools {
       ),
       call: _poll,
       requiresConfirmation: false,
+      isRemote: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -121,6 +142,7 @@ class RemoteAgentTools {
         },
       ),
       call: _write,
+      isRemote: true,
       writesRemoteState: true,
     ),
     AgentTool(
@@ -136,6 +158,7 @@ class RemoteAgentTools {
         },
       ),
       call: _stop,
+      isRemote: true,
       writesRemoteState: true,
     ),
     AgentTool(
@@ -158,6 +181,7 @@ class RemoteAgentTools {
       ),
       call: _read,
       requiresConfirmation: false,
+      isRemote: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -173,6 +197,7 @@ class RemoteAgentTools {
         },
       ),
       call: _writeFile,
+      isRemote: true,
       writesRemoteState: true,
     ),
     AgentTool(
@@ -190,6 +215,7 @@ class RemoteAgentTools {
         },
       ),
       call: _replace,
+      isRemote: true,
       writesRemoteState: true,
     ),
     if (project != null && projectFiles != null)
@@ -211,7 +237,7 @@ class RemoteAgentTools {
           },
         ),
         call: _downloadToProject,
-        writesRemoteState: true,
+        isRemote: true,
       ),
   ];
 
@@ -232,15 +258,30 @@ class RemoteAgentTools {
   }
 
   Future<Object?> _start(Map<String, Object?> arguments) async {
+    _removeCompletedProcesses();
+    if (_closing) throw StateError('远程工具正在关闭');
+    if (_processes.length + _startingProcesses.length >= _maxManagedProcesses) {
+      throw StateError('托管进程数量已达到上限（$_maxManagedProcesses），请先停止不再使用的进程');
+    }
     final processId = 'process-${DateTime.now().microsecondsSinceEpoch}';
-    final process = await _connection.execute(
+    final pending = _connection.execute(
       _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
       pty: arguments['pty'] == true,
     );
-    _processes[processId] = _ManagedProcess(process);
-    return {'process_id': processId};
+    _startingProcesses.add(pending);
+    try {
+      final stream = await pending;
+      if (_closing) {
+        stream.close();
+        throw StateError('远程工具正在关闭');
+      }
+      _processes[processId] = _ManagedProcess(stream);
+      return {'process_id': processId};
+    } finally {
+      _startingProcesses.remove(pending);
+    }
   }
 
   Future<Object?> _poll(Map<String, Object?> arguments) async {
@@ -278,7 +319,7 @@ class RemoteAgentTools {
 
   Future<Object?> _stop(Map<String, Object?> arguments) async {
     final process = _process(arguments);
-    process.stop();
+    await process.stop();
     return {
       'process_id': _requiredString(arguments, 'process_id'),
       'stopped': true,
@@ -371,11 +412,40 @@ class RemoteAgentTools {
     return process;
   }
 
-  Future<void> close() async {
-    for (final process in _processes.values) {
-      await process.close();
-    }
+  Future<void> close() {
+    final existing = _closeFuture;
+    if (existing != null) return existing;
+    _closing = true;
+    final future = _closeAll();
+    _closeFuture = future;
+    return future;
+  }
+
+  Future<void> _closeAll() async {
+    final starting = List<Future<SshCommandStream>>.of(_startingProcesses);
+    await Future.wait<void>([
+      for (final pending in starting) _closeStartingProcess(pending),
+    ], eagerError: false);
+    await Future.wait<void>([
+      for (final process in _processes.values) process.close(),
+    ], eagerError: false);
     _processes.clear();
+  }
+
+  Future<void> _closeStartingProcess(Future<SshCommandStream> pending) async {
+    try {
+      final stream = await pending.timeout(_processStartCloseTimeout);
+      stream.close();
+    } on TimeoutException {
+      // The start continuation closes a late stream after it observes
+      // [_closing]. Do not block app shutdown on a stuck channel open.
+    } catch (_) {
+      // A failed channel open has nothing left to close.
+    }
+  }
+
+  void _removeCompletedProcesses() {
+    _processes.removeWhere((_, process) => process.done);
   }
 
   bool get hasRunningProcesses => _processes.values.any((value) => !value.done);
@@ -475,7 +545,6 @@ class ProjectAgentTools {
         },
       ),
       call: _write,
-      writesRemoteState: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -492,7 +561,6 @@ class ProjectAgentTools {
         },
       ),
       call: _replace,
-      writesRemoteState: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -1025,16 +1093,20 @@ class _ManagedProcess {
   }
 
   final SshCommandStream stream;
-  final _TextBuffer _stdout = _TextBuffer();
-  final _TextBuffer _stderr = _TextBuffer();
+  final SshOutputBuffer _stdout = SshOutputBuffer();
+  final SshOutputBuffer _stderr = SshOutputBuffer();
   late final StreamSubscription<String> _stdoutSubscription;
   late final StreamSubscription<String> _stderrSubscription;
   var _changed = Completer<void>();
+  final _finished = Completer<void>();
+  Future<void>? _stopFuture;
+  Future<void>? _closeFuture;
   bool done = false;
 
   void _finish() {
     if (done) return;
     done = true;
+    if (!_finished.isCompleted) _finished.complete();
     _signalChanged();
   }
 
@@ -1053,17 +1125,49 @@ class _ManagedProcess {
     await Future.any<void>([changed, Future<void>.delayed(timeout)]);
   }
 
-  void stop() {
-    stream.stop();
-    stream.close();
+  Future<void> stop() {
+    final existing = _stopFuture;
+    if (existing != null) return existing;
+    final future = _stopAndWait();
+    _stopFuture = future;
+    return future;
   }
 
-  Future<void> close() async {
-    if (!done) stop();
-    _signalChanged();
-    await _stdoutSubscription.cancel();
-    await _stderrSubscription.cancel();
-    stream.close();
+  Future<void> _stopAndWait() async {
+    if (done) return;
+    try {
+      await stream.terminate();
+    } catch (_) {
+      _finish();
+      rethrow;
+    } finally {
+      stream.close();
+    }
+    try {
+      await _finished.future.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      // The channel has already been closed; do not keep app shutdown or a
+      // new task blocked on a server that never completes its stream.
+      _finish();
+    }
+  }
+
+  Future<void> close() {
+    final existing = _closeFuture;
+    if (existing != null) return existing;
+    final future = _close();
+    _closeFuture = future;
+    return future;
+  }
+
+  Future<void> _close() async {
+    try {
+      if (!done) await stop();
+    } finally {
+      stream.close();
+      await _stdoutSubscription.cancel();
+      await _stderrSubscription.cancel();
+    }
   }
 
   bool _hasNewOutput(int? stdoutOffset, int? stderrOffset) {
@@ -1101,17 +1205,5 @@ class _ManagedProcess {
 
 const _maxFileChunkBytes = 1024 * 1024;
 const _maxPollWaitMilliseconds = 30 * 1000;
-
-class _TextBuffer {
-  final StringBuffer _buffer = StringBuffer();
-
-  bool get truncated => false;
-
-  int get length => _buffer.length;
-
-  void add(String value) {
-    _buffer.write(value);
-  }
-
-  String substring(int start) => _buffer.toString().substring(start);
-}
+const _maxManagedProcesses = 32;
+const _processStartCloseTimeout = Duration(seconds: 2);

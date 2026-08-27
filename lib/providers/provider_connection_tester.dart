@@ -7,6 +7,10 @@ import '../agent/ai_client_factory.dart';
 import '../domain/models.dart';
 
 class ProviderConnectionTester {
+  ProviderConnectionTester({this.client});
+
+  final http.Client? client;
+
   Future<void> test(ProviderProfile profile, String secret) async {
     final client = createAiClient(
       wireApi: profile.wireApi,
@@ -14,6 +18,12 @@ class ProviderConnectionTester {
       apiKey: secret,
       model: profile.model,
       reasoningEffort: profile.reasoningEffort,
+      compactThreshold: profile.wireApi == 'responses'
+          ? profile.modelMetadata[profile.model]?.resolvedAutoCompactTokenLimit
+          : null,
+      inputModalities: profile.wireApi == 'responses'
+          ? profile.modelMetadata[profile.model]?.inputModalities
+          : null,
     );
     try {
       // Test the exact protocol selected for the provider. A models endpoint
@@ -31,15 +41,26 @@ class ProviderConnectionTester {
     ProviderProfile profile,
     String secret,
   ) async {
+    final models = await listModelMetadata(profile, secret);
+    return [for (final model in models) model.model];
+  }
+
+  /// Reads model ids and the optional Codex-compatible metadata exposed by a
+  /// provider. Standard OpenAI-compatible model lists usually expose only
+  /// ids, so missing metadata remains unknown instead of being inferred.
+  Future<List<ProviderModelMetadata>> listModelMetadata(
+    ProviderProfile profile,
+    String secret,
+  ) async {
     final baseUrl = profile.baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
     if (baseUrl.isEmpty) {
       throw ArgumentError('Base URL 不能为空');
     }
 
     final uri = Uri.parse('$baseUrl/models');
-    final client = http.Client();
+    final requestClient = client ?? http.Client();
     try {
-      final response = await client
+      final response = await requestClient
           .get(
             uri,
             headers: {
@@ -52,22 +73,39 @@ class ProviderConnectionTester {
         throw StateError('供应商返回 HTTP ${response.statusCode}');
       }
       final decoded = jsonDecode(response.body);
-      if (decoded is! Map || decoded['data'] is! List) {
+      if (decoded is! Map) {
         throw const FormatException('供应商模型列表格式无效');
       }
-      final models = <String>[];
-      for (final item in decoded['data'] as List) {
-        if (item is Map &&
-            item['id'] is String &&
-            (item['id'] as String).isNotEmpty) {
-          models.add(item['id'] as String);
+      // OpenAI-compatible catalogs use `data`; the Codex model catalog uses
+      // `models`. Both contain the same per-model metadata fields.
+      final rawModels = decoded['data'] ?? decoded['models'];
+      if (rawModels is! List) {
+        throw const FormatException('供应商模型列表格式无效');
+      }
+      final models = <ProviderModelMetadata>[];
+      for (final item in rawModels) {
+        final rawModel = item is Map
+            ? item['id'] is String
+                  ? item['id']
+                  : item['slug']
+            : null;
+        if (item is Map && rawModel is String && rawModel.isNotEmpty) {
+          final model = rawModel.trim();
+          if (model.isEmpty) continue;
+          models.add(
+            ProviderModelMetadata.fromMap({
+              ...Map<String, Object?>.from(item),
+              'model': model,
+              'source': 'api',
+            }),
+          );
         }
       }
       return models;
     } on FormatException {
       throw ArgumentError('Base URL 无效');
     } finally {
-      client.close();
+      if (client == null) requestClient.close();
     }
   }
 }

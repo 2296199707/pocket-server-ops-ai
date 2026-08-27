@@ -6,6 +6,22 @@ import 'package:mobile_agent/storage/memory_app_database.dart';
 import 'package:mobile_agent/ui/home_shell.dart';
 
 void main() {
+  testWidgets('settings exposes storage cleanup', (tester) async {
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: SettingsPage(controller: controller)),
+    );
+
+    expect(find.text('清理空间'), findsOneWidget);
+    expect(find.textContaining('未被对话引用'), findsOneWidget);
+  });
+
   testWidgets('developer beta update switch can be changed', (tester) async {
     final controller = AppController(
       database: MemoryAppDatabase(),

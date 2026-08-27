@@ -2,14 +2,20 @@ import 'dart:convert';
 
 /// The result of the independent model that reviews one gated tool call.
 class AgentReviewDecision {
-  const AgentReviewDecision({required this.decision, required this.reason});
+  const AgentReviewDecision({
+    required this.decision,
+    required this.reason,
+    this.failureCode,
+  });
 
   final String decision;
   final String reason;
+  final String? failureCode;
 
   bool get isAllow => decision == 'allow';
   bool get isAskUser => decision == 'ask_user';
   bool get isDeny => decision == 'deny';
+  bool get isFailure => failureCode != null;
 
   factory AgentReviewDecision.allow(String reason) {
     return AgentReviewDecision(decision: 'allow', reason: reason);
@@ -21,6 +27,17 @@ class AgentReviewDecision {
 
   factory AgentReviewDecision.deny(String reason) {
     return AgentReviewDecision(decision: 'deny', reason: reason);
+  }
+
+  factory AgentReviewDecision.failure(
+    String reason, {
+    String code = 'review_failed',
+  }) {
+    return AgentReviewDecision(
+      decision: 'ask_user',
+      reason: reason,
+      failureCode: code,
+    );
   }
 }
 

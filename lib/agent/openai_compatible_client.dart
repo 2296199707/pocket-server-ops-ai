@@ -64,14 +64,15 @@ class OpenAiCompatibleClient implements AiChatClient {
     String reasoningEffort = 'default',
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
-    int compactThreshold = 200000,
+    int? compactThreshold,
     int? maxResponseBytes,
+    List<String>? inputModalities,
   }) {
-    if (compactThreshold < 1000) {
+    if (compactThreshold != null && compactThreshold <= 0) {
       throw ArgumentError.value(
         compactThreshold,
         'compactThreshold',
-        'must be at least 1000 tokens',
+        'must be greater than zero',
       );
     }
     return OpenAiCompatibleClient._(
@@ -83,6 +84,7 @@ class OpenAiCompatibleClient implements AiChatClient {
       client: client ?? http.Client(),
       compactThreshold: compactThreshold,
       maxResponseBytes: maxResponseBytes,
+      inputModalities: inputModalities,
     );
   }
 
@@ -95,6 +97,7 @@ class OpenAiCompatibleClient implements AiChatClient {
     required this._client,
     required this.compactThreshold,
     required this.maxResponseBytes,
+    required this.inputModalities,
   });
 
   final String baseUrl;
@@ -103,8 +106,9 @@ class OpenAiCompatibleClient implements AiChatClient {
   final String reasoningEffort;
   final Duration timeout;
   final http.Client _client;
-  final int compactThreshold;
+  final int? compactThreshold;
   final int? maxResponseBytes;
+  final List<String>? inputModalities;
 
   @override
   Future<AiMessage> complete({
@@ -138,15 +142,17 @@ class OpenAiCompatibleClient implements AiChatClient {
     }
     final requestBody = <String, Object?>{
       'model': model,
-      'input': _responsesInput(messages),
+      'input': _responsesInput(messages, inputModalities: inputModalities),
       'stream': true,
       // Use stateless input-array chaining. This keeps credentials and the
       // transcript on the phone while the provider performs compaction.
       'store': false,
-      'context_management': [
-        {'type': 'compaction', 'compact_threshold': compactThreshold},
-      ],
     };
+    if (compactThreshold != null) {
+      requestBody['context_management'] = [
+        {'type': 'compaction', 'compact_threshold': compactThreshold},
+      ];
+    }
     if (tools.isNotEmpty) {
       requestBody['tools'] = _responsesTools(tools);
     }
@@ -225,6 +231,7 @@ class OpenAiCompatibleClient implements AiChatClient {
     String? responseError;
     Map<String, Object?>? responseUsage;
     var streamDone = false;
+    var completedEvent = false;
     final dataLines = <String>[];
 
     void appendResponseText(String text) {
@@ -350,6 +357,12 @@ class OpenAiCompatibleClient implements AiChatClient {
             ..clear()
             ..addAll(outputItems);
         }
+        if (type == 'response.completed') {
+          // A completed Responses event is the protocol terminal event. Some
+          // compatible providers keep the HTTP connection open afterwards;
+          // waiting for [DONE] or socket close makes the task look stuck.
+          completedEvent = true;
+        }
       }
     }
 
@@ -360,7 +373,7 @@ class OpenAiCompatibleClient implements AiChatClient {
             .timeout(timeout)) {
       if (line.isEmpty) {
         processEvent();
-        if (streamDone) break;
+        if (streamDone || completedEvent) break;
         continue;
       }
       if (line.startsWith('data:')) {
@@ -369,7 +382,7 @@ class OpenAiCompatibleClient implements AiChatClient {
         dataLines.add(data);
       }
     }
-    if (!streamDone) processEvent();
+    if (!streamDone && !completedEvent) processEvent();
 
     if (!responseTerminal) throw const AiResponseIncomplete();
     final status = responseStatus ?? 'completed';
@@ -432,8 +445,13 @@ class OpenAiCompatibleClient implements AiChatClient {
     );
   }
 
-  static List<Map<String, Object?>> _responsesInput(List<AiMessage> messages) {
+  static List<Map<String, Object?>> _responsesInput(
+    List<AiMessage> messages, {
+    List<String>? inputModalities,
+  }) {
     final input = <Map<String, Object?>>[];
+    final supportsImages = _supportsModality(inputModalities, 'image');
+    final supportsAudio = _supportsModality(inputModalities, 'audio');
     for (final message in messages) {
       if (message.role == 'tool') {
         final callId = message.toolCallId;
@@ -466,7 +484,24 @@ class OpenAiCompatibleClient implements AiChatClient {
       }
       for (final attachment in message.attachments) {
         if (attachment.isImage) {
-          content.add({'type': 'input_image', 'image_url': attachment.dataUrl});
+          if (supportsImages) {
+            content.add({
+              'type': 'input_image',
+              'image_url': attachment.dataUrl,
+            });
+          } else {
+            content.add({
+              'type': 'input_text',
+              'text':
+                  '[Image omitted: this model does not support image input.]',
+            });
+          }
+        } else if (attachment.mimeType.toLowerCase().startsWith('audio/') &&
+            !supportsAudio) {
+          content.add({
+            'type': 'input_text',
+            'text': '[Audio omitted: this model does not support audio input.]',
+          });
         } else {
           content.add({
             'type': 'input_file',
@@ -493,7 +528,59 @@ class OpenAiCompatibleClient implements AiChatClient {
         });
       }
     }
-    return input;
+    return _normalizeResponsesInput(input);
+  }
+
+  static bool _supportsModality(List<String>? modalities, String modality) {
+    if (modalities == null || modalities.isEmpty) return true;
+    return modalities.any((value) => value.toLowerCase() == modality);
+  }
+
+  /// Apply the small set of history invariants used by Codex before a
+  /// stateless Responses request. Provider-owned output items, including
+  /// compaction and reasoning items, remain unchanged; only missing or
+  /// impossible function-call pairings are repaired.
+  static List<Map<String, Object?>> _normalizeResponsesInput(
+    List<Map<String, Object?>> input,
+  ) {
+    final functionCallIds = <String>{};
+    final functionOutputIds = <String>{};
+    for (final item in input) {
+      final type = item['type'];
+      final callId = item['call_id'];
+      if (callId is! String || callId.isEmpty) continue;
+      if (type == 'function_call') {
+        functionCallIds.add(callId);
+      } else if (type == 'function_call_output') {
+        functionOutputIds.add(callId);
+      }
+    }
+
+    final normalized = <Map<String, Object?>>[];
+    for (final item in input) {
+      final type = item['type'];
+      final callId = item['call_id'];
+      if (type == 'function_call_output' &&
+          callId is String &&
+          callId.isNotEmpty &&
+          !functionCallIds.contains(callId)) {
+        // A response output left behind after its call was compacted or
+        // rolled back cannot be sent as a standalone paired output.
+        continue;
+      }
+      normalized.add(item);
+      if (type == 'function_call' &&
+          callId is String &&
+          callId.isNotEmpty &&
+          !functionOutputIds.contains(callId)) {
+        normalized.add({
+          'type': 'function_call_output',
+          'call_id': callId,
+          'output': 'aborted',
+        });
+      }
+    }
+    return normalized;
   }
 
   static Map<String, Object?>? _responseUsage(Object? value) {

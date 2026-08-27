@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_agent/agent/context_usage.dart';
 import 'package:mobile_agent/domain/models.dart';
 
 void main() {
@@ -78,5 +79,144 @@ void main() {
     });
 
     expect(task.executionMode, 'confirm');
+  });
+
+  test(
+    'Codex model metadata resolves effective window and auto compaction',
+    () {
+      const metadata = ProviderModelMetadata(
+        model: 'gpt-5.6-luna',
+        contextWindowTokens: 272000,
+      );
+      expect(metadata.resolvedContextWindowTokens, 272000);
+      expect(metadata.effectiveContextWindowTokens, 258400);
+      expect(metadata.resolvedAutoCompactTokenLimit, 244800);
+      expect(
+        const ProviderModelMetadata(
+          model: 'custom',
+          contextWindowTokens: 272000,
+          autoCompactTokenLimit: 250000,
+        ).resolvedAutoCompactTokenLimit,
+        244800,
+      );
+
+      const usage = TaskContextUsage(
+        last: TokenUsageSnapshot(
+          inputTokens: 129200,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 129200,
+        ),
+      );
+      final resolved = usage.withMetadata(
+        metadata,
+        selectedModel: metadata.model,
+      );
+      expect(resolved.rawContextWindow, 272000);
+      expect(resolved.effectiveContextWindow, 258400);
+      expect(resolved.autoCompactTokenLimit, 244800);
+      expect(resolved.remainingPercent, 52);
+    },
+  );
+
+  test('model metadata falls back to max window and keeps explicit policy', () {
+    const fallback = ProviderModelMetadata(
+      model: 'fallback',
+      contextWindowTokens: 0,
+      maxContextWindowTokens: 128000,
+    );
+    expect(fallback.resolvedContextWindowTokens, 128000);
+    expect(fallback.resolvedAutoCompactTokenLimit, 115200);
+
+    const configured = ProviderModelMetadata(
+      model: 'configured',
+      contextWindowTokens: 272000,
+      autoCompactTokenLimit: 200000,
+      compactionMode: 'disabled',
+    );
+    const idsOnly = ProviderModelMetadata(model: 'configured', source: 'api');
+    final merged = configured.mergedWith(idsOnly);
+    expect(merged.contextWindowTokens, 272000);
+    expect(merged.autoCompactTokenLimit, 200000);
+    expect(merged.compactionMode, 'disabled');
+  });
+
+  test('Codex model capabilities round-trip and accept wire field names', () {
+    final metadata = ProviderModelMetadata.fromMap({
+      'model': 'codex-model',
+      'default_reasoning_level': 'high',
+      'supported_reasoning_levels': [
+        {'effort': 'low', 'description': 'Low'},
+        {'effort': 'high', 'description': 'High'},
+      ],
+      'input_modalities': ['text', 'image'],
+      'truncation_policy': {'mode': 'bytes', 'limit': 10000},
+      'shell_type': 'unified_exec',
+      'apply_patch_tool_type': 'freeform',
+      'web_search_tool_type': 'text',
+      'tool_mode': 'direct',
+      'experimental_supported_tools': ['computer', 'example_tool'],
+      'supports_search_tool': true,
+      'supports_image_detail_original': false,
+      'comp_hash': 'comp-123',
+      'source': 'api',
+    });
+
+    expect(metadata.defaultReasoningLevel, 'high');
+    expect(metadata.supportedReasoningLevels?.map((level) => level.effort), [
+      'low',
+      'high',
+    ]);
+    expect(metadata.inputModalities, ['text', 'image']);
+    expect(metadata.truncationPolicy?.mode, 'bytes');
+    expect(metadata.truncationPolicy?.limit, 10000);
+    expect(metadata.experimentalSupportedTools, ['computer', 'example_tool']);
+    expect(metadata.supportsSearchTool, isTrue);
+    expect(metadata.supportsImageDetailOriginal, isFalse);
+    expect(metadata.compHash, 'comp-123');
+
+    final restored = ProviderModelMetadata.fromMap(metadata.toMap());
+    expect(restored.defaultReasoningLevel, 'high');
+    expect(restored.truncationPolicy?.limit, 10000);
+    expect(restored.toolMode, 'direct');
+    expect(restored.compHash, 'comp-123');
+  });
+
+  test('id-only model catalog does not replace manual capabilities', () {
+    const manual = ProviderModelMetadata(
+      model: 'manual-model',
+      defaultReasoningLevel: 'high',
+      supportedReasoningLevels: [
+        ProviderReasoningLevel(effort: 'low'),
+        ProviderReasoningLevel(effort: 'high'),
+      ],
+      inputModalities: ['text', 'image'],
+      truncationPolicy: ProviderTruncationPolicy(mode: 'bytes', limit: 10000),
+      experimentalSupportedTools: ['shell'],
+      supportsSearchTool: true,
+    );
+    const idsOnly = ProviderModelMetadata(model: 'manual-model', source: 'api');
+
+    final merged = manual.mergedWith(idsOnly);
+    expect(merged.defaultReasoningLevel, 'high');
+    expect(merged.inputModalities, ['text', 'image']);
+    expect(merged.truncationPolicy?.limit, 10000);
+    expect(merged.experimentalSupportedTools, ['shell']);
+    expect(merged.supportsSearchTool, isTrue);
+  });
+
+  test('unknown model metadata leaves context percentage unknown', () {
+    const usage = TaskContextUsage(
+      last: TokenUsageSnapshot(
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        reasoningOutputTokens: 0,
+        totalTokens: 2,
+      ),
+    );
+    expect(usage.remainingPercent, isNull);
+    expect(usage.toMap().containsKey('model_context_window'), isFalse);
   });
 }

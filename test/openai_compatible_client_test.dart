@@ -77,6 +77,7 @@ void main() {
       baseUrl: 'https://provider.example/v1',
       apiKey: 'test-key',
       model: 'gpt-5.6-luna',
+      compactThreshold: 200000,
       client: MockClient((incoming) async {
         request = incoming;
         return http.Response(
@@ -128,6 +129,170 @@ void main() {
     expect(response.toolCalls.single.effectiveCallId, 'call_1');
     expect(response.responsesOutputItems.single['type'], 'function_call');
   });
+
+  test(
+    'Responses history completes missing calls and drops orphan outputs',
+    () async {
+      late http.Request request;
+      const Map<String, Object?> call = {
+        'type': 'function_call',
+        'id': 'fc_missing',
+        'call_id': 'call_missing',
+        'name': 'terminal_exec',
+        'arguments': '{}',
+      };
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'test-model',
+        client: MockClient((incoming) async {
+          request = incoming;
+          return http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '已恢复'},
+                  ],
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      await client.complete(
+        messages: [
+          const AiMessage(role: 'assistant', responsesOutputItems: [call]),
+          const AiMessage(
+            role: 'tool',
+            toolCallId: 'orphan-call',
+            content: 'orphan result',
+          ),
+        ],
+        tools: const [],
+      );
+
+      final body = jsonDecode(request.body) as Map<String, Object?>;
+      expect(body['input'], [
+        call,
+        {
+          'type': 'function_call_output',
+          'call_id': 'call_missing',
+          'output': 'aborted',
+        },
+      ]);
+    },
+  );
+
+  test('Responses omits unsupported image and audio attachments when metadata is known', () async {
+    late http.Request request;
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'text-model',
+      inputModalities: const ['text'],
+      client: MockClient((incoming) async {
+        request = incoming;
+        return http.Response(
+          jsonEncode({
+            'status': 'completed',
+            'output': [
+              {
+                'type': 'message',
+                'role': 'assistant',
+                'content': [
+                  {'type': 'output_text', 'text': '收到'},
+                ],
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await client.complete(
+      messages: [
+        AiMessage.user(
+          '检查',
+          attachments: const [
+            AiAttachment(
+              name: 'screen.png',
+              mimeType: 'image/png',
+              base64Data: 'aW1hZ2U=',
+            ),
+            AiAttachment(
+              name: 'voice.wav',
+              mimeType: 'audio/wav',
+              base64Data: 'YXVkaW8=',
+            ),
+          ],
+        ),
+      ],
+      tools: const [],
+    );
+
+    final body = jsonDecode(request.body) as Map<String, Object?>;
+    final input = (body['input'] as List).single as Map;
+    final content = input['content'] as List;
+    expect(content, [
+      {'type': 'input_text', 'text': '检查'},
+      {
+        'type': 'input_text',
+        'text': '[Image omitted: this model does not support image input.]',
+      },
+      {
+        'type': 'input_text',
+        'text': '[Audio omitted: this model does not support audio input.]',
+      },
+    ]);
+  });
+
+  test(
+    'Responses omits compaction management when the model window is unknown',
+    () async {
+      late http.Request request;
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'unknown-model',
+        client: MockClient((incoming) async {
+          request = incoming;
+          return http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '完成'},
+                  ],
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      await client.complete(messages: [AiMessage.user('检查')], tools: const []);
+
+      final body = jsonDecode(request.body) as Map<String, Object?>;
+      expect(body.containsKey('context_management'), isFalse);
+    },
+  );
 
   test(
     'Responses sends the selected official reasoning effort unchanged',
