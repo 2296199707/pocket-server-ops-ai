@@ -205,11 +205,18 @@ class MemoryAppDatabase extends AppDatabase {
     }
     TaskEvent? compactedEvent;
     for (final event in values) {
+      final hasLocalCompaction =
+          event.payload['compaction_mode'] == 'local' &&
+          event.payload['summary'] is String &&
+          (event.payload['summary'] as String).trim().isNotEmpty;
       final items = event.payload['responses_output_items'];
       if (useCompactionBoundary &&
           event.sequence >= providerProjectionSequence &&
-          items is List &&
-          items.any((item) => item is Map && item['type'] == 'compaction')) {
+          (hasLocalCompaction ||
+              (items is List &&
+                  items.any(
+                    (item) => item is Map && item['type'] == 'compaction',
+                  )))) {
         startSequence = event.sequence;
         compactedEvent = event;
       }
@@ -221,6 +228,9 @@ class MemoryAppDatabase extends AppDatabase {
     if (compactedEvent == null ||
         compactedTurnId is! String ||
         compactedTurnId.isEmpty) {
+      return events;
+    }
+    if (compactedEvent.payload['retained_current_turn_user'] == true) {
       return events;
     }
     TaskEvent? precedingUser;

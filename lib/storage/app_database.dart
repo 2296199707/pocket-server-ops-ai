@@ -473,6 +473,12 @@ class AppDatabase {
     );
     final events = rows.map(_eventFromRow).toList(growable: false);
     if (compactedTurnId == null) return events;
+    final compactedEvent = events.firstWhere(
+      (event) => event.sequence == startSequence,
+    );
+    if (compactedEvent.payload['retained_current_turn_user'] == true) {
+      return events;
+    }
 
     // The app durably records the new user message before compaction so a
     // setup failure cannot lose it. Codex compacts before recording that
@@ -661,6 +667,11 @@ class AppDatabase {
   }
 
   static bool _payloadHasCompaction(Map<String, Object?> payload) {
+    if (payload['compaction_mode'] == 'local' &&
+        payload['summary'] is String &&
+        (payload['summary'] as String).trim().isNotEmpty) {
+      return true;
+    }
     final items = payload['responses_output_items'];
     return items is List &&
         items.any((item) => item is Map && item['type'] == 'compaction');

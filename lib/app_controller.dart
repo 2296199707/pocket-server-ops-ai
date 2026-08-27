@@ -1182,7 +1182,7 @@ class AppController extends ChangeNotifier {
           ? client as AiCompactionClient
           : null;
       if (compactionClient == null) {
-        throw StateError('当前 Responses 供应商不支持 /responses/compact');
+        throw StateError('当前 Responses 客户端不支持本地压缩');
       }
       final messages = await _localHistory(
         task.id,
@@ -1198,12 +1198,13 @@ class AppController extends ChangeNotifier {
             message.role == 'tool',
       );
       if (!hasConversation) throw StateError('当前没有可压缩的对话内容');
-      final outputItems = await compactionClient.compact(
+      final summary = await compactionClient.compact(
         messages: messages,
         instructions: systemPrompt,
         cancellation: cancellation.whenCancelled,
       );
-      if (outputItems.isEmpty) throw StateError('Responses 压缩返回了空历史');
+      if (summary.trim().isEmpty) throw StateError('Responses 压缩返回了空摘要');
+      final retainedUserMessages = _codexRetainedUserMessages(messages);
 
       await appendTaskEvent(
         taskId: task.id,
@@ -1213,7 +1214,11 @@ class AppController extends ChangeNotifier {
           'provider_id': provider.id,
           'wire_api': provider.wireApi,
           'model': model,
-          'responses_output_items': outputItems,
+          'compaction_mode': 'local',
+          'summary': summary,
+          'retained_user_messages': _serializeCodexRetainedUserMessages(
+            retainedUserMessages,
+          ),
         },
       );
       _invalidateTaskContextUsage(task.id);
@@ -1569,7 +1574,7 @@ class AppController extends ChangeNotifier {
         useResponsesCompaction: activeProvider.wireApi == 'responses',
         providerId: activeProvider.id,
       );
-      final compactedItems = await _compactResponsesHistoryIfNeeded(
+      final compactedSummary = await _compactResponsesHistoryIfNeeded(
         task: task,
         provider: activeProvider,
         client: client,
@@ -1582,16 +1587,25 @@ class AppController extends ChangeNotifier {
               inputModalities: modelMetadata?.inputModalities,
             ),
       );
-      if (compactedItems != null) {
+      if (compactedSummary != null) {
+        final retainedUserMessages = _codexRetainedUserMessages(
+          initialMessages,
+        );
         initialMessages = [
           AiMessage(role: 'system', content: systemPrompt),
-          AiMessage(role: 'assistant', responsesOutputItems: compactedItems),
+          ...retainedUserMessages,
+          AiMessage.user(compactedSummary),
         ];
         await appendTurnEvent('context.compacted', {
           'provider_id': activeProvider.id,
           'wire_api': activeProvider.wireApi,
           'model': model,
-          'responses_output_items': compactedItems,
+          'compaction_mode': 'local',
+          'summary': compactedSummary,
+          'retained_user_messages': _serializeCodexRetainedUserMessages(
+            retainedUserMessages,
+          ),
+          'retained_current_turn_user': false,
         });
         _invalidateTaskContextUsage(task.id);
       }
@@ -1604,7 +1618,7 @@ class AppController extends ChangeNotifier {
           latestUsage = TokenUsageSnapshot.fromProviderUsage(rawUsage);
           if (latestUsage != null) break;
         }
-        final compactedItems = await _compactResponsesHistoryIfNeeded(
+        final compactedSummary = await _compactResponsesHistoryIfNeeded(
           task: task,
           provider: activeProvider,
           client: client!,
@@ -1618,17 +1632,24 @@ class AppController extends ChangeNotifier {
                 inputModalities: modelMetadata?.inputModalities,
               ),
         );
-        if (compactedItems == null) return null;
+        if (compactedSummary == null) return null;
+        final retainedUserMessages = _codexRetainedUserMessages(messages);
         await appendTurnEvent('context.compacted', {
           'provider_id': activeProvider.id,
           'wire_api': activeProvider.wireApi,
           'model': model,
-          'responses_output_items': compactedItems,
+          'compaction_mode': 'local',
+          'summary': compactedSummary,
+          'retained_user_messages': _serializeCodexRetainedUserMessages(
+            retainedUserMessages,
+          ),
+          'retained_current_turn_user': true,
         });
         _invalidateTaskContextUsage(task.id);
         return [
           AiMessage(role: 'system', content: systemPrompt),
-          AiMessage(role: 'assistant', responsesOutputItems: compactedItems),
+          ...retainedUserMessages,
+          AiMessage.user(compactedSummary),
         ];
       }
 
@@ -2782,7 +2803,7 @@ class AppController extends ChangeNotifier {
     return resolveProviderModelMetadata(provider, model);
   }
 
-  Future<List<Map<String, Object?>>?> _compactResponsesHistoryIfNeeded({
+  Future<String?> _compactResponsesHistoryIfNeeded({
     required Task task,
     required ProviderProfile provider,
     required AiChatClient client,
@@ -2814,17 +2835,17 @@ class AppController extends ChangeNotifier {
         ? client as AiCompactionClient
         : null;
     if (compactionClient == null) {
-      throw StateError('当前 Responses 供应商不支持 /responses/compact');
+      throw StateError('当前 Responses 客户端不支持本地压缩');
     }
-    final outputItems = await compactionClient.compact(
+    final summary = await compactionClient.compact(
       messages: messages,
       instructions: instructions,
       cancellation: cancellation,
     );
-    if (outputItems.isEmpty) {
-      throw StateError('Responses 压缩返回了空历史');
+    if (summary.trim().isEmpty) {
+      throw StateError('Responses 压缩返回了空摘要');
     }
-    return outputItems;
+    return summary;
   }
 
   Future<TaskContextUsage> _loadTaskContextUsage(
@@ -2985,6 +3006,11 @@ class AppController extends ChangeNotifier {
   }
 
   static int _compactionCountInPayload(Map<String, Object?> payload) {
+    if (payload['compaction_mode'] == 'local' &&
+        payload['summary'] is String &&
+        (payload['summary'] as String).trim().isNotEmpty) {
+      return 1;
+    }
     final items = payload['responses_output_items'];
     if (items is! List) return 0;
     return items
@@ -3190,13 +3216,30 @@ class AppController extends ChangeNotifier {
               compactedProviderId != providerId) {
             continue;
           }
-          final compactedItems = _readResponsesOutputItems(
-            event.payload['responses_output_items'],
-          );
-          if (compactedItems.isEmpty) continue;
-          messages.add(
-            AiMessage(role: 'assistant', responsesOutputItems: compactedItems),
-          );
+          if (event.payload['compaction_mode'] == 'local') {
+            messages.addAll(
+              _readCodexRetainedUserMessages(
+                event.payload['retained_user_messages'],
+              ),
+            );
+            final summary = event.payload['summary'];
+            if (summary is String && summary.trim().isNotEmpty) {
+              // Codex's local CompactionSummary is a synthetic user item,
+              // unlike the opaque output item returned by remote compaction.
+              messages.add(AiMessage.user(summary));
+            }
+          } else {
+            final compactedItems = _readResponsesOutputItems(
+              event.payload['responses_output_items'],
+            );
+            if (compactedItems.isEmpty) continue;
+            messages.add(
+              AiMessage(
+                role: 'assistant',
+                responsesOutputItems: compactedItems,
+              ),
+            );
+          }
           assistantIndex = null;
           activeToolCallIds = <String, String>{};
         case 'tool.started':
@@ -3718,6 +3761,99 @@ class AppController extends ChangeNotifier {
       for (final item in value)
         if (item is Map) Map<String, Object?>.from(item),
     ];
+  }
+
+  static const _codexRetainedUserTokenBudget = 20_000;
+
+  // Codex local compaction keeps recent user text alongside its summary. The
+  // text-only representation avoids putting old image/file bytes back into
+  // the compacted event; the model has already seen those inputs while
+  // producing the summary.
+  static List<AiMessage> _codexRetainedUserMessages(List<AiMessage> messages) {
+    var remaining = _codexRetainedUserTokenBudget;
+    final selected = <AiMessage>[];
+    for (final message in messages.reversed) {
+      if (message.role != 'user' ||
+          OpenAiCompatibleClient.isCodexCompactionSummary(message.content)) {
+        continue;
+      }
+      final text = message.content ?? '';
+      if (text.isEmpty) continue;
+      final tokens = _codexApproxTokenCount(text);
+      if (tokens <= remaining) {
+        selected.add(AiMessage.user(text));
+        remaining -= tokens;
+        continue;
+      }
+      if (remaining > 0) {
+        selected.add(AiMessage.user(_truncateCodexUserText(text, remaining)));
+      }
+      break;
+    }
+    return selected.reversed.toList(growable: false);
+  }
+
+  static List<Map<String, Object?>> _serializeCodexRetainedUserMessages(
+    List<AiMessage> messages,
+  ) {
+    return [
+      for (final message in messages)
+        if (message.content != null && message.content!.isNotEmpty)
+          {'text': message.content!},
+    ];
+  }
+
+  static List<AiMessage> _readCodexRetainedUserMessages(Object? value) {
+    if (value is! List) return const [];
+    return [
+      for (final item in value)
+        if (item is Map && item['text'] is String)
+          AiMessage.user(item['text'] as String),
+    ];
+  }
+
+  static int _codexApproxTokenCount(String text) {
+    return (utf8.encode(text).length + 3) ~/ 4;
+  }
+
+  static String _truncateCodexUserText(String text, int tokenBudget) {
+    final maxBytes = tokenBudget * 4;
+    final marker = '\n[older user text truncated]\n';
+    final markerBytes = utf8.encode(marker).length;
+    if (maxBytes <= markerBytes) {
+      return _codexPrefixByBytes(text, maxBytes);
+    }
+    final contentBytes = maxBytes - markerBytes;
+    final prefixBytes = contentBytes ~/ 2;
+    final suffixBytes = contentBytes - prefixBytes;
+    return '${_codexPrefixByBytes(text, prefixBytes)}$marker'
+        '${_codexSuffixByBytes(text, suffixBytes)}';
+  }
+
+  static String _codexPrefixByBytes(String text, int maxBytes) {
+    var used = 0;
+    var end = 0;
+    for (final rune in text.runes) {
+      final character = String.fromCharCode(rune);
+      final bytes = utf8.encode(character).length;
+      if (used + bytes > maxBytes) break;
+      used += bytes;
+      end += character.length;
+    }
+    return text.substring(0, end);
+  }
+
+  static String _codexSuffixByBytes(String text, int maxBytes) {
+    var used = 0;
+    var start = text.length;
+    for (final rune in text.runes.toList().reversed) {
+      final character = String.fromCharCode(rune);
+      final bytes = utf8.encode(character).length;
+      if (used + bytes > maxBytes) break;
+      used += bytes;
+      start -= character.length;
+    }
+    return text.substring(start);
   }
 
   static void _dropHistoryBeforeLatestCompaction(List<AiMessage> messages) {

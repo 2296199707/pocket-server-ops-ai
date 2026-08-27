@@ -58,7 +58,7 @@
 | --- | --- | --- | --- | --- |
 | CTX-01 | `codex-rs/core/src/context_manager/normalize.rs`；`codex-rs/core/src/context_manager/history_tests.rs` | `lib/app_controller.dart` 的 `_localHistory`；`lib/agent/openai_compatible_client.dart` | function call/output 配对、孤立 output、取消后的未完成调用如何进入下一轮 | 已等价（应用支持的 function 工具子集） |
 | CTX-02 | `codex-rs/core/src/context/model_switch_instructions.rs`；`codex-rs/core/src/context/world_state/model.rs` | `lib/app_controller.dart` 的任务配置和 provider projection | 模型切换是否保留线程；切换消息如何加入；哪些状态不能跨供应商复用 | 架构差异（已记录切换消息；opaque 状态按供应商投影清除） |
-| CTX-03 | `codex-rs/core/src/context_manager/normalize.rs`；`codex-rs/core/src/context/compaction_summary.rs` | `lib/storage/app_database.dart`、`lib/storage/memory_app_database.dart`、`lib/app_controller.dart` | compaction 前后的历史起点、opaque item 保留范围、供应商切换后新 compaction 是否重新生效 | 需修复已处理（独立 compact 请求；最新窗口替换；有回归测试） |
+| CTX-03 | `codex-rs/core/src/context_manager/normalize.rs`；`codex-rs/core/src/context/compaction_summary.rs` | `lib/storage/app_database.dart`、`lib/storage/memory_app_database.dart`、`lib/app_controller.dart` | compaction 前后的历史起点、opaque item 保留范围、供应商切换后新 compaction 是否重新生效 | 需修复已处理（自定义供应商走 Codex 本地压缩；本地摘要成为新历史边界；有回归测试） |
 | CTX-04 | `codex-rs/core/src/context/world_state/model.rs`；`codex-rs/core/src/context/world_state/model_tests.rs` | `lib/domain/models.dart`、`lib/agent/context_usage.dart` | `context_window`、`max_context_window`、有效窗口、自动压缩阈值和未知元数据的处理，不得用字符或字节猜 token | 需修复已处理（ID-only Codex 模型 fallback） |
 | CTX-05 | `codex-rs/tui/src/token_usage.rs` | `lib/agent/context_usage.dart`、`lib/ui/chat_page.dart` | 当前轮 usage、累计 usage、压缩后 usage 和 UI 百分比是否混为一谈 | 架构差异（同一计算规则；UI 只显示真实 usage） |
 | CTX-06 | `codex-rs/core/src/context/image_resize_notice.rs`；Responses 输入相关源码 | `lib/storage/attachment_store.dart`、`lib/app_controller.dart`、客户端附件转换 | 图片物理独立存储但仍作为上下文输入；模型不支持媒体时的明确处理；累计图片不会把 Base64 永久放入事件 | 架构差异（物理分离但仍恢复到请求） |
@@ -67,7 +67,7 @@
 
 | ID | Codex 源码和测试 | Mobile 对应位置 | 必须核对的行为 | 状态 |
 | --- | --- | --- | --- | --- |
-| PRO-01 | `codex-rs/codex-api/src/common.rs`；`codex-rs/codex-api/src/endpoint/compact.rs`；`codex-rs/core/src/client.rs` | `lib/agent/openai_compatible_client.dart` | 普通 Responses 与独立 compact 请求的字段边界、历史、工具和 reasoning | 需修复已处理（普通请求不带 context_management） |
+| PRO-01 | `codex-rs/codex-api/src/common.rs`；`codex-rs/codex-api/src/endpoint/compact.rs`；`codex-rs/core/src/client.rs` | `lib/agent/openai_compatible_client.dart` | 普通 Responses 与独立 compact 请求的字段边界、历史、工具和 reasoning | 需修复已处理（按 Codex 供应商能力选择本地压缩；本 APP 的兼容 Responses 使用普通 `/responses`） |
 | PRO-02 | `codex-rs/codex-api/src/sse/responses.rs`；相关 Responses 测试 | `lib/agent/openai_compatible_client.dart` | `response.completed`、incomplete、failed、cancelled、断流和 multiline SSE 的终止与保存顺序 | 已等价（已覆盖关键事件） |
 | PRO-03 | `codex-rs/core/src/responses_retry.rs`；`codex-rs/core/src/responses_retry_tests.rs` | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | 仅模型请求按明确可重试错误退避；取消立即打断；不得重放远程工具副作用 | 架构差异（客户端不自动重试，工具副作用不会重放） |
 | PRO-04 | `codex-rs/core/src/context_manager/normalize.rs`；Responses 请求源码 | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | Responses 与 Chat Completions 是显式协议；不支持时直接报错，不自动 fallback；跨协议历史转换不伪造 opaque 状态 | 已等价 |
@@ -598,39 +598,42 @@
 - 结论：百分比计算与 Codex 源码等价；协议标注和兼容模式 UI 是产品层补充，避免用户把
   Chat Completions 的供应商 usage 误认为 Responses 的自动压缩状态。
 
-### 2026-08-27：CTX-03 / PRO-01 主动压缩入口
+### 2026-08-27：CTX-03 / PRO-01 主动压缩路径复核与修复
 
-- Codex 文档和源码证据：`/responses/compact` 是无状态请求；返回的完整 `output`
-  数组就是下一次 Responses 请求的规范上下文。压缩请求可以使用独立的 `instructions`，
-  但工具定义、`parallel_tool_calls` 和 `reasoning` 不属于该接口的请求字段；不能只保存
-  其中的 compaction item，也不能把返回窗口裁剪成摘要文本。图片等输入在
-  压缩请求中仍按完整上下文参与计算。依据：官方 Compaction 指南以及固定 commit 的
-  `codex-rs/codex-api/src/endpoint/compact.rs`、
-  `codex-rs/core/src/context_manager/compaction_summary.rs`。
-- Mobile 实现：`lib/agent/openai_compatible_client.dart` 的
-  `AiCompactionClient.compact` 只对 Responses 调用 `/responses/compact`，把 system
-  消息转换为独立 `instructions`，不发送普通 Responses 专用的工具和 reasoning 参数，
-  保留完整返回 `output`；
-  `lib/app_controller.dart:1004-1220` 的 `compactTaskContext` 将完整输出写入
-  `context.compacted`，随后刷新上下文统计。压缩期间按任务去重，运行中的任务和设置修改
-  被拒绝；没有可压缩历史、空响应或请求失败时不写入压缩事件。已有的持久 SSH 连接会复用，
-  临时连接在请求结束后释放。
-- UI 入口：`lib/ui/chat_page.dart:544-558,1915-2030` 在上下文详情弹窗提供“立即压缩”；
-  仅 Responses 显示该入口，压缩中禁止重复点击和关闭弹窗，失败直接显示错误。
+- 官方文档说明 Responses 同时存在两种能力：普通 `/responses` 请求可以通过
+  `context_management` 使用服务端压缩，另有独立的 `/responses/compact` 无状态接口。
+  这两者不是每个兼容供应商都实现的同一能力，不能仅凭 `wire_api=responses` 推断。
+- 固定 Codex 源码给出了本项目实际需要的分支依据：
+  `codex-rs/model-provider/src/provider.rs:341-353` 对自定义供应商返回
+  `RemoteCompactionSupport::Unsupported`；`codex-rs/core/src/tasks/compact.rs:60-76`
+  因此构造 `SUMMARIZATION_PROMPT` 作为普通用户输入；
+  `codex-rs/core/src/compact.rs:257-398` 使用普通 Responses 生成摘要，再保留用户消息并把
+  摘要作为 `CompactionSummary` 用户项写回新的历史。只有明确支持远程压缩的供应商才走
+  `/responses/compact`。
+- 同一供应商的受控真实测试结果：普通 `/responses` 返回 `200`；独立
+  `/responses/compact` 返回 `502`；普通 `/responses` 追加 Codex 压缩提示词仍返回 `200`。
+  测试只使用临时密钥，密钥没有写入代码、文档、日志或提交。
+- 旧 Mobile 实现把所有 Responses 供应商固定送到 `/responses/compact`，所以与 Codex
+  使用同一供应商时仍会失败。现已将 `lib/agent/openai_compatible_client.dart` 的
+  `AiCompactionClient.compact` 改为普通 `/responses`：移除 system 输入并以
+  `instructions` 传入，工具列表为空，最后追加固定 Codex `SUMMARIZATION_PROMPT`，只接受
+  模型返回的摘要文本。正常对话仍使用原有 Responses 请求；Chat Completions 路径没有任何
+  自动回退或协议切换。
+- `lib/app_controller.dart` 的手动和自动压缩现在写入
+  `compaction_mode: local` 与 `summary`。摘要按 Codex 的 `CompactionSummary` 作为
+  synthetic user item 恢复，而不是伪造 opaque `compaction` output item；
+  `lib/storage/app_database.dart` 和 `lib/storage/memory_app_database.dart` 都把该事件识别
+  为新的历史边界，仍保留完整显示事件和附件文件。
 - 定向测试：`test/openai_compatible_client_test.dart` 的
-  `Responses compaction uses its dedicated endpoint and replaces history`；
+  `Responses compaction uses the ordinary endpoint and Codex local prompt`、
+  `Responses local compaction surfaces an ordinary request error`；
   `test/app_controller_test.dart` 的
-  `manual Responses compaction stores the canonical output window`、
+  `manual Responses compaction stores the Codex local summary`、
   `failed manual compaction does not write a context event`、
-  `manual compaction is rejected while a task is running`；
-  `test/ui/chat_page_test.dart` 的上下文详情弹窗按钮测试。
-- 结论：`需修复已处理`。主动压缩不改变 Chat Completions 路径，也不把兼容协议伪装成
-  Codex Responses 压缩；Responses 的完整输出窗口和图片输入边界保持不变。当前按钮是
-  用户主动触发，自动压缩仍由 Responses usage、模型窗口元数据和已有 Agent 轮次逻辑决定。
-- 2026-08-27 复核发现旧实现还把 `tools`、`parallel_tool_calls` 和 `reasoning` 放在
-  `/responses/compact` 顶层请求体中；官方接口只接受 `model`、`input` 及可选的
-  `instructions`。现已从 compact 接口、调用链和测试中移除，工具调用与 reasoning 继续作为
-  `input` 内的历史 output item 保留。依据：<https://developers.openai.com/api/reference/resources/responses/methods/compact>
+  `manual compaction is rejected while a task is running`。
+- 结论：`需修复已处理`。本次修复与 Codex 自定义供应商能力判断一致，解决“Codex 可压缩而
+  APP 失败”的真实缺口；压缩仍由同一供应商和同一模型完成，图片/文件仍属于输入上下文，
+  但不把物理附件内容复制进事件。
 - 修复 commit：当前工作树未提交。
 
 ### 2026-08-27：CTX-04 / PRO-05 ID-only 模型元数据缺口
@@ -765,6 +768,28 @@
 - APK 校验：`76,411,879` bytes；SHA-256
   `e970252f071a14b901f5192dc58ab1a6b1127ee2ad4ab0d29ce0751213969c88`。
 - 发布前验证：定向测试 88 项通过；`flutter analyze` 通过；`git diff --check`
+  通过。构建输出和 APK 均位于 `/www` 数据盘。
+
+### 2026-08-27：同一供应商主动压缩复核与修复记录
+
+- 复现结果：使用用户提供的同一兼容供应商和 `gpt-5.6-luna` 发送普通
+  `POST /responses`，流式响应返回 `HTTP 200` 和完整摘要；此前失败请求为
+  `POST /responses/compact`，不能据此判断供应商不支持 Codex 压缩。
+- Codex 源码依据：固定快照中自定义供应商的
+  `RemoteCompactionSupport::Unsupported` 分支调用普通 Responses 请求，追加
+  `SUMMARIZATION_PROMPT`；OpenAI/Azure 能力分支才调用独立 compact endpoint。
+- Mobile 修复：Responses 自动/手动压缩统一走普通 `/responses`；请求继续使用当前供应商、模型、推理强度和 API Key，不切换 Chat Completions。压缩事件保存 Codex 摘要及最近用户文本，重启恢复时不重复注入自动压缩轮次的当前用户。
+- 验证：`openai_compatible_client_test.dart` 与 `app_controller_test.dart` 共 68 项通过；真实普通 Responses 请求 `HTTP 200`；未保存用户提供的临时 API Key。
+
+### 2026-08-27：Beta 1.0.3-beta.14 发布记录
+
+- 发布内容：按 Codex 自定义供应商的本地压缩路径修复主动/自动压缩；同一供应商使用普通
+  `/responses` 生成摘要，并保留最近用户文本作为下一次请求的历史。
+- 版本：`1.0.3-beta.14+23`；GitHub 标签：`v1.0.3-beta.14`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.14-release.apk`。
+- APK 校验：`76,493,799` bytes；SHA-256
+  `19f49626ba3e33c19236180a6907ad0bd93336fbfd07e2ba5c61d63216341afd`。
+- 发布前验证：`flutter test` 全量 156 项通过；`flutter analyze` 通过；`git diff --check`
   通过。构建输出和 APK 均位于 `/www` 数据盘。
 
 ## 9. 发现记录模板

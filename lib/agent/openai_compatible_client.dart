@@ -15,7 +15,13 @@ abstract class AiChatClient {
 }
 
 abstract class AiCompactionClient {
-  Future<List<Map<String, Object?>>> compact({
+  /// Compacts history using the local Codex strategy.
+  ///
+  /// The selected Responses provider receives a normal `/responses` request
+  /// with the Codex compaction prompt appended to the input. The returned
+  /// assistant text is the durable summary; no provider-specific opaque
+  /// compaction item is required.
+  Future<String> compact({
     required List<AiMessage> messages,
     required String instructions,
     Future<void>? cancellation,
@@ -60,25 +66,6 @@ class _ProviderHttpError extends AiProviderHttpException {
   @override
   String toString() =>
       'AI provider returned HTTP $statusCode: ${_limitProviderError(body)}';
-}
-
-class _ProviderCompactionHttpError extends AiProviderHttpException {
-  const _ProviderCompactionHttpError(int statusCode, String body)
-    : super(protocol: 'Responses', statusCode: statusCode, body: body);
-
-  @override
-  String toString() {
-    if (statusCode == 404 || statusCode == 405) {
-      return '当前 Responses 供应商未提供 /responses/compact（HTTP $statusCode）';
-    }
-    if (statusCode >= 500) {
-      return 'Responses 压缩服务暂时不可用（HTTP $statusCode），请稍后重试';
-    }
-    final detail = _limitProviderError(body);
-    return detail.isEmpty
-        ? 'Responses 压缩请求失败（HTTP $statusCode）'
-        : 'Responses 压缩请求失败（HTTP $statusCode）：$detail';
-  }
 }
 
 class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
@@ -160,6 +147,11 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     return total;
   }
 
+  /// Identifies the synthetic user item written by Codex local compaction.
+  static bool isCodexCompactionSummary(String? content) {
+    return content != null && content.startsWith(_codexSummaryPrefix);
+  }
+
   @override
   Future<AiMessage> complete({
     required List<AiMessage> messages,
@@ -181,6 +173,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   Future<AiMessage> _completeResponses({
     required List<AiMessage> messages,
     required List<AiToolDefinition> tools,
+    String? instructions,
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
   }) {
@@ -195,9 +188,12 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       'input': _responsesInput(messages, inputModalities: inputModalities),
       'stream': true,
       // Use stateless input-array chaining. This keeps credentials and the
-      // transcript on the phone while the provider performs compaction.
+      // transcript on the phone while the provider processes the request.
       'store': false,
     };
+    if (instructions != null && instructions.isNotEmpty) {
+      requestBody['instructions'] = instructions;
+    }
     if (tools.isNotEmpty) {
       requestBody['tools'] = _responsesTools(tools);
     }
@@ -214,75 +210,29 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   }
 
   @override
-  Future<List<Map<String, Object?>>> compact({
+  Future<String> compact({
     required List<AiMessage> messages,
     required String instructions,
     Future<void>? cancellation,
   }) async {
-    final request = http.Request(
-      'POST',
-      Uri.parse('$baseUrl/responses/compact'),
-    );
-    request.headers['Accept'] = 'application/json';
-    request.headers['Content-Type'] = 'application/json';
-    if (_apiKey.isNotEmpty) {
-      request.headers['Authorization'] = 'Bearer $_apiKey';
-    }
-
-    // Codex sends base instructions separately to /responses/compact. The
-    // system message is therefore excluded from the stateless input array.
-    final requestBody = <String, Object?>{
-      'model': model,
-      'input': _responsesInput([
+    // Codex uses this ordinary Responses path when the selected provider does
+    // not advertise remote compaction. Keep the system prompt separate and
+    // make the synthetic compaction request the final user input.
+    final response = await _completeResponses(
+      messages: [
         for (final message in messages)
           if (message.role != 'system') message,
-      ], inputModalities: inputModalities),
-      if (instructions.isNotEmpty) 'instructions': instructions,
-    };
-    request.body = jsonEncode(requestBody);
-
-    final response = await _awaitCancellation(
-      _client.send(request).timeout(timeout),
-      cancellation,
+        AiMessage.user(_codexSummarizationPrompt),
+      ],
+      tools: const [],
+      instructions: instructions,
+      cancellation: cancellation,
     );
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final body = await _awaitCancellation(
-        _readLimitedText(
-          response.stream,
-          maxBytes: _maxProviderErrorBytes,
-        ).timeout(timeout),
-        cancellation,
-      );
-      throw _ProviderCompactionHttpError(
-        response.statusCode,
-        _redactProviderSecrets(body, _apiKey),
-      );
+    final summary = response.content?.trim() ?? '';
+    if (summary.isEmpty) {
+      throw const AiResponseInvalid('Responses 本地压缩没有返回摘要文本');
     }
-    final body = await _awaitCancellation(
-      _readLimitedText(
-        response.stream,
-        maxBytes: maxResponseBytes,
-      ).timeout(timeout),
-      cancellation,
-    );
-    final decoded = jsonDecode(body);
-    if (decoded is! Map || decoded['output'] is! List) {
-      throw const AiResponseInvalid(
-        'Responses compact response is missing output',
-      );
-    }
-    final output = decoded['output'] as List;
-    final outputItems = <Map<String, Object?>>[];
-    for (var index = 0; index < output.length; index++) {
-      final item = output[index];
-      if (item is! Map) {
-        throw AiResponseInvalid(
-          'Responses compact output item at index $index is not an object',
-        );
-      }
-      outputItems.add(Map<String, Object?>.from(item));
-    }
-    return outputItems;
+    return '$_codexSummaryPrefix\n$summary';
   }
 
   Future<AiMessage> _send(
@@ -968,6 +918,27 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
 
   void close() => _client.close();
 }
+
+// Kept in sync with the fixed Codex source snapshot used by the project
+// audit: codex-rs/prompts/templates/compact/{prompt,summary_prefix}.md.
+const _codexSummarizationPrompt =
+    'You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff '
+    'summary for another LLM that will resume the task.\n\n'
+    'Include:\n'
+    '- Current progress and key decisions made\n'
+    '- Important context, constraints, or user preferences\n'
+    '- What remains to be done (clear next steps)\n'
+    '- Any critical data, examples, or references needed to continue\n\n'
+    'Be concise, structured, and focused on helping the next LLM seamlessly '
+    'continue the work.';
+
+const _codexSummaryPrefix =
+    'Another language model started to solve this problem and produced a '
+    'summary of its thinking process. You also have access to the state of '
+    'the tools that were used by that language model. Use this to build on '
+    'the work that has already been done and avoid duplicating work. Here is '
+    'the summary produced by the other language model, use the information '
+    'in this summary to assist with your own analysis:';
 
 class _ResponsesToolCallAccumulator {
   String? id;

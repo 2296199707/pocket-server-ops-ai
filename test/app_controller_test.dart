@@ -1320,157 +1320,194 @@ void main() {
     controller.dispose();
   });
 
-  test(
-    'manual Responses compaction stores the canonical output window',
-    () async {
-      final requestBodies = <Map<String, Object?>>[];
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      addTearDown(() => server.close(force: true));
-      const compactedItem = {
-        'type': 'compaction',
-        'id': 'cmp-1',
-        'encrypted_content': 'opaque-summary',
-      };
-      const retainedItem = {
-        'type': 'message',
-        'id': 'retained-1',
-        'role': 'assistant',
-        'content': [
-          {'type': 'output_text', 'text': '保留摘要'},
-        ],
-      };
-      server.listen((request) async {
-        final raw = await utf8.decoder.bind(request).join();
-        requestBodies.add(Map<String, Object?>.from(jsonDecode(raw) as Map));
-        request.response.headers.contentType = ContentType.json;
-        if (request.uri.path.endsWith('/compact')) {
-          request.response.write(
-            jsonEncode({
-              'output': [retainedItem, compactedItem],
-            }),
-          );
-        } else {
-          request.response.write(
-            jsonEncode({
-              'status': 'completed',
-              'output': [
-                {
-                  'type': 'message',
-                  'role': 'assistant',
-                  'content': [
-                    {'type': 'output_text', 'text': '继续完成'},
-                  ],
-                },
-              ],
-            }),
-          );
-        }
-        await request.response.close();
-      });
+  test('manual Responses compaction stores the Codex local summary', () async {
+    final requestBodies = <Map<String, Object?>>[];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      final raw = await utf8.decoder.bind(request).join();
+      requestBodies.add(Map<String, Object?>.from(jsonDecode(raw) as Map));
+      request.response.headers.contentType = ContentType.json;
+      if (requestBodies.length == 1) {
+        request.response.write(
+          jsonEncode({
+            'status': 'completed',
+            'output': [
+              {
+                'type': 'message',
+                'role': 'assistant',
+                'content': [
+                  {'type': 'output_text', 'text': '本地摘要'},
+                ],
+              },
+            ],
+          }),
+        );
+      } else {
+        request.response.write(
+          jsonEncode({
+            'status': 'completed',
+            'output': [
+              {
+                'type': 'message',
+                'role': 'assistant',
+                'content': [
+                  {'type': 'output_text', 'text': '继续完成'},
+                ],
+              },
+            ],
+          }),
+        );
+      }
+      await request.response.close();
+    });
 
-      final database = MemoryAppDatabase();
-      final controller = AppController(
-        database: database,
-        credentials: MemoryCredentialStore(),
-      );
-      addTearDown(controller.dispose);
-      await controller.load();
-      await controller.saveProvider(
-        name: 'Responses 测试供应商',
-        baseUrl: 'http://127.0.0.1:${server.port}/v1',
-        model: 'model-a',
-        secret: 'test-key',
-        isDefault: true,
-      );
-      final provider = controller.providers.single;
-      final task = await controller.createTask(
-        mode: 'chat',
-        providerId: provider.id,
-        title: '主动压缩',
-      );
-      await controller.appendTaskEvent(
-        taskId: task.id,
-        type: 'user.message',
-        payload: const {'text': '第一轮请求'},
-      );
-      await controller.appendTaskEvent(
-        taskId: task.id,
-        type: 'assistant.completed',
-        payload: {
-          'text': '旧回复',
-          'provider_id': provider.id,
-          'wire_api': 'responses',
-          'model': 'model-a',
-          'responses_output_items': const [
-            {
-              'type': 'message',
-              'id': 'old-output',
-              'role': 'assistant',
-              'content': [
-                {'type': 'output_text', 'text': '旧回复'},
-              ],
-            },
-          ],
-          'usage': const {
-            'input_tokens': 80,
-            'output_tokens': 20,
-            'total_tokens': 100,
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: 'Responses 测试供应商',
+      baseUrl: 'http://127.0.0.1:${server.port}/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    final provider = controller.providers.single;
+    final task = await controller.createTask(
+      mode: 'chat',
+      providerId: provider.id,
+      title: '主动压缩',
+    );
+    await controller.appendTaskEvent(
+      taskId: task.id,
+      type: 'user.message',
+      payload: const {'text': '第一轮请求'},
+    );
+    await controller.appendTaskEvent(
+      taskId: task.id,
+      type: 'assistant.completed',
+      payload: {
+        'text': '旧回复',
+        'provider_id': provider.id,
+        'wire_api': 'responses',
+        'model': 'model-a',
+        'responses_output_items': const [
+          {
+            'type': 'message',
+            'id': 'old-output',
+            'role': 'assistant',
+            'content': [
+              {'type': 'output_text', 'text': '旧回复'},
+            ],
           },
+        ],
+        'usage': const {
+          'input_tokens': 80,
+          'output_tokens': 20,
+          'total_tokens': 100,
         },
-      );
+      },
+    );
 
-      final usage = await controller.compactTaskContext(task);
+    final usage = await controller.compactTaskContext(task);
 
-      expect(requestBodies, hasLength(1));
-      final compactBody = requestBodies.single;
-      expect(compactBody['model'], 'model-a');
-      final compactInput = compactBody['input'] as List;
-      expect(
-        compactInput.any((item) => item is Map && item['role'] == 'user'),
-        isTrue,
-      );
-      expect(
-        compactInput.any((item) => item is Map && item['id'] == 'old-output'),
-        isTrue,
-      );
-      final compactEvents = controller
-          .eventsFor(task.id)
-          .where((event) => event.type == 'context.compacted')
-          .toList();
-      expect(compactEvents, hasLength(1));
-      expect(compactEvents.single.payload['source'], 'manual');
-      expect(compactEvents.single.payload['responses_output_items'], [
-        retainedItem,
-        compactedItem,
-      ]);
-      expect(usage.last, isNull);
-      expect(usage.compactionCount, 1);
+    expect(requestBodies, hasLength(1));
+    final compactBody = requestBodies.first;
+    expect(compactBody['model'], 'model-a');
+    expect(compactBody['instructions'], isNotEmpty);
+    expect(compactBody['stream'], isTrue);
+    expect(compactBody['store'], isFalse);
+    expect(compactBody.containsKey('tools'), isFalse);
+    final compactInput = compactBody['input'] as List;
+    expect(
+      compactInput.any((item) => item is Map && item['role'] == 'user'),
+      isTrue,
+    );
+    expect(
+      compactInput.any(
+        (item) =>
+            item is Map &&
+            (item['content'] as List).any(
+              (content) =>
+                  content is Map &&
+                  content['text'] is String &&
+                  (content['text'] as String).contains(
+                    'CONTEXT CHECKPOINT COMPACTION',
+                  ),
+            ),
+      ),
+      isTrue,
+    );
+    final compactEvents = controller
+        .eventsFor(task.id)
+        .where((event) => event.type == 'context.compacted')
+        .toList();
+    expect(compactEvents, hasLength(1));
+    expect(compactEvents.single.payload['source'], 'manual');
+    expect(compactEvents.single.payload['compaction_mode'], 'local');
+    expect(compactEvents.single.payload['summary'], contains('本地摘要'));
+    expect(compactEvents.single.payload['retained_user_messages'], [
+      {'text': '第一轮请求'},
+    ]);
+    expect(
+      compactEvents.single.payload.containsKey('responses_output_items'),
+      isFalse,
+    );
+    expect(usage.last, isNull);
+    expect(usage.compactionCount, 1);
 
-      final result = await controller.runTask(task, prompt: '继续');
-      expect(result.status, 'completed');
-      expect(requestBodies, hasLength(2));
-      final nextInput = requestBodies.last['input'] as List;
-      expect(
-        nextInput.any((item) => item is Map && item['type'] == 'compaction'),
-        isTrue,
-      );
-      expect(
-        nextInput.any((item) => item is Map && item['id'] == 'retained-1'),
-        isTrue,
-      );
-      expect(
-        nextInput.any(
-          (item) =>
-              item is Map &&
-              item['role'] == 'user' &&
-              (item['content'] as List).any(
-                (content) => content is Map && content['text'] == '继续',
-              ),
-        ),
-        isTrue,
-      );
-    },
-  );
+    final result = await controller.runTask(task, prompt: '继续');
+    expect(result.status, 'completed');
+    expect(requestBodies, hasLength(2));
+    final nextInput = requestBodies.last['input'] as List;
+    expect(
+      nextInput.any(
+        (item) =>
+            item is Map &&
+            (item['content'] as List).any(
+              (content) =>
+                  content is Map &&
+                  content['text'] is String &&
+                  (content['text'] as String).contains('本地摘要'),
+            ),
+      ),
+      isTrue,
+    );
+    expect(
+      nextInput.where(
+        (item) =>
+            item is Map &&
+            (item['content'] as List).any(
+              (content) => content is Map && content['text'] == '第一轮请求',
+            ),
+      ),
+      hasLength(1),
+    );
+    expect(
+      nextInput.any(
+        (item) =>
+            item is Map &&
+            (item['content'] as List).any(
+              (content) => content is Map && content['text'] == '继续',
+            ),
+      ),
+      isTrue,
+    );
+    expect(
+      nextInput.any(
+        (item) =>
+            item is Map &&
+            (item['content'] as List).any(
+              (content) => content is Map && content['text'] == '旧回复',
+            ),
+      ),
+      isFalse,
+    );
+  });
 
   test('failed manual compaction does not write a context event', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
