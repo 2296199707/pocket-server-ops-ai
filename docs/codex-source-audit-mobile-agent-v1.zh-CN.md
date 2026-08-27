@@ -643,7 +643,17 @@
 - 已知但不在本轮扩大范围的项目：steer/mailbox 产品差异、交互式终端与 Agent 的人工
   并发、旧版附件迁移失败后的重试、超大附件估算/清理优化。这些没有被记录为新的 P0/P1。
 - 验证封存基线：`flutter analyze` 无问题；`flutter test` 全量 148 项通过；
-  `git diff --check` 通过。当前工作树仍未提交，版本号和 APK 未变更。
+  `git diff --check` 通过。该基线对应 beta.11；beta.12 发布记录见下方。
+
+### 2026-08-27：Beta 1.0.3-beta.12 发布记录
+
+- 发布 commit：`b0c7ff4`（`feat: add manual context compaction`）。
+- 版本：`1.0.3-beta.12+21`；GitHub 标签：`v1.0.3-beta.12`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.12-release.apk`。
+- APK 校验：`76,411,879` bytes；SHA-256
+  `9878437aade984fb61c3df5883169939bcc0b955c59a8dc07663529f5e85ae7b`。
+- 发布前验证：`flutter analyze` 通过；`flutter test` 全量 149 项通过；
+  `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
 
 ## 9. 发现记录模板
 
