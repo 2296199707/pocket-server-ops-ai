@@ -8,6 +8,7 @@ import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
 import 'package:mobile_agent/domain/models.dart';
+import 'package:mobile_agent/platform/android_task_service.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 import 'package:mobile_agent/storage/app_database.dart';
 import 'package:mobile_agent/storage/memory_app_database.dart';
@@ -1085,6 +1086,116 @@ void main() {
           .lastWhere((event) => event.type == 'task.context_changed');
       expect(contextChange.payload['history_boundary'], false);
       expect(contextChange.payload['history_projection'], 'provider');
+    },
+  );
+
+  test(
+    'agent persists its streamed preamble before starting a tool call',
+    () async {
+      final requestBodies = <Map<String, Object?>>[];
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        final raw = await utf8.decoder.bind(request).join();
+        requestBodies.add(Map<String, Object?>.from(jsonDecode(raw) as Map));
+        request.response.headers.contentType = ContentType.json;
+        final first = requestBodies.length == 1;
+        request.response.write(
+          jsonEncode({
+            'status': 'completed',
+            'output': first
+                ? [
+                    {
+                      'type': 'message',
+                      'role': 'assistant',
+                      'content': [
+                        {'type': 'output_text', 'text': '我先检查当前状态，再继续。'},
+                      ],
+                    },
+                    {
+                      'type': 'function_call',
+                      'id': 'item-1',
+                      'call_id': 'call-1',
+                      'name': 'local.list',
+                      'arguments': '{"path":"/tmp"}',
+                    },
+                  ]
+                : [
+                    {
+                      'type': 'message',
+                      'role': 'assistant',
+                      'content': [
+                        {'type': 'output_text', 'text': '检查完成。'},
+                      ],
+                    },
+                  ],
+          }),
+        );
+        await request.response.close();
+      });
+
+      final database = MemoryAppDatabase();
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        taskService: const _NoopAndroidTaskService(),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveProvider(
+        name: 'Agent 流式测试供应商',
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'agent-model',
+        secret: 'test-key',
+        isDefault: true,
+      );
+      final provider = controller.providers.single;
+      final task = await controller.createTask(
+        mode: 'agent',
+        workMode: 'local',
+        providerId: provider.id,
+        executionMode: 'auto',
+        title: 'Agent 流式回复',
+      );
+
+      var sawStreamingText = false;
+      var blankBeforePersistence = false;
+      controller.addListener(() {
+        final streaming = controller.streamingAssistantText(task.id);
+        final preamblePersisted = controller
+            .eventsFor(task.id)
+            .any(
+              (event) =>
+                  event.type == 'assistant.completed' &&
+                  event.payload['text'] == '我先检查当前状态，再继续。',
+            );
+        if (streaming.isNotEmpty) sawStreamingText = true;
+        if (sawStreamingText && streaming.isEmpty && !preamblePersisted) {
+          blankBeforePersistence = true;
+        }
+      });
+
+      final result = await controller.runTask(task, prompt: '检查状态');
+
+      expect(result.status, 'completed', reason: '${result.error}');
+      expect(requestBodies, hasLength(2));
+      expect(
+        jsonEncode(requestBodies.first),
+        contains('Before the first tool call'),
+      );
+      expect(sawStreamingText, isTrue);
+      expect(blankBeforePersistence, isFalse);
+      final events = controller.eventsFor(task.id);
+      final preambleIndex = events.indexWhere(
+        (event) =>
+            event.type == 'assistant.completed' &&
+            event.payload['text'] == '我先检查当前状态，再继续。',
+      );
+      final toolIndex = events.indexWhere(
+        (event) => event.type == 'tool.started',
+      );
+      expect(preambleIndex, greaterThanOrEqualTo(0));
+      expect(toolIndex, greaterThan(preambleIndex));
     },
   );
 
@@ -2782,4 +2893,14 @@ class _FakeConnection implements SshConnection {
   Future<void> close() async {
     closed = true;
   }
+}
+
+class _NoopAndroidTaskService extends AndroidTaskService {
+  const _NoopAndroidTaskService();
+
+  @override
+  Future<void> start(String taskId) async {}
+
+  @override
+  Future<void> stop(String taskId) async {}
 }

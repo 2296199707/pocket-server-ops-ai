@@ -1636,16 +1636,12 @@ class AppController extends ChangeNotifier {
             }
             return Future.value();
           }
-          if (type == 'assistant.completed' ||
+          final clearStreamingAfterPersist =
+              type == 'assistant.completed' ||
               type == 'task.completed' ||
               type == 'task.failed' ||
               type == 'task.cancelled' ||
-              type == 'task.unknown') {
-            if (_taskRunIds[task.id] == turnId) {
-              _streamingAssistantText.remove(task.id);
-              _notify();
-            }
-          }
+              type == 'task.unknown';
           if (type == 'task.unknown') remoteOperationStarted = true;
           eventQueue = eventQueue.then((_) async {
             var eventPayload = payload;
@@ -1670,6 +1666,13 @@ class AppController extends ChangeNotifier {
             await appendTurnEvent(type, eventPayload);
             if (contextUsageEvent != null && _taskRunIds[task.id] == turnId) {
               _taskContextUsages[task.id] = contextUsageEvent.usage;
+            }
+            // Keep streamed commentary visible until its durable event is in
+            // the history. This matters for an assistant message that also
+            // contains tool calls: the tools may start immediately after it.
+            if (clearStreamingAfterPersist && _taskRunIds[task.id] == turnId) {
+              _streamingAssistantText.remove(task.id);
+              _notify();
             }
           });
           return eventQueue;
@@ -2970,11 +2973,16 @@ class AppController extends ChangeNotifier {
     }
     return 'You are an autonomous coding and operations agent running on a '
         'phone. Work until the request is complete: inspect state, make '
-        'changes, and verify the result. ${scopes.join(' ')} Never claim '
-        'success without checking the result. A tool call that writes local '
-        'or server state may require confirmation. Any long-running server '
-        'process still running when this turn ends will be stopped unless it '
-        'was deliberately detached.';
+        'changes, and verify the result. Before the first tool call, send a '
+        'brief user-visible plan describing what you will inspect and do. '
+        'During multi-step work, send concise, factual progress updates when '
+        'a phase finishes or the next action changes; do not stay silent until '
+        'all tool calls finish. These updates are commentary, not the final '
+        'answer. Do not narrate every trivial command. ${scopes.join(' ')} '
+        'Never claim success without checking the result. A tool call that '
+        'writes local or server state may require confirmation. Any '
+        'long-running server process still running when this turn ends will '
+        'be stopped unless it was deliberately detached.';
   }
 
   Future<AgentResult> _runPreviewTask(
