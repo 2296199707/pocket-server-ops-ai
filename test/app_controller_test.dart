@@ -2666,6 +2666,10 @@ void main() {
     expect(dashboard.hostname, 'test-server');
     expect(dashboard.cpuUsage, 5);
     expect(dashboard.statusScriptInstalled, isTrue);
+    expect(
+      controller.cachedServerDashboard(controller.servers.single),
+      same(dashboard),
+    );
     expect(entries.single.name, 'README.md');
     expect(cachedEntries.single.name, 'README.md');
     expect(connector.directoryCalls, ['/srv/app', '/srv/app']);
@@ -2941,6 +2945,7 @@ class _NoopAndroidTaskService extends AndroidTaskService {
   Future<void> start(
     String taskId, {
     bool overlayEnabled = false,
+    double overlayScale = 1.0,
     String? title,
   }) async {}
 

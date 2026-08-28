@@ -67,13 +67,60 @@ class AgentLoop {
     Future<List<AiMessage>?> Function(List<AiMessage> messages)? compactHistory,
     void Function(AgentTool tool)? onRemoteOperationStarted,
     Future<void> Function(String type, Map<String, Object?> payload)? onEvent,
+    bool enableTaskPlanning = false,
   }) async {
     final messages = <AiMessage>[
       ...initialMessages,
       AiMessage.user(prompt, attachments: attachments),
     ];
     final stop = cancellation ?? AgentCancellation();
-    final definitions = tools
+    final availableTools = [
+      ...tools,
+      if (enableTaskPlanning &&
+          !tools.any((tool) => tool.definition.name == 'update_plan'))
+        AgentTool(
+          definition: const AiToolDefinition(
+            name: 'update_plan',
+            description:
+                'Updates the task plan. Provide an optional explanation and '
+                'a list of plan items, each with a step and status. Use '
+                'status pending, in_progress, or completed.',
+            parameters: {
+              'type': 'object',
+              'required': ['plan'],
+              'properties': {
+                'explanation': {'type': 'string'},
+                'plan': {
+                  'type': 'array',
+                  'items': {
+                    'type': 'object',
+                    'required': ['step', 'status'],
+                    'properties': {
+                      'step': {'type': 'string'},
+                      'status': {
+                        'type': 'string',
+                        'enum': ['pending', 'in_progress', 'completed'],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          ),
+          requiresConfirmation: false,
+          call: (arguments) async {
+            final plan = _parseTaskPlan(arguments['plan']);
+            final explanation = arguments['explanation'];
+            await _emit(onEvent, 'task.plan', {
+              'plan': plan,
+              if (explanation is String && explanation.trim().isNotEmpty)
+                'explanation': explanation.trim(),
+            });
+            return const {'updated': true};
+          },
+        ),
+    ];
+    final definitions = availableTools
         .map((tool) => tool.definition)
         .toList(growable: false);
     var steps = 0;
@@ -202,7 +249,11 @@ class AgentLoop {
         'wire_api': _wireApi(client),
         'model': _model(client),
         'tools': assistantForHistory.toolCalls
-            .map((call) => _findTool(call.name)?.definition.name ?? call.name)
+            .map(
+              (call) =>
+                  _findTool(availableTools, call.name)?.definition.name ??
+                  call.name,
+            )
             .toList(),
         'tool_calls': assistantForHistory.toolCalls
             .map(
@@ -272,7 +323,7 @@ class AgentLoop {
             error: StateError(message),
           );
         }
-        final tool = _findTool(call.name);
+        final tool = _findTool(availableTools, call.name);
         if (tool == null) {
           final error = 'Unknown tool: ${call.name}';
           await _emit(onEvent, 'tool.failed', {
@@ -591,14 +642,38 @@ class AgentLoop {
     return AgentResult(status: status, messages: List.unmodifiable(messages));
   }
 
-  AgentTool? _findTool(String name) {
-    for (final tool in tools) {
+  AgentTool? _findTool(List<AgentTool> availableTools, String name) {
+    for (final tool in availableTools) {
       if (tool.definition.name == name ||
           tool.definition.providerName == name) {
         return tool;
       }
     }
     return null;
+  }
+
+  static List<Map<String, Object?>> _parseTaskPlan(Object? value) {
+    if (value is! List) {
+      throw const FormatException('update_plan requires a plan list');
+    }
+    final plan = <Map<String, Object?>>[];
+    for (final item in value) {
+      if (item is! Map) {
+        throw const FormatException('each plan item must be an object');
+      }
+      final step = item['step'];
+      final status = item['status'];
+      if (step is! String || step.trim().isEmpty) {
+        throw const FormatException('each plan item needs a step');
+      }
+      if (status != 'pending' &&
+          status != 'in_progress' &&
+          status != 'completed') {
+        throw const FormatException('plan item status is invalid');
+      }
+      plan.add({'step': step.trim(), 'status': status});
+    }
+    return plan;
   }
 
   static Future<void> _emit(

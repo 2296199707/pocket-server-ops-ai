@@ -1030,6 +1030,28 @@
   65 项全部通过；`git diff --check` 通过；release APK 构建通过。构建输出和 APK 均位于 `/www`
   数据盘。
 
+### 2026-08-28：Agent 任务规划与悬浮计划胶囊
+
+- Codex 源码证据：固定 commit `f5420174dafba153913a3e697f89002c338dfd7e` 的
+  `codex-rs/core/src/tools/handlers/plan_spec.rs` 定义 `update_plan` 工具，参数为可选的
+  `explanation` 和 `plan[{step,status}]`，状态为 `pending`、`in_progress`、`completed`；
+  `codex-rs/core/src/tools/handlers/plan.rs` 将它作为不产生外部副作用的内置控制工具并发出
+  计划更新事件；`codex-rs/app-server/README.md` 将对应客户端事件定义为
+  `turn/plan/updated`，计划可以在执行过程中反复更新。
+- Mobile 原问题：`AgentLoop` 没有暴露 `update_plan`，控制器虽然在 system prompt 中要求
+  前置计划，但模型无法产生结构化计划事件，因此用户只能看到连续工具调用。
+- 修复：`lib/agent/agent_loop.dart` 在非对话 Agent 任务中加入同名本地控制工具，校验
+  Codex 计划格式并发出持久化 `task.plan` 事件；计划工具不请求审批、不连接服务器，普通
+  工具调用和旧历史仍按原流程处理。`lib/app_controller.dart` 将计划事件映射到后台任务进度，
+  并明确要求多步骤任务在第一次项目/服务器工具前调用并持续更新计划。
+- UI：`lib/ui/chat_page.dart` 不把计划渲染成普通消息或命令卡片，而是在状态胶囊右侧显示
+  同尺寸半透明计划胶囊；折叠态显示已完成数、总数和当前步骤，点击后向上展开完整清单，
+  多次计划更新只取最新清单，计划仍保留在事件历史中。
+- 定向测试：`test/agent_loop_test.dart` 验证模型可见 `update_plan`、事件内容和工具结果；
+  `test/ui/chat_page_test.dart` 验证计划胶囊和向上展开；本轮定向测试 35 项通过。
+- 结论：此前属于 `需修复`；现已处理。修复尚未提交，最终提交前需再次运行全量分析、测试和
+  `git diff --check`。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：

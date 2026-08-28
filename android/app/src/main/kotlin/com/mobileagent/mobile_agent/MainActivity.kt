@@ -21,7 +21,11 @@ class MainActivity : FlutterActivity() {
     private val updateChannelName = "mobile_agent/update"
     private val storageRequestCode = 2007
     private val legacyStorageRequestCode = 2008
+    private val notificationRequestCode = 2009
+    private val installRequestCode = 2010
     private var storageResult: MethodChannel.Result? = null
+    private var notificationResult: MethodChannel.Result? = null
+    private var installResult: MethodChannel.Result? = null
 
     override fun provideFlutterEngine(context: Context): FlutterEngine? {
         return FlutterEngineCache.getInstance()
@@ -42,6 +46,10 @@ class MainActivity : FlutterActivity() {
                             .putExtra(
                                 AgentForegroundService.EXTRA_OVERLAY_ENABLED,
                                 call.argument<Boolean>("overlayEnabled") ?: false,
+                            )
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_SCALE,
+                                call.argument<Double>("overlayScale") ?: 1.0,
                             )
                             .putExtra(
                                 AgentForegroundService.EXTRA_TASK_TITLE,
@@ -78,8 +86,21 @@ class MainActivity : FlutterActivity() {
                         sendTaskServiceCommand(intent)
                         result.success(null)
                     }
+                    "setOverlayScale" -> {
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .setAction(AgentForegroundService.ACTION_SET_OVERLAY_SCALE)
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_SCALE,
+                                call.argument<Double>("scale") ?: 1.0,
+                            )
+                        sendTaskServiceCommand(intent)
+                        result.success(null)
+                    }
                     "canDrawOverlays" -> result.success(canDrawOverlays())
                     "requestOverlayPermission" -> requestOverlayPermission(result)
+                    "canPostNotifications" -> result.success(canPostNotifications())
+                    "requestNotificationPermission" ->
+                        requestNotificationPermission(result)
                     else -> result.notImplemented()
                 }
             }
@@ -97,6 +118,8 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "installApk" -> installApk(call.argument<String>("path"), result)
+                    "canInstallPackages" -> result.success(canInstallPackages())
+                    "requestInstallPermission" -> requestInstallPermission(result)
                     else -> result.notImplemented()
                 }
             }
@@ -110,6 +133,53 @@ class MainActivity : FlutterActivity() {
                 PackageManager.PERMISSION_GRANTED
         } else {
             true
+        }
+    }
+
+    private fun canPostNotifications(): Boolean {
+        return Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestNotificationPermission(result: MethodChannel.Result) {
+        if (canPostNotifications()) {
+            result.success(true)
+            return
+        }
+        notificationResult = result
+        requestPermissions(
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            notificationRequestCode,
+        )
+    }
+
+    private fun canInstallPackages(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            packageManager.canRequestPackageInstalls()
+    }
+
+    private fun requestInstallPermission(result: MethodChannel.Result) {
+        if (canInstallPackages()) {
+            result.success(true)
+            return
+        }
+        installResult = result
+        try {
+            startActivityForResult(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName"),
+                ),
+                installRequestCode,
+            )
+        } catch (error: Exception) {
+            installResult = null
+            result.error(
+                "install_permission_unavailable",
+                error.message ?: "无法打开安装权限设置",
+                null,
+            )
         }
     }
 
@@ -142,6 +212,11 @@ class MainActivity : FlutterActivity() {
             storageResult = null
             return
         }
+        if (requestCode == installRequestCode) {
+            installResult?.success(canInstallPackages())
+            installResult = null
+            return
+        }
         super.onActivityResult(requestCode, resultCode, data)
     }
 
@@ -155,6 +230,11 @@ class MainActivity : FlutterActivity() {
             storageResult = null
             return
         }
+        if (requestCode == notificationRequestCode) {
+            notificationResult?.success(canPostNotifications())
+            notificationResult = null
+            return
+        }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
@@ -162,7 +242,10 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                notificationRequestCode,
+            )
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)

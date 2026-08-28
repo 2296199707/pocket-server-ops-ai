@@ -50,7 +50,9 @@ void main() {
     await tester.tap(find.byTooltip('复制整段消息').last);
     expect(copiedText, '这是预览模式的普通对话回复。');
 
-    await tester.tap(find.text('demo-model default'));
+    expect(find.text('demo-model'), findsOneWidget);
+    expect(find.text('default'), findsOneWidget);
+    await tester.tap(find.text('default'));
     await tester.pumpAndSettle();
     expect(find.text('模型与推理强度'), findsOneWidget);
     expect(find.text('demo-coder'), findsNothing);
@@ -296,7 +298,7 @@ void main() {
     expect(settings, greaterThan(provider));
   });
 
-  testWidgets('composer actions stay right aligned on a tablet', (
+  testWidgets('composer keeps attachment on the left and send on the right', (
     tester,
   ) async {
     tester.binding.setSurfaceSize(const Size(800, 800));
@@ -333,8 +335,8 @@ void main() {
 
     final attachment = tester.getTopLeft(find.byTooltip('附件、图片和项目文件'));
     final send = tester.getTopLeft(find.byTooltip('发送'));
-    expect(attachment.dx, greaterThan(400));
-    expect(send.dx, greaterThan(740));
+    expect(attachment.dx, lessThan(100));
+    expect(send.dx, greaterThan(700));
   });
 
   testWidgets('Responses context details expose manual compaction', (
@@ -386,5 +388,70 @@ void main() {
 
     expect(find.text('立即压缩'), findsOneWidget);
     expect(find.byIcon(Icons.compress_outlined), findsOneWidget);
+  });
+
+  testWidgets('task plan is a compact overlay that expands upward', (
+    tester,
+  ) async {
+    tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+      providerUsageClient: ProviderUsageClient(
+        client: MockClient((_) async => http.Response('', 404)),
+      ),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: '计划界面供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    final task = await controller.createTask(
+      mode: 'agent',
+      workMode: 'local',
+      providerId: controller.providers.single.id,
+      title: '计划任务',
+    );
+    await controller.appendTaskEvent(
+      taskId: task.id,
+      type: 'task.plan',
+      payload: {
+        'turn_id': 'turn-plan',
+        'plan': [
+          {'step': '检查项目', 'status': 'in_progress'},
+          {'step': '完成修改', 'status': 'pending'},
+          {'step': '部署应用', 'status': 'pending'},
+        ],
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatPage(
+            controller: controller,
+            taskId: task.id,
+            onTaskActivated: (_) {},
+            onOpenSettings: () {},
+            onConfirmTool: (_, _, _) async => true,
+            onConfirmHostKey: (_, _) async => true,
+            onUserInfoRequest: (_, SshUserInfoRequest _) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('0/3 检查项目'), findsOneWidget);
+    expect(find.text('部署应用'), findsNothing);
+    await tester.tap(find.text('0/3 检查项目'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('部署应用'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

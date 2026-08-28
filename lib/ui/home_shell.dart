@@ -40,7 +40,7 @@ class _HomeShellState extends State<HomeShell> {
   String? _pendingProjectId;
   String _draftWorkMode = 'chat';
   bool _didRestoreLastConversation = false;
-  Future<void> _agentConfirmationQueue = Future<void>.value();
+  final Map<String, Future<void>> _agentConfirmationQueues = {};
 
   Task? get _activeTask {
     final id = _activeTaskId;
@@ -292,6 +292,9 @@ class _HomeShellState extends State<HomeShell> {
                 children: [
                   ExpansionTile(
                     key: const PageStorageKey<String>('other-conversations'),
+                    initiallyExpanded: widget.controller.sidebarSectionExpanded(
+                      'other',
+                    ),
                     dense: true,
                     visualDensity: _compactDrawerDensity,
                     minTileHeight: 36,
@@ -299,6 +302,12 @@ class _HomeShellState extends State<HomeShell> {
                     childrenPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.chat_bubble_outline, size: 18),
                     title: const Text('其他对话', style: _drawerTitleStyle),
+                    onExpansionChanged: (expanded) => unawaited(
+                      widget.controller.setSidebarSectionExpanded(
+                        'other',
+                        expanded,
+                      ),
+                    ),
                     children: [
                       if (otherTasks.isEmpty)
                         const ListTile(
@@ -328,6 +337,8 @@ class _HomeShellState extends State<HomeShell> {
                     for (final project in widget.controller.projects)
                       ExpansionTile(
                         key: PageStorageKey<String>('project-${project.id}'),
+                        initiallyExpanded: widget.controller
+                            .sidebarSectionExpanded('project:${project.id}'),
                         dense: true,
                         visualDensity: _compactDrawerDensity,
                         minTileHeight: 44,
@@ -339,6 +350,12 @@ class _HomeShellState extends State<HomeShell> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: _drawerTitleStyle,
+                        ),
+                        onExpansionChanged: (expanded) => unawaited(
+                          widget.controller.setSidebarSectionExpanded(
+                            'project:${project.id}',
+                            expanded,
+                          ),
                         ),
                         subtitle: Text(
                           project.localPath,
@@ -433,12 +450,22 @@ class _HomeShellState extends State<HomeShell> {
     return ListTile(
       dense: true,
       visualDensity: _compactDrawerDensity,
-      minTileHeight: 32,
-      minVerticalPadding: 0,
+      minTileHeight: 38,
+      minVerticalPadding: 2,
       minLeadingWidth: 18,
       horizontalTitleGap: 4,
       contentPadding: EdgeInsets.only(left: 12 + indent, right: 4),
-      leading: Icon(_statusIcon(task.status), size: 15),
+      leading: Icon(
+        _statusIcon(
+          task.status,
+          isRunning: widget.controller.isTaskRunning(task.id),
+        ),
+        size: 15,
+        color: _statusColor(
+          task.status,
+          widget.controller.isTaskRunning(task.id),
+        ),
+      ),
       title: Text(
         task.title,
         maxLines: 1,
@@ -625,7 +652,7 @@ class _HomeShellState extends State<HomeShell> {
     AgentTool tool,
     Map<String, Object?> arguments,
   ) {
-    return _queueAgentConfirmation(() async {
+    return _queueAgentConfirmation(task.id, () async {
       if (!mounted || !widget.controller.isTaskRunning(task.id)) return false;
       if (tool.definition.name == 'local.request_access') {
         return _requestLocalAccess(task, arguments);
@@ -737,7 +764,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<bool> _confirmAgentHostKey(Task task, SshHostKey key) {
-    return _queueAgentConfirmation(() async {
+    return _queueAgentConfirmation(task.id, () async {
       if (!mounted || !widget.controller.isTaskRunning(task.id)) return false;
       return await showDialog<bool>(
             context: context,
@@ -764,7 +791,7 @@ class _HomeShellState extends State<HomeShell> {
     Task task,
     SshUserInfoRequest request,
   ) {
-    return _queueAgentInteraction<List<String>?>(() async {
+    return _queueAgentInteraction<List<String>?>(task.id, () async {
       if (!mounted || !widget.controller.isTaskRunning(task.id)) return null;
       if (request.prompts.isEmpty) return const <String>[];
       final controllers = [
@@ -837,18 +864,29 @@ class _HomeShellState extends State<HomeShell> {
     }, null);
   }
 
-  Future<bool> _queueAgentConfirmation(Future<bool> Function() confirmation) {
-    return _queueAgentInteraction<bool>(confirmation, false);
+  Future<bool> _queueAgentConfirmation(
+    String taskId,
+    Future<bool> Function() confirmation,
+  ) {
+    return _queueAgentInteraction<bool>(taskId, confirmation, false);
   }
 
   Future<T> _queueAgentInteraction<T>(
+    String taskId,
     Future<T> Function() interaction,
     T fallback,
   ) {
-    final result = _agentConfirmationQueue.then<T>(
-      (_) => mounted ? interaction() : fallback,
+    final previous = _agentConfirmationQueues[taskId] ?? Future<void>.value();
+    final result = previous.then<T>((_) => mounted ? interaction() : fallback);
+    final settled = result.then<void>((_) {}, onError: (_, _) {});
+    _agentConfirmationQueues[taskId] = settled;
+    unawaited(
+      settled.then<void>((_) {
+        if (identical(_agentConfirmationQueues[taskId], settled)) {
+          _agentConfirmationQueues.remove(taskId);
+        }
+      }),
     );
-    _agentConfirmationQueue = result.then<void>((_) {}, onError: (_, _) {});
     return result;
   }
 
@@ -1392,7 +1430,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 6,
+              itemCount: 8,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1410,13 +1448,21 @@ class SettingsPage extends StatelessWidget {
                   return _FloatingCapsuleSettingsTile(controller: controller);
                 }
                 if (index == 2) {
-                  return _VersionSettingsTile(controller: controller);
+                  return _FloatingCapsuleScaleSettingsTile(
+                    controller: controller,
+                  );
                 }
                 if (index == 3) {
-                  return _FontScaleSettingsTile(controller: controller);
+                  return _VersionSettingsTile(controller: controller);
                 }
                 if (index == 4) {
+                  return _FontScaleSettingsTile(controller: controller);
+                }
+                if (index == 5) {
                   return _StorageSettingsTile(controller: controller);
+                }
+                if (index == 6) {
+                  return _PermissionsSettingsTile(controller: controller);
                 }
                 return _DeveloperSettingsTile(controller: controller);
               },
@@ -1448,6 +1494,62 @@ class _FloatingCapsuleSettingsTile extends StatelessWidget {
       subtitle: const Text('在其他 App 上显示当前任务状态，可拖到屏幕边缘半隐藏'),
       value: controller.floatingCapsuleEnabled,
       onChanged: (value) => unawaited(_toggle(context, value)),
+    );
+  }
+}
+
+class _FloatingCapsuleScaleSettingsTile extends StatelessWidget {
+  const _FloatingCapsuleScaleSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final percent = (controller.floatingCapsuleScale * 100).round();
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(child: Icon(Icons.open_in_full_outlined)),
+      title: const Text('悬浮窗大小'),
+      subtitle: Text('$percent% · 调整悬浮胶囊的显示大小'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () async {
+        var value = controller.floatingCapsuleScale;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => StatefulBuilder(
+            builder: (context, setState) => AlertDialog(
+              title: const Text('悬浮窗大小'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('${(value * 100).round()}%'),
+                  Slider(
+                    min: 0.75,
+                    max: 1.4,
+                    divisions: 13,
+                    value: value,
+                    label: '${(value * 100).round()}%',
+                    onChanged: (next) => setState(() => value = next),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    unawaited(controller.setFloatingCapsuleScale(value));
+                    Navigator.pop(context);
+                  },
+                  child: const Text('保存'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1617,6 +1719,167 @@ class _StorageSettingsTile extends StatelessWidget {
   }
 }
 
+class _PermissionsSettingsTile extends StatelessWidget {
+  const _PermissionsSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(child: Icon(Icons.security_outlined)),
+      title: const Text('APP 权限'),
+      subtitle: const Text('管理悬浮窗、通知、文件访问和更新安装权限'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => AppPermissionsPage(controller: controller),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class AppPermissionsPage extends StatefulWidget {
+  const AppPermissionsPage({required this.controller, super.key});
+
+  final AppController controller;
+
+  @override
+  State<AppPermissionsPage> createState() => _AppPermissionsPageState();
+}
+
+class _AppPermissionsPageState extends State<AppPermissionsPage>
+    with WidgetsBindingObserver {
+  bool? _overlayGranted;
+  bool? _notificationGranted;
+  bool? _storageGranted;
+  bool? _installGranted;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final values = await Future.wait<bool>([
+      widget.controller.canDrawOverlays(),
+      widget.controller.canPostNotifications(),
+      widget.controller.hasExternalStorageAccess(),
+      widget.controller.canInstallPackages(),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _overlayGranted = values[0];
+      _notificationGranted = values[1];
+      _storageGranted = values[2];
+      _installGranted = values[3];
+    });
+  }
+
+  Future<void> _request(Future<bool> Function() action) async {
+    await action();
+    await _refresh();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('APP 权限')),
+      body: ListView(
+        children: [
+          _PermissionTile(
+            icon: Icons.picture_in_picture_alt_outlined,
+            title: '悬浮窗',
+            description: '用于在其他 App 前显示任务进度',
+            granted: _overlayGranted,
+            onRequest: () =>
+                _request(widget.controller.requestOverlayPermission),
+          ),
+          const Divider(height: 1),
+          _PermissionTile(
+            icon: Icons.notifications_none_outlined,
+            title: '通知',
+            description: '用于后台任务和文件传输的系统通知',
+            granted: _notificationGranted,
+            onRequest: () =>
+                _request(widget.controller.requestNotificationPermission),
+          ),
+          const Divider(height: 1),
+          _PermissionTile(
+            icon: Icons.folder_open_outlined,
+            title: '文件访问',
+            description: '用于读取和保存手机项目文件',
+            granted: _storageGranted,
+            onRequest: () =>
+                _request(widget.controller.requestExternalStorageAccess),
+          ),
+          const Divider(height: 1),
+          _PermissionTile(
+            icon: Icons.system_update_alt_outlined,
+            title: '安装更新',
+            description: '用于在 APP 内安装已下载的新版本',
+            granted: _installGranted,
+            onRequest: () =>
+                _request(widget.controller.requestInstallPermission),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PermissionTile extends StatelessWidget {
+  const _PermissionTile({
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.granted,
+    required this.onRequest,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final bool? granted;
+  final VoidCallback onRequest;
+
+  @override
+  Widget build(BuildContext context) {
+    final trailing = granted == null
+        ? const SizedBox.square(
+            dimension: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : granted!
+        ? const Icon(Icons.check_circle, color: Colors.green)
+        : TextButton(onPressed: onRequest, child: const Text('去设置'));
+    return ListTile(
+      leading: Icon(icon),
+      title: Text(title),
+      subtitle: Text(description),
+      trailing: trailing,
+      onTap: granted == false ? onRequest : null,
+    );
+  }
+}
+
 String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -1680,10 +1943,17 @@ Future<bool> _confirmHostKey(BuildContext context, SshHostKey key) async {
       false;
 }
 
-IconData _statusIcon(String status) {
+IconData _statusIcon(String status, {bool isRunning = false}) {
+  if (isRunning && status != 'waiting' && status != 'stopping') {
+    return Icons.sync;
+  }
   switch (status) {
+    case 'queued':
+      return Icons.schedule_outlined;
     case 'running':
       return Icons.sync;
+    case 'waiting':
+      return Icons.hourglass_top_outlined;
     case 'completed':
       return Icons.check_circle_outline;
     case 'failed':
@@ -1698,6 +1968,32 @@ IconData _statusIcon(String status) {
       return Icons.help_outline;
     default:
       return Icons.chat_bubble_outline;
+  }
+}
+
+Color _statusColor(String status, bool isRunning) {
+  if (isRunning && status != 'waiting' && status != 'stopping') {
+    return Colors.blue;
+  }
+  switch (status) {
+    case 'queued':
+    case 'waiting':
+      return Colors.orange;
+    case 'completed':
+      return Colors.green;
+    case 'failed':
+      return Colors.red;
+    case 'running':
+      return Colors.blue;
+    case 'stopping':
+      return Colors.orange;
+    case 'cancelled':
+    case 'canceled':
+    case 'interrupted':
+    case 'unknown':
+      return Colors.grey;
+    default:
+      return Colors.grey;
   }
 }
 

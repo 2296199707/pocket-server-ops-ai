@@ -295,10 +295,9 @@ class ChatPageState extends State<ChatPage> {
               if (task != null)
                 Positioned(
                   left: 8,
+                  right: 8,
                   bottom: 8,
-                  child: IgnorePointer(
-                    child: _TaskStatusBar(task: task, events: events),
-                  ),
+                  child: _TaskOverlayRow(task: task, events: events),
                 ),
             ],
           ),
@@ -346,10 +345,10 @@ class ChatPageState extends State<ChatPage> {
                         controller: _prompt,
                         minLines: 2,
                         maxLines: 6,
-                        enabled:
-                            widget.controller.providers.isNotEmpty &&
-                            !running &&
-                            !_sending,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        enableInteractiveSelection: true,
+                        enabled: !_sending,
                         decoration: InputDecoration(
                           hintText: task?.mode == 'agent' || _mode == 'agent'
                               ? '告诉手机 Agent 要完成什么'
@@ -375,110 +374,136 @@ class ChatPageState extends State<ChatPage> {
                           final modelMaxWidth = constraints.maxWidth < 420
                               ? 104.0
                               : 180.0;
-                          return Align(
-                            alignment: Alignment.centerRight,
-                            child: Wrap(
-                              alignment: WrapAlignment.end,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              spacing: 2,
-                              runSpacing: 2,
-                              children: [
-                                IconButton(
-                                  tooltip: '附件、图片和项目文件',
-                                  visualDensity: VisualDensity.compact,
-                                  constraints: const BoxConstraints.tightFor(
-                                    width: 34,
-                                    height: 34,
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                  onPressed:
-                                      widget.controller.providers.isEmpty ||
-                                          running ||
-                                          _sending
-                                      ? null
-                                      : _openComposerActions,
-                                  icon: const Icon(Icons.add_circle_outline),
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              IconButton(
+                                tooltip: '附件、图片和项目文件',
+                                visualDensity: VisualDensity.compact,
+                                constraints: const BoxConstraints.tightFor(
+                                  width: 34,
+                                  height: 34,
                                 ),
-                                ConstrainedBox(
-                                  constraints: BoxConstraints(
-                                    maxWidth: modelMaxWidth,
-                                  ),
-                                  child: _ModelReasoningPill(
-                                    model:
-                                        task?.modelOverride ??
-                                        _modelOverride ??
-                                        provider?.model,
-                                    reasoningEffort:
-                                        task?.reasoningEffortOverride ??
-                                        _reasoningEffortOverride ??
-                                        provider?.reasoningEffort ??
-                                        'default',
-                                    onTap: running || _loadingModels
-                                        ? null
-                                        : _selectModelAndReasoning,
+                                padding: EdgeInsets.zero,
+                                onPressed:
+                                    widget.controller.providers.isEmpty ||
+                                        running ||
+                                        _sending
+                                    ? null
+                                    : _openComposerActions,
+                                icon: const Icon(Icons.add_circle_outline),
+                              ),
+                              const Spacer(),
+                              Flexible(
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Wrap(
+                                    alignment: WrapAlignment.end,
+                                    crossAxisAlignment:
+                                        WrapCrossAlignment.center,
+                                    spacing: 2,
+                                    runSpacing: 2,
+                                    children: [
+                                      ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          maxWidth: modelMaxWidth,
+                                        ),
+                                        child: _ModelReasoningPill(
+                                          model:
+                                              task?.modelOverride ??
+                                              _modelOverride ??
+                                              provider?.model,
+                                          reasoningEffort:
+                                              task?.reasoningEffortOverride ??
+                                              _reasoningEffortOverride ??
+                                              provider?.reasoningEffort ??
+                                              'default',
+                                          onTap: running || _loadingModels
+                                              ? null
+                                              : _selectModelAndReasoning,
+                                        ),
+                                      ),
+                                      _ChatUtilityBar(
+                                        hasProject: activeProject != null,
+                                        hasServers:
+                                            usesServer &&
+                                            widget
+                                                .controller
+                                                .servers
+                                                .isNotEmpty,
+                                        onProjectFiles: activeProject == null
+                                            ? null
+                                            : _openProjectFiles,
+                                        onServerFiles:
+                                            !usesServer ||
+                                                widget
+                                                    .controller
+                                                    .servers
+                                                    .isEmpty
+                                            ? null
+                                            : _openFilesFromTools,
+                                        onTerminal:
+                                            !usesServer ||
+                                                widget
+                                                    .controller
+                                                    .servers
+                                                    .isEmpty
+                                            ? null
+                                            : _openTerminalFromTools,
+                                      ),
+                                      const SizedBox(width: 2),
+                                      if (running)
+                                        IconButton.filled(
+                                          tooltip: '停止',
+                                          visualDensity: VisualDensity.compact,
+                                          constraints:
+                                              const BoxConstraints.tightFor(
+                                                width: 34,
+                                                height: 34,
+                                              ),
+                                          padding: EdgeInsets.zero,
+                                          onPressed: () =>
+                                              widget.controller.stopTask(
+                                                task.id,
+                                                expectedTurnId: widget
+                                                    .controller
+                                                    .activeTurnIdFor(task.id),
+                                              ),
+                                          icon: const Icon(Icons.stop),
+                                        )
+                                      else
+                                        IconButton.filled(
+                                          tooltip: '发送',
+                                          visualDensity: VisualDensity.compact,
+                                          constraints:
+                                              const BoxConstraints.tightFor(
+                                                width: 34,
+                                                height: 34,
+                                              ),
+                                          padding: EdgeInsets.zero,
+                                          onPressed:
+                                              _sending ||
+                                                  widget
+                                                      .controller
+                                                      .providers
+                                                      .isEmpty
+                                              ? null
+                                              : _send,
+                                          icon: _sending
+                                              ? const SizedBox.square(
+                                                  dimension: 18,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                      ),
+                                                )
+                                              : const Icon(Icons.send_outlined),
+                                        ),
+                                    ],
                                   ),
                                 ),
-                                _ChatUtilityBar(
-                                  hasProject: activeProject != null,
-                                  hasServers:
-                                      usesServer &&
-                                      widget.controller.servers.isNotEmpty,
-                                  onProjectFiles: activeProject == null
-                                      ? null
-                                      : _openProjectFiles,
-                                  onServerFiles:
-                                      !usesServer ||
-                                          widget.controller.servers.isEmpty
-                                      ? null
-                                      : _openFilesFromTools,
-                                  onTerminal:
-                                      !usesServer ||
-                                          widget.controller.servers.isEmpty
-                                      ? null
-                                      : _openTerminalFromTools,
-                                ),
-                                const SizedBox(width: 2),
-                                if (running)
-                                  IconButton.filled(
-                                    tooltip: '停止',
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints.tightFor(
-                                      width: 34,
-                                      height: 34,
-                                    ),
-                                    padding: EdgeInsets.zero,
-                                    onPressed: () => widget.controller.stopTask(
-                                      task.id,
-                                      expectedTurnId: widget.controller
-                                          .activeTurnIdFor(task.id),
-                                    ),
-                                    icon: const Icon(Icons.stop),
-                                  )
-                                else
-                                  IconButton.filled(
-                                    tooltip: '发送',
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints.tightFor(
-                                      width: 34,
-                                      height: 34,
-                                    ),
-                                    padding: EdgeInsets.zero,
-                                    onPressed:
-                                        _sending ||
-                                            widget.controller.providers.isEmpty
-                                        ? null
-                                        : _send,
-                                    icon: _sending
-                                        ? const SizedBox.square(
-                                            dimension: 18,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                            ),
-                                          )
-                                        : const Icon(Icons.send_outlined),
-                                  ),
-                              ],
-                            ),
+                              ),
+                            ],
                           );
                         },
                       ),
@@ -1236,6 +1261,12 @@ class ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _send() async {
+    final currentTask = _currentTask;
+    if (_sending ||
+        (currentTask != null &&
+            widget.controller.isTaskRunning(currentTask.id))) {
+      return;
+    }
     final prompt = _prompt.text.trim();
     if (prompt.isEmpty && _pendingAttachments.isEmpty) return;
     final attachments = List<AiAttachment>.unmodifiable(_pendingAttachments);
@@ -1494,6 +1525,7 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
           thumbVisibility: true,
           child: ListView(
             controller: _scroll,
+            shrinkWrap: true,
             children: [
               Text('对话设置', style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 16),
@@ -1533,6 +1565,7 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
                   '${workModeLabel(_workMode)} Agent',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
+                const SizedBox(height: 4),
                 if (workModeUsesServer(_workMode)) ...[
                   DropdownButtonFormField<String>(
                     initialValue: _serverId ?? '',
@@ -1905,18 +1938,24 @@ class _ModelReasoningPill extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
           child: Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: MainAxisSize.max,
             children: [
-              const Icon(Icons.auto_awesome_outlined, size: 13),
-              const SizedBox(width: 3),
-              Flexible(
+              Expanded(
                 child: Text(
-                  '$modelText $effortText',
+                  modelText,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.labelSmall
                       ?.copyWith(fontSize: 10),
                 ),
+              ),
+              const SizedBox(width: 3),
+              Text(
+                effortText,
+                maxLines: 1,
+                softWrap: false,
+                style: Theme.of(context).textTheme.labelSmall
+                    ?.copyWith(fontSize: 10, fontWeight: FontWeight.w600),
               ),
               if (onTap != null) ...[
                 const SizedBox(width: 2),
@@ -2972,7 +3011,10 @@ List<_EventPresentation> _eventPresentations(List<TaskEvent> events) {
       case 'task.completed':
       case 'task.cancel_requested':
         continue;
+      case 'task.plan':
+        continue;
       case 'tool.started':
+        if (_isPlanToolEvent(event)) continue;
         TaskEvent? related;
         for (var next = index + 1; next < events.length; next++) {
           final candidate = events[next];
@@ -2986,6 +3028,9 @@ List<_EventPresentation> _eventPresentations(List<TaskEvent> events) {
         }
         presentations.add(_EventPresentation(event: event, related: related));
       case 'tool.completed':
+        if (_isPlanToolEvent(event)) continue;
+        presentations.add(_EventPresentation(event: event));
+        continue;
       case 'tool.failed':
         presentations.add(_EventPresentation(event: event));
       default:
@@ -3040,6 +3085,291 @@ class _EventTile extends StatelessWidget {
       taskId: event.taskId,
     );
   }
+}
+
+class _TaskOverlayRow extends StatelessWidget {
+  const _TaskOverlayRow({required this.task, required this.events});
+
+  final Task task;
+  final List<TaskEvent> events;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_latestTaskPlan(events) == null) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: IgnorePointer(
+          child: _TaskStatusBar(task: task, events: events),
+        ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final capsuleWidth = ((constraints.maxWidth - 4) / 2)
+            .clamp(1.0, 184.0)
+            .toDouble();
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            SizedBox(
+              width: capsuleWidth,
+              child: IgnorePointer(
+                child: _TaskStatusBar(task: task, events: events),
+              ),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: capsuleWidth,
+              child: _TaskPlanOverlay(events: events),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _TaskPlanOverlay extends StatefulWidget {
+  const _TaskPlanOverlay({required this.events});
+
+  final List<TaskEvent> events;
+
+  @override
+  State<_TaskPlanOverlay> createState() => _TaskPlanOverlayState();
+}
+
+class _TaskPlanOverlayState extends State<_TaskPlanOverlay> {
+  var _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final plan = _latestTaskPlan(widget.events);
+    if (plan == null) return const SizedBox.shrink();
+    final colors = Theme.of(context).colorScheme;
+    final completed = plan.items
+        .where((item) => item.status == 'completed')
+        .length;
+    final current = plan.items.firstWhere(
+      (item) => item.status == 'in_progress',
+      orElse: () => plan.items.firstWhere(
+        (item) => item.status == 'pending',
+        orElse: () => plan.items.last,
+      ),
+    );
+    final summary = '$completed/${plan.items.length} ${current.step}';
+    final label =
+        '当前计划，已完成 $completed 项，共 ${plan.items.length} 项，${current.step}';
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_expanded) _ExpandedTaskPlan(plan: plan, colors: colors),
+        Semantics(
+          button: true,
+          label: label,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: BorderRadius.circular(3),
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 16),
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+                decoration: BoxDecoration(
+                  color: colors.surface.withValues(alpha: 0.24),
+                  border: Border.all(
+                    color: colors.primary.withValues(alpha: 0.35),
+                  ),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.checklist_rounded,
+                        size: 10,
+                        color: colors.primary,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        summary,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: colors.onSurface,
+                          fontSize: 7,
+                          height: 1,
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      Icon(
+                        _expanded
+                            ? Icons.keyboard_arrow_down_rounded
+                            : Icons.keyboard_arrow_up_rounded,
+                        size: 10,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExpandedTaskPlan extends StatelessWidget {
+  const _ExpandedTaskPlan({required this.plan, required this.colors});
+
+  final _TaskPlanSnapshot plan;
+  final ColorScheme colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final explanation = plan.event.payload['explanation'];
+    final maxHeight = (MediaQuery.sizeOf(context).height * 0.32)
+        .clamp(120.0, 230.0)
+        .toDouble();
+    return Container(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      margin: const EdgeInsets.only(bottom: 3),
+      padding: const EdgeInsets.fromLTRB(8, 7, 8, 3),
+      decoration: BoxDecoration(
+        color: colors.surface.withValues(alpha: 0.74),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.8)),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.checklist_rounded, size: 13, color: colors.primary),
+                const SizedBox(width: 4),
+                Text(
+                  '任务规划',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: colors.onSurface,
+                  ),
+                ),
+              ],
+            ),
+            if (explanation is String && explanation.trim().isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                explanation.trim(),
+                style: TextStyle(fontSize: 9, color: colors.onSurfaceVariant),
+              ),
+            ],
+            const SizedBox(height: 5),
+            for (final item in plan.items)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _TaskPlanStatusIcon(status: item.status),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: Text(
+                        item.step,
+                        style: TextStyle(
+                          fontSize: 9,
+                          height: 1.15,
+                          color: item.status == 'completed'
+                              ? colors.onSurfaceVariant
+                              : colors.onSurface,
+                          decoration: item.status == 'completed'
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TaskPlanSnapshot {
+  const _TaskPlanSnapshot({required this.event, required this.items});
+
+  final TaskEvent event;
+  final List<_TaskPlanItem> items;
+}
+
+_TaskPlanSnapshot? _latestTaskPlan(List<TaskEvent> events) {
+  for (final event in events.reversed) {
+    if (event.type != 'task.plan') continue;
+    final items = _readTaskPlanItems(event.payload['plan']);
+    return items.isEmpty ? null : _TaskPlanSnapshot(event: event, items: items);
+  }
+  return null;
+}
+
+class _TaskPlanStatusIcon extends StatelessWidget {
+  const _TaskPlanStatusIcon({required this.status});
+
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final completed = status == 'completed';
+    final active = status == 'in_progress';
+    return Icon(
+      completed
+          ? Icons.check_circle_rounded
+          : active
+          ? Icons.radio_button_checked_rounded
+          : Icons.radio_button_unchecked_rounded,
+      size: 15,
+      color: completed
+          ? Colors.green
+          : active
+          ? colors.primary
+          : colors.onSurfaceVariant,
+    );
+  }
+}
+
+class _TaskPlanItem {
+  const _TaskPlanItem({required this.step, required this.status});
+
+  final String step;
+  final String status;
+}
+
+List<_TaskPlanItem> _readTaskPlanItems(Object? value) {
+  if (value is! List) return const [];
+  final items = <_TaskPlanItem>[];
+  for (final item in value) {
+    if (item is! Map || item['step'] is! String) continue;
+    final status = item['status'];
+    final normalizedStatus = status == 'inProgress' ? 'in_progress' : status;
+    if (normalizedStatus != 'pending' &&
+        normalizedStatus != 'in_progress' &&
+        normalizedStatus != 'completed') {
+      continue;
+    }
+    final step = (item['step'] as String).trim();
+    if (step.isEmpty) continue;
+    items.add(_TaskPlanItem(step: step, status: normalizedStatus as String));
+  }
+  return items;
 }
 
 class _MessageBubble extends StatelessWidget {
@@ -3540,6 +3870,9 @@ String _titleFromPrompt(String prompt) {
 
 bool _isToolEvent(String type) =>
     type == 'tool.started' || type == 'tool.completed' || type == 'tool.failed';
+
+bool _isPlanToolEvent(TaskEvent event) =>
+    _isToolEvent(event.type) && event.payload['name'] == 'update_plan';
 
 bool _isStatusEvent(String type) =>
     type == 'task.cancelled' ||

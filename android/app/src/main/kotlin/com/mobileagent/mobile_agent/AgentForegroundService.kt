@@ -32,11 +32,13 @@ class AgentForegroundService : Service() {
         const val EXTRA_TASK_ID = "taskId"
         const val EXTRA_TASK_TITLE = "taskTitle"
         const val EXTRA_OVERLAY_ENABLED = "overlayEnabled"
+        const val EXTRA_OVERLAY_SCALE = "overlayScale"
         const val EXTRA_PROGRESS_LABEL = "progressLabel"
         const val ACTION_START_TASK = "mobile_agent.action.START_TASK"
         const val ACTION_STOP_TASK = "mobile_agent.action.STOP_TASK"
         const val ACTION_UPDATE_PROGRESS = "mobile_agent.action.UPDATE_PROGRESS"
         const val ACTION_SET_OVERLAY = "mobile_agent.action.SET_OVERLAY"
+        const val ACTION_SET_OVERLAY_SCALE = "mobile_agent.action.SET_OVERLAY_SCALE"
         private const val channelId = "agent_tasks"
         private const val notificationId = 1001
         private const val preferencesName = "agent_background"
@@ -75,6 +77,7 @@ class AgentForegroundService : Service() {
         ).apply { setReferenceCounted(false) }
     }
     private var overlayEnabled = false
+    private var overlayScale = 1.0f
     private var overlayView: LinearLayout? = null
     private var overlayTitleView: TextView? = null
     private var overlayActionView: TextView? = null
@@ -90,6 +93,7 @@ class AgentForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         overlayEnabled = preferences.getBoolean("overlay_enabled", false)
+        overlayScale = preferences.getFloat("overlay_scale", 1.0f).coerceIn(0.75f, 1.4f)
         createNotificationChannel()
         startForeground(notificationId, buildNotification())
     }
@@ -116,6 +120,23 @@ class AgentForegroundService : Service() {
                     .putBoolean("overlay_enabled", overlayEnabled)
                     .apply()
             }
+            ACTION_SET_OVERLAY_SCALE -> {
+                overlayScale = intent.getDoubleExtra(
+                    EXTRA_OVERLAY_SCALE,
+                    overlayScale.toDouble(),
+                ).toFloat().coerceIn(0.75f, 1.4f)
+                preferences.edit().putFloat("overlay_scale", overlayScale).apply()
+                if (overlayView != null) {
+                    val params = overlayParams
+                    if (params != null) {
+                        preferences.edit()
+                            .putInt("overlay_x", params.x)
+                            .putInt("overlay_y", params.y)
+                            .apply()
+                    }
+                    removeOverlay()
+                }
+            }
             ACTION_START_TASK -> {
                 if (intent.hasExtra(EXTRA_OVERLAY_ENABLED)) {
                     overlayEnabled = intent.getBooleanExtra(
@@ -125,6 +146,13 @@ class AgentForegroundService : Service() {
                     preferences.edit()
                         .putBoolean("overlay_enabled", overlayEnabled)
                         .apply()
+                }
+                if (intent.hasExtra(EXTRA_OVERLAY_SCALE)) {
+                    overlayScale = intent.getDoubleExtra(
+                        EXTRA_OVERLAY_SCALE,
+                        overlayScale.toDouble(),
+                    ).toFloat().coerceIn(0.75f, 1.4f)
+                    preferences.edit().putFloat("overlay_scale", overlayScale).apply()
                 }
                 if (taskId != null) {
                     taskIds.add(taskId)
@@ -311,30 +339,30 @@ class AgentForegroundService : Service() {
         }
         val titleView = TextView(this).apply {
             setTextColor(Color.argb(245, 255, 255, 255))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, scaledSp(12f))
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            maxWidth = dp(220)
+            maxWidth = scaledDp(220)
         }
         val actionView = TextView(this).apply {
             setTextColor(Color.argb(232, 214, 226, 255))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, scaledSp(11f))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            maxWidth = dp(220)
+            maxWidth = scaledDp(220)
         }
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.START
-            setPadding(dp(12), dp(8), dp(12), dp(9))
+            setPadding(scaledDp(12), scaledDp(8), scaledDp(12), scaledDp(9))
             background = GradientDrawable().apply {
                 colors = intArrayOf(
                     Color.argb(198, 57, 67, 88),
                     Color.argb(158, 28, 35, 51),
                 )
                 orientation = GradientDrawable.Orientation.TL_BR
-                cornerRadius = dp(18).toFloat()
+                cornerRadius = scaledDp(18).toFloat()
                 setStroke(dp(1), Color.argb(150, 232, 240, 255))
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -353,7 +381,7 @@ class AgentForegroundService : Service() {
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(2) },
+                ).apply { topMargin = scaledDp(2) },
             )
         }
         val params = WindowManager.LayoutParams(
@@ -438,13 +466,15 @@ class AgentForegroundService : Service() {
                     System.currentTimeMillis() - touchStartedAt < 500
                 ) {
                     if (isHalfHidden()) revealOverlay() else openApp()
-                } else {
+                } else if (isTouchingScreenEdge()) {
                     snapToEdge()
+                } else {
+                    keepOverlayVisible()
                 }
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
-                snapToEdge()
+                if (isTouchingScreenEdge()) snapToEdge() else keepOverlayVisible()
                 return true
             }
         }
@@ -474,6 +504,28 @@ class AgentForegroundService : Service() {
             .putInt("overlay_y", params.y)
             .apply()
         updateOverlayLayout(params)
+    }
+
+    private fun keepOverlayVisible() {
+        val view = overlayView ?: return
+        val params = overlayParams ?: return
+        val screenWidth = resources.displayMetrics.widthPixels
+        val width = view.width.takeIf { it > 0 } ?: dp(120)
+        val maximumX = (screenWidth - width - dp(8)).coerceAtLeast(dp(8))
+        params.x = params.x.coerceIn(dp(8), maximumX)
+        params.y = boundedY(params.y, view.height)
+        preferences.edit()
+            .putInt("overlay_x", params.x)
+            .putInt("overlay_y", params.y)
+            .apply()
+        updateOverlayLayout(params)
+    }
+
+    private fun isTouchingScreenEdge(): Boolean {
+        val view = overlayView ?: return false
+        val params = overlayParams ?: return false
+        val screenWidth = resources.displayMetrics.widthPixels
+        return params.x <= 0 || params.x + view.width >= screenWidth
     }
 
     private fun revealOverlay() {
@@ -529,4 +581,12 @@ class AgentForegroundService : Service() {
     private fun dp(value: Int): Int {
         return (value * resources.displayMetrics.density).toInt()
     }
+
+    private fun scaledDp(value: Int): Int {
+        return (value * overlayScale * resources.displayMetrics.density)
+            .toInt()
+            .coerceAtLeast(1)
+    }
+
+    private fun scaledSp(value: Float): Float = value * overlayScale
 }

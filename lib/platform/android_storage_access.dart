@@ -26,13 +26,29 @@ class AndroidStorageAccess {
 
   static Future<bool> ensureForPath(String path) async {
     if (!needsSharedStorageAccess(path)) return true;
-    final hasAccess = await _channel.invokeMethod<bool>(
-      'hasExternalStorageAccess',
-    );
-    if (hasAccess == true) return true;
-    final granted = await _channel.invokeMethod<bool>(
-      'requestExternalStorageAccess',
-    );
-    return granted == true;
+    if (await hasAccess()) return true;
+    return requestAccess();
+  }
+
+  static Future<bool> hasAccess() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('hasExternalStorageAccess') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  static Future<bool> requestAccess() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>(
+            'requestExternalStorageAccess',
+          ) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
   }
 }

@@ -10,6 +10,7 @@ class AndroidTaskService {
   Future<void> start(
     String taskId, {
     bool overlayEnabled = false,
+    double overlayScale = 1.0,
     String? title,
   }) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
@@ -19,6 +20,7 @@ class AndroidTaskService {
       await _channel.invokeMethod<void>('start', {
         'taskId': taskId,
         'overlayEnabled': overlayEnabled,
+        'overlayScale': overlayScale,
         if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
       });
     } catch (_) {
@@ -53,6 +55,17 @@ class AndroidTaskService {
     }
   }
 
+  Future<void> setOverlayScale(double scale) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('setOverlayScale', {'scale': scale});
+    } catch (_) {
+      // The task can continue with the previous overlay size.
+    }
+  }
+
   Future<bool> canDrawOverlays() async {
     if (defaultTargetPlatform != TargetPlatform.android) {
       return true;
@@ -70,6 +83,31 @@ class AndroidTaskService {
     }
     try {
       return await _channel.invokeMethod<bool>('requestOverlayPermission') ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> canPostNotifications() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('canPostNotifications') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestNotificationPermission() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      return await _channel.invokeMethod<bool>(
+            'requestNotificationPermission',
+          ) ??
           false;
     } catch (_) {
       return false;

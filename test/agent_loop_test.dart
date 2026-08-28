@@ -45,6 +45,36 @@ void main() {
     expect(events, ['第一段', '第二段']);
   });
 
+  test(
+    'agent planning uses Codex update_plan and emits a plan event',
+    () async {
+      final client = _PlanningClient();
+      final planEvents = <Map<String, Object?>>[];
+      final result = await AgentLoop(client: client, tools: const []).run(
+        prompt: '完成一个多步骤任务',
+        enableTaskPlanning: true,
+        executionMode: 'auto',
+        onEvent: (type, payload) {
+          if (type == 'task.plan') planEvents.add(payload);
+          return Future.value();
+        },
+      );
+
+      expect(result.status, 'completed');
+      expect(client.visibleTools, contains('update_plan'));
+      expect(planEvents, [
+        {
+          'plan': [
+            {'step': '检查项目', 'status': 'in_progress'},
+            {'step': '完成修改', 'status': 'pending'},
+          ],
+          'explanation': '先检查再修改',
+        },
+      ]);
+      expect(client.messages.last.content, contains('updated'));
+    },
+  );
+
   test('step limit reports an uncertain result after tool execution', () async {
     final events = <String>[];
     final result =
@@ -420,27 +450,53 @@ void main() {
     },
   );
 
-  test(
-    'remote writes for one server serialize across working directories',
-    () async {
-      final queue = RemoteWriteQueue();
-      final firstFinished = Completer<void>();
-      var secondStarted = false;
+  test('remote writes for the same workspace stay serialized', () async {
+    final queue = RemoteWriteQueue();
+    final firstFinished = Completer<void>();
+    var secondStarted = false;
 
-      final first = queue.run<void>('server-1', () async {
-        await firstFinished.future;
-      }, cancellation: AgentCancellation());
-      final second = queue.run<void>('server-1', () async {
+    final first = queue.run<void>('server-1\u0000directory:/srv/app', () async {
+      await firstFinished.future;
+    }, cancellation: AgentCancellation());
+    final second = queue.run<void>(
+      'server-1\u0000directory:/srv/app',
+      () async {
         secondStarted = true;
-      }, cancellation: AgentCancellation());
+      },
+      cancellation: AgentCancellation(),
+    );
 
-      await Future<void>.delayed(Duration.zero);
-      expect(secondStarted, isFalse);
-      firstFinished.complete();
-      await Future.wait([first, second]);
-      expect(secondStarted, isTrue);
-    },
-  );
+    await Future<void>.delayed(Duration.zero);
+    expect(secondStarted, isFalse);
+    firstFinished.complete();
+    await Future.wait([first, second]);
+    expect(secondStarted, isTrue);
+  });
+
+  test('remote writes for different workspaces run concurrently', () async {
+    final queue = RemoteWriteQueue();
+    final firstStarted = Completer<void>();
+    final firstFinished = Completer<void>();
+    var secondStarted = false;
+
+    final first = queue.run<void>('server-1\u0000directory:/srv/app', () async {
+      firstStarted.complete();
+      await firstFinished.future;
+    }, cancellation: AgentCancellation());
+    await firstStarted.future;
+    final second = queue.run<void>(
+      'server-1\u0000directory:/srv/other',
+      () async {
+        secondStarted = true;
+      },
+      cancellation: AgentCancellation(),
+    );
+
+    await second;
+    expect(secondStarted, isTrue);
+    firstFinished.complete();
+    await first;
+  });
 
   test('unknown execution modes fall back to confirmation', () async {
     var confirmations = 0;
@@ -832,6 +888,40 @@ class _DeltaClient implements AiChatClient {
     onContentDelta?.call('第一段');
     onContentDelta?.call('第二段');
     return const AiMessage(role: 'assistant', content: '第一段第二段');
+  }
+}
+
+class _PlanningClient implements AiChatClient {
+  var calls = 0;
+  List<String> visibleTools = const [];
+  List<AiMessage> messages = const [];
+
+  @override
+  Future<AiMessage> complete({
+    required List<AiMessage> messages,
+    required List<AiToolDefinition> tools,
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    this.messages = List.unmodifiable(messages);
+    visibleTools = [for (final tool in tools) tool.name];
+    if (calls++ == 0) {
+      return const AiMessage(
+        role: 'assistant',
+        toolCalls: [
+          AiToolCall(
+            id: 'plan-call',
+            callId: 'plan-call',
+            name: 'update_plan',
+            arguments:
+                '{"plan":[{"step":"检查项目","status":"in_progress"},'
+                '{"step":"完成修改","status":"pending"}],'
+                '"explanation":"先检查再修改"}',
+          ),
+        ],
+      );
+    }
+    return const AiMessage(role: 'assistant', content: 'done');
   }
 }
 

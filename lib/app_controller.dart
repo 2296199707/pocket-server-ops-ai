@@ -25,6 +25,7 @@ import 'local/project_files.dart';
 import 'local/local_file_access.dart';
 import 'platform/android_task_service.dart';
 import 'platform/android_storage_access.dart';
+import 'platform/app_update_installer.dart';
 import 'providers/provider_connection_tester.dart';
 import 'providers/image_generation_client.dart';
 import 'providers/provider_usage_client.dart';
@@ -74,6 +75,7 @@ class AppController extends ChangeNotifier {
   final ProviderUsageClient _providerUsageClient;
   final SshConnector _sshConnector;
   final AndroidTaskService _taskService;
+  final AppUpdateInstaller _updateInstaller = const AppUpdateInstaller();
   final AttachmentStore _attachmentStore;
   final bool previewMode;
   final ProjectFileStore _projectFiles = const ProjectFileStore();
@@ -106,6 +108,8 @@ class AppController extends ChangeNotifier {
   final Map<String, int> _taskContextGenerations = {};
   final Map<String, String> _taskProgressLabels = {};
   final Set<String> _foregroundServiceTasks = {};
+  final Map<String, ServerDashboard> _dashboardCache = {};
+  final Map<String, bool> _sidebarExpanded = {};
   Future<void> _loadTail = Future<void>.value();
   int _idSequence = 0;
 
@@ -117,6 +121,7 @@ class AppController extends ChangeNotifier {
   bool _agentAutoExecute = false;
   bool _betaUpdatesEnabled = false;
   bool _floatingCapsuleEnabled = false;
+  double _floatingCapsuleScale = 1.0;
   String? _imageProviderId;
   String? _lastDashboardServerId;
   String? _lastConversationTaskId;
@@ -132,12 +137,19 @@ class AppController extends ChangeNotifier {
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
   bool get floatingCapsuleEnabled => _floatingCapsuleEnabled;
+  double get floatingCapsuleScale => _floatingCapsuleScale;
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
   String? get imageProviderId => _imageProviderId;
   bool get isLoading => _loading;
   String? get loadError => _loadError;
+
+  ServerDashboard? cachedServerDashboard(ServerProfile profile) =>
+      _dashboardCache[_dashboardCacheKey(profile)];
+
+  bool sidebarSectionExpanded(String sectionId) =>
+      _sidebarExpanded[sectionId] ?? true;
 
   ProviderUsageSnapshot? providerUsageFor(String providerId) =>
       _providerUsages[providerId];
@@ -322,6 +334,21 @@ class AppController extends ChangeNotifier {
         await _database.readSetting(_betaUpdatesSetting) == 'true';
     _floatingCapsuleEnabled =
         await _database.readSetting(_floatingCapsuleSetting) == 'true';
+    _floatingCapsuleScale =
+        (double.tryParse(
+                  await _database.readSetting(_floatingCapsuleScaleSetting) ??
+                      '',
+                ) ??
+                1.0)
+            .clamp(0.75, 1.4)
+            .toDouble();
+    _sidebarExpanded['other'] = await _readSidebarExpandedSetting('other');
+    for (final project in _projects) {
+      final sectionId = 'project:${project.id}';
+      _sidebarExpanded[sectionId] = await _readSidebarExpandedSetting(
+        sectionId,
+      );
+    }
     final savedImageProviderId = await _database.readSetting(
       _imageProviderSetting,
     );
@@ -661,6 +688,54 @@ class AppController extends ChangeNotifier {
     _notify();
     return true;
   }
+
+  Future<void> setFloatingCapsuleScale(double scale) async {
+    final value = scale.clamp(0.75, 1.4).toDouble();
+    await _database.writeSetting(_floatingCapsuleScaleSetting, '$value');
+    _floatingCapsuleScale = value;
+    if (_runningTasks.isNotEmpty) {
+      await _taskService.setOverlayScale(value);
+    }
+    _notify();
+  }
+
+  Future<void> setSidebarSectionExpanded(
+    String sectionId,
+    bool expanded,
+  ) async {
+    _sidebarExpanded[sectionId] = expanded;
+    await _database.writeSetting(
+      _sidebarExpandedSettingKey(sectionId),
+      expanded ? 'true' : 'false',
+    );
+  }
+
+  Future<bool> _readSidebarExpandedSetting(String sectionId) async {
+    final value = await _database.readSetting(
+      _sidebarExpandedSettingKey(sectionId),
+    );
+    return value == null || value == 'true';
+  }
+
+  Future<bool> canDrawOverlays() => _taskService.canDrawOverlays();
+
+  Future<bool> requestOverlayPermission() =>
+      _taskService.requestOverlayPermission();
+
+  Future<bool> canPostNotifications() => _taskService.canPostNotifications();
+
+  Future<bool> requestNotificationPermission() =>
+      _taskService.requestNotificationPermission();
+
+  Future<bool> hasExternalStorageAccess() => AndroidStorageAccess.hasAccess();
+
+  Future<bool> requestExternalStorageAccess() =>
+      AndroidStorageAccess.requestAccess();
+
+  Future<bool> canInstallPackages() => _updateInstaller.canInstallPackages();
+
+  Future<bool> requestInstallPermission() =>
+      _updateInstaller.requestInstallPermission();
 
   Future<void> setFontScale(double scale) async {
     final value = scale.clamp(0.85, 1.15).toDouble();
@@ -1187,7 +1262,7 @@ class AppController extends ChangeNotifier {
           tools.addAll(
             _serializeRemoteWrites(
               remoteTools.tools,
-              server.id,
+              _remoteWriteLeaseKey(task, server.id, workingDirectory),
               cancellation: cancellation,
             ),
           );
@@ -1490,6 +1565,7 @@ class AppController extends ChangeNotifier {
         task.id,
         title: task.title,
         overlayEnabled: _floatingCapsuleEnabled,
+        overlayScale: _floatingCapsuleScale,
       );
       serviceStarted = true;
       _foregroundServiceTasks.add(task.id);
@@ -1572,7 +1648,7 @@ class AppController extends ChangeNotifier {
           tools.addAll(
             _serializeRemoteWrites(
               remoteTools.tools,
-              server.id,
+              _remoteWriteLeaseKey(task, server.id, workingDirectory),
               cancellation: cancellation,
             ),
           );
@@ -1648,6 +1724,7 @@ class AppController extends ChangeNotifier {
         attachments: requestAttachments,
         initialMessages: initialMessages,
         executionMode: task.executionMode,
+        enableTaskPlanning: task.effectiveWorkMode != 'chat',
         cancellation: cancellation,
         toolOutputLimit: truncationPolicy.limit,
         toolOutputLimitInTokens: truncationPolicy.mode == 'tokens',
@@ -1827,6 +1904,21 @@ class AppController extends ChangeNotifier {
     ];
   }
 
+  String _remoteWriteLeaseKey(
+    Task task,
+    String serverId,
+    String? workingDirectory,
+  ) {
+    final projectId = task.projectId?.trim();
+    final directory = workingDirectory?.trim() ?? '';
+    return [
+      'server',
+      serverId,
+      if (projectId != null && projectId.isNotEmpty) 'project:$projectId',
+      'directory:$directory',
+    ].join('\u0000');
+  }
+
   void _publishTaskProgress(String taskId, String label) {
     if (!_foregroundServiceTasks.contains(taskId) ||
         label.isEmpty ||
@@ -1868,6 +1960,8 @@ class AppController extends ChangeNotifier {
         return '继续处理';
       case 'task.context_changed':
         return '更新上下文';
+      case 'task.plan':
+        return '更新计划';
       case 'task.started':
         return '分析中';
       case 'task.completed':
@@ -2317,6 +2411,7 @@ class AppController extends ChangeNotifier {
         downloadId,
         title: '文件下载',
         overlayEnabled: _floatingCapsuleEnabled,
+        overlayScale: _floatingCapsuleScale,
       );
       serviceStarted = true;
       publishProgress(0, null);
@@ -2404,6 +2499,7 @@ class AppController extends ChangeNotifier {
           uploadId,
           title: '文件上传',
           overlayEnabled: _floatingCapsuleEnabled,
+          overlayScale: _floatingCapsuleScale,
         );
         serviceStarted = true;
         final uploaded = await const ResumableFileUploader().upload(
@@ -2494,7 +2590,7 @@ class AppController extends ChangeNotifier {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
   }) async {
     if (previewMode) {
-      return const ServerDashboard(
+      const dashboard = ServerDashboard(
         hostname: 'preview-server',
         os: 'Preview Linux',
         kernel: 'Linux 6.x',
@@ -2528,14 +2624,18 @@ class AppController extends ChangeNotifier {
         ),
         processCount: 42,
       );
+      _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
+      return dashboard;
     }
-    return _withServerConnection(profile, (connection) async {
+    final dashboard = await _withServerConnection(profile, (connection) async {
       final result = await connection.run(statusProbeCommand);
       if (result.exitCode != 0) {
         throw StateError('服务器状态脚本执行失败');
       }
       return _parseDashboard(result.stdout);
     }, onFirstHostKey: onFirstHostKey);
+    _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
+    return dashboard;
   }
 
   Future<void> installServerStatusScript(
@@ -3284,8 +3384,11 @@ class AppController extends ChangeNotifier {
     }
     return 'You are an autonomous coding and operations agent running on a '
         'phone. Work until the request is complete: inspect state, make '
-        'changes, and verify the result. Before the first tool call, send a '
-        'brief user-visible plan describing what you will inspect and do. '
+        'changes, and verify the result. Before the first tool call, for any '
+        'task requiring multiple actions, call the update_plan tool with a '
+        'short list of meaningful steps before the first project or server '
+        'tool call, then update the statuses as work progresses. The plan is '
+        'shown to the user, so do not put it only in prose. '
         'During multi-step work, send concise, factual progress updates when '
         'a phase finishes or the next action changes; do not stay silent until '
         'all tool calls finish. These updates are commentary, not the final '
@@ -4413,6 +4516,9 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  static String _dashboardCacheKey(ServerProfile profile) =>
+      [profile.id, profile.host, profile.port, profile.username].join('\u0000');
+
   static ServerDashboard _parseDashboard(String output) {
     final values = <String, String>{};
     for (final line in output.split('\n')) {
@@ -4529,10 +4635,14 @@ class _ContextUsageEvent {
 const _agentAutoExecuteSetting = 'agent_auto_execute';
 const _betaUpdatesSetting = 'beta_updates_enabled';
 const _floatingCapsuleSetting = 'floating_capsule_enabled';
+const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';
 const _lastConversationTaskSetting = 'last_conversation_task_id';
+
+String _sidebarExpandedSettingKey(String sectionId) =>
+    'sidebar_expanded:$sectionId';
 
 String _normalizeRemotePath(String value) {
   final path = value.trim();

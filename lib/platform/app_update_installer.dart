@@ -8,6 +8,25 @@ class AppUpdateInstaller {
 
   final MethodChannel _channel;
 
+  Future<bool> canInstallPackages() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('canInstallPackages') ?? false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  Future<bool> requestInstallPermission() async {
+    if (!Platform.isAndroid) return true;
+    try {
+      return await _channel.invokeMethod<bool>('requestInstallPermission') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   Future<void> install(File apk) async {
     if (!Platform.isAndroid) {
       throw StateError('当前平台不支持直接安装 APK');
