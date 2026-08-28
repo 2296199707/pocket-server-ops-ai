@@ -822,6 +822,32 @@
 - 发布前验证：`flutter analyze` 通过；聚焦测试 46 项通过；`flutter test` 全量通过；
   `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
 
+### 2026-08-28：源码依据纠正与普通对话模式修复
+
+- `wflcodexdesktop` 仅是网站层的产品实现，不能作为 Codex 协议行为的依据；本轮协议结论
+  只引用固定的官方 `openai/codex` 源码快照和 OpenAI 压缩文档。
+- 官方源码 `codex-rs/model-provider/src/provider.rs` 明确把自定义供应商标记为
+  `RemoteCompactionSupport::Unsupported`；`codex-rs/core/src/tasks/compact.rs` 和
+  `codex-rs/core/src/compact.rs` 因此使用普通 `/responses` 加 `SUMMARIZATION_PROMPT`，
+  生成 `CompactionSummary` 并保留最近用户消息。当前 APP 已恢复该路径，不会把所有
+  Responses 供应商错误地送到 `/responses/compact`。
+- 旧数据若同时存在 `mode=chat` 和遗留 Agent `workMode`，加载时归一化为 `workMode=chat`，
+  解决普通对话顶部显示“协同”；显式创建或切换 Agent 工作模式的语义不变。
+- 定向回归：`flutter test` 相关模型、协议、控制器和聊天页面测试 89 项通过；全量
+  `flutter test` 158 项通过，`flutter analyze` 和 `git diff --check` 均通过。
+
+### 2026-08-28：Beta 1.0.3-beta.16 发布记录
+
+- 发布内容：恢复自定义供应商按 Codex 本地压缩路径处理；普通对话不再受遗留 Agent
+  工作模式影响；切换工作模式后顶部显示与当前任务同步；保留配置变更后的既有上下文。
+- 功能修复提交：`685e1bb`；版本提交：`1f68a0e`。
+- 版本：`1.0.3-beta.16+25`；GitHub 标签：`v1.0.3-beta.16`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.16-release.apk`。
+- APK 校验：`76,493,795` bytes；SHA-256
+  `5de5242ed767ae1b4e6c7dc99364f1c355ef66d84ad78843bc34fd28414b56bb`。
+- 发布前验证：`flutter analyze` 通过；`flutter test` 全量 158 项通过；
+  `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
