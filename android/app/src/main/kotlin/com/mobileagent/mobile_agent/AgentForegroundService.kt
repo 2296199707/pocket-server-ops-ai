@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -21,9 +22,13 @@ import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+
+import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.plugin.common.MethodChannel
 
 import kotlin.math.abs
 
@@ -33,22 +38,42 @@ class AgentForegroundService : Service() {
         const val EXTRA_TASK_TITLE = "taskTitle"
         const val EXTRA_OVERLAY_ENABLED = "overlayEnabled"
         const val EXTRA_OVERLAY_SCALE = "overlayScale"
+        const val EXTRA_OVERLAY_LENGTH_SCALE = "overlayLengthScale"
         const val EXTRA_PROGRESS_LABEL = "progressLabel"
         const val ACTION_START_TASK = "mobile_agent.action.START_TASK"
         const val ACTION_STOP_TASK = "mobile_agent.action.STOP_TASK"
+        const val ACTION_FINISH_TASK = "mobile_agent.action.FINISH_TASK"
         const val ACTION_UPDATE_PROGRESS = "mobile_agent.action.UPDATE_PROGRESS"
         const val ACTION_SET_OVERLAY = "mobile_agent.action.SET_OVERLAY"
         const val ACTION_SET_OVERLAY_SCALE = "mobile_agent.action.SET_OVERLAY_SCALE"
+        const val ACTION_SET_OVERLAY_LENGTH_SCALE = "mobile_agent.action.SET_OVERLAY_LENGTH_SCALE"
+        const val ACTION_SET_OVERLAY_APPROVAL = "mobile_agent.action.SET_OVERLAY_APPROVAL"
+        const val EXTRA_OVERLAY_APPROVAL_LABEL = "overlayApprovalLabel"
+        const val EXTRA_OVERLAY_APPROVAL_READ_ONLY = "overlayApprovalReadOnly"
+        const val EXTRA_TASK_STATUS = "taskStatus"
+        const val EXTRA_OPEN_TASK_ID = "openTaskId"
+        private const val overlayEventsChannel = "mobile_agent/foreground_events"
         private const val channelId = "agent_tasks"
         private const val notificationId = 1001
+        private const val overlayPermissionRequestCode = 1002
         private const val preferencesName = "agent_background"
         private const val overlayVisiblePixels = 20
+        private const val overlayHorizontalMargin = 8
+        private const val overlayBaseWidth = 244
     }
 
     private val taskIds = linkedSetOf<String>()
     private val taskLabels = linkedMapOf<String, String>()
     private val taskTitles = linkedMapOf<String, String>()
     private val taskStartedAt = linkedMapOf<String, Long>()
+    private val taskFinishedAt = linkedMapOf<String, Long>()
+    private val taskStatuses = linkedMapOf<String, String>()
+    private data class PendingApproval(
+        val label: String,
+        val allowReadOnly: Boolean,
+    )
+
+    private val pendingApprovals = linkedMapOf<String, PendingApproval>()
     private val preferences by lazy {
         getSharedPreferences(preferencesName, MODE_PRIVATE)
     }
@@ -63,7 +88,7 @@ class AgentForegroundService : Service() {
     private val overlayRefreshRunnable = object : Runnable {
         override fun run() {
             overlayRefreshScheduled = false
-            if (overlayView != null && taskIds.isNotEmpty()) {
+            if (overlayView != null && hasRunningTask()) {
                 refreshOverlayText()
                 scheduleOverlayRefresh()
             }
@@ -78,10 +103,18 @@ class AgentForegroundService : Service() {
     }
     private var overlayEnabled = false
     private var overlayScale = 1.0f
+    private var overlayLengthScale = 1.0f
     private var overlayView: LinearLayout? = null
     private var overlayTitleView: TextView? = null
     private var overlayActionView: TextView? = null
+    private var overlayApprovalView: LinearLayout? = null
+    private var overlayApprovalLabelView: TextView? = null
+    private var overlayApprovalReadButton: TextView? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+    private var approvalRestoreX: Int? = null
+    private var approvalRestoreY: Int? = null
+    private var approvalRestoreHidden = false
+    private var approvalLayoutActive = false
     private var lastTaskId: String? = null
     private var touchStartX = 0f
     private var touchStartY = 0f
@@ -94,6 +127,8 @@ class AgentForegroundService : Service() {
         super.onCreate()
         overlayEnabled = preferences.getBoolean("overlay_enabled", false)
         overlayScale = preferences.getFloat("overlay_scale", 1.0f).coerceIn(0.75f, 1.4f)
+        overlayLengthScale = preferences.getFloat("overlay_length_scale", 1.0f)
+            .coerceIn(0.75f, 1.5f)
         createNotificationChannel()
         startForeground(notificationId, buildNotification())
     }
@@ -102,13 +137,44 @@ class AgentForegroundService : Service() {
         val taskId = intent?.getStringExtra(EXTRA_TASK_ID)
         when (intent?.action) {
             ACTION_STOP_TASK -> removeTask(taskId)
+            ACTION_FINISH_TASK -> finishTask(
+                taskId,
+                intent.getStringExtra(EXTRA_TASK_STATUS),
+            )
             ACTION_UPDATE_PROGRESS -> {
-                if (taskId != null && taskIds.contains(taskId)) {
+                if (taskId != null &&
+                    taskIds.contains(taskId) &&
+                    !isTerminalStatus(taskStatuses[taskId])) {
                     taskLabels[taskId] =
                         intent.getStringExtra(EXTRA_PROGRESS_LABEL)?.trim()
                             ?.takeIf { it.isNotEmpty() }
                             ?: "处理中"
                     lastTaskId = taskId
+                }
+            }
+            ACTION_SET_OVERLAY_APPROVAL -> {
+                if (taskId != null) {
+                    val label = intent.getStringExtra(EXTRA_OVERLAY_APPROVAL_LABEL)
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                    if (label == null) {
+                        pendingApprovals.remove(taskId)
+                    } else {
+                        if (pendingApprovals.isEmpty() && overlayParams != null) {
+                            val params = overlayParams!!
+                            approvalRestoreX = params.x
+                            approvalRestoreY = params.y
+                            approvalRestoreHidden = isHalfHidden()
+                        }
+                        pendingApprovals[taskId] = PendingApproval(
+                            label = label.take(220),
+                            allowReadOnly = intent.getBooleanExtra(
+                                EXTRA_OVERLAY_APPROVAL_READ_ONLY,
+                                false,
+                            ),
+                        )
+                        lastTaskId = taskId
+                    }
                 }
             }
             ACTION_SET_OVERLAY -> {
@@ -119,6 +185,13 @@ class AgentForegroundService : Service() {
                 preferences.edit()
                     .putBoolean("overlay_enabled", overlayEnabled)
                     .apply()
+                if (!overlayEnabled) {
+                    for (finishedTaskId in taskIds.toList()) {
+                        if (isTerminalStatus(taskStatuses[finishedTaskId])) {
+                            removeTask(finishedTaskId)
+                        }
+                    }
+                }
             }
             ACTION_SET_OVERLAY_SCALE -> {
                 overlayScale = intent.getDoubleExtra(
@@ -132,6 +205,27 @@ class AgentForegroundService : Service() {
                         preferences.edit()
                             .putInt("overlay_x", params.x)
                             .putInt("overlay_y", params.y)
+                            .putBoolean("overlay_edge_hidden", isHalfHidden())
+                            .apply()
+                    }
+                    removeOverlay()
+                }
+            }
+            ACTION_SET_OVERLAY_LENGTH_SCALE -> {
+                overlayLengthScale = intent.getDoubleExtra(
+                    EXTRA_OVERLAY_LENGTH_SCALE,
+                    overlayLengthScale.toDouble(),
+                ).toFloat().coerceIn(0.75f, 1.5f)
+                preferences.edit()
+                    .putFloat("overlay_length_scale", overlayLengthScale)
+                    .apply()
+                if (overlayView != null) {
+                    val params = overlayParams
+                    if (params != null) {
+                        preferences.edit()
+                            .putInt("overlay_x", params.x)
+                            .putInt("overlay_y", params.y)
+                            .putBoolean("overlay_edge_hidden", isHalfHidden())
                             .apply()
                     }
                     removeOverlay()
@@ -154,9 +248,20 @@ class AgentForegroundService : Service() {
                     ).toFloat().coerceIn(0.75f, 1.4f)
                     preferences.edit().putFloat("overlay_scale", overlayScale).apply()
                 }
+                if (intent.hasExtra(EXTRA_OVERLAY_LENGTH_SCALE)) {
+                    overlayLengthScale = intent.getDoubleExtra(
+                        EXTRA_OVERLAY_LENGTH_SCALE,
+                        overlayLengthScale.toDouble(),
+                    ).toFloat().coerceIn(0.75f, 1.5f)
+                    preferences.edit()
+                        .putFloat("overlay_length_scale", overlayLengthScale)
+                        .apply()
+                }
                 if (taskId != null) {
                     taskIds.add(taskId)
                     taskLabels.putIfAbsent(taskId, "启动中")
+                    taskStatuses[taskId] = "running"
+                    taskFinishedAt.remove(taskId)
                     taskTitles[taskId] = taskTitle(intent, taskId)
                     taskStartedAt.putIfAbsent(taskId, System.currentTimeMillis())
                     lastTaskId = taskId
@@ -165,6 +270,7 @@ class AgentForegroundService : Service() {
             else -> if (taskId != null) {
                 taskIds.add(taskId)
                 taskLabels.putIfAbsent(taskId, "启动中")
+                taskStatuses.putIfAbsent(taskId, "running")
                 taskTitles[taskId] = taskTitle(intent, taskId)
                 taskStartedAt.putIfAbsent(taskId, System.currentTimeMillis())
                 lastTaskId = taskId
@@ -177,7 +283,7 @@ class AgentForegroundService : Service() {
             stopSelfResult(startId)
             return START_NOT_STICKY
         }
-        acquireWakeLock()
+        if (hasRunningTask()) acquireWakeLock() else releaseWakeLock()
         showOrUpdateOverlay()
         notificationManager.notify(notificationId, buildNotification())
         return START_NOT_STICKY
@@ -197,6 +303,9 @@ class AgentForegroundService : Service() {
             taskLabels.remove(taskId)
             taskTitles.remove(taskId)
             taskStartedAt.remove(taskId)
+            taskFinishedAt.remove(taskId)
+            taskStatuses.remove(taskId)
+            pendingApprovals.remove(taskId)
             if (lastTaskId == taskId) lastTaskId = taskIds.lastOrNull()
         }
         if (taskIds.isEmpty()) {
@@ -205,10 +314,27 @@ class AgentForegroundService : Service() {
             stopForegroundService()
             stopSelf()
         } else {
-            acquireWakeLock()
+            if (hasRunningTask()) acquireWakeLock() else releaseWakeLock()
             showOrUpdateOverlay()
             notificationManager.notify(notificationId, buildNotification())
         }
+    }
+
+    private fun finishTask(taskId: String?, requestedStatus: String?) {
+        if (taskId == null || !taskIds.contains(taskId)) return
+        if (!overlayEnabled || !canDrawOverlays()) {
+            removeTask(taskId)
+            return
+        }
+        val status = normalizeTaskStatus(requestedStatus)
+        taskStatuses[taskId] = status
+        taskLabels[taskId] = terminalTaskLabel(status)
+        taskFinishedAt[taskId] = System.currentTimeMillis()
+        pendingApprovals.remove(taskId)
+        lastTaskId = taskId
+        if (hasRunningTask()) acquireWakeLock() else releaseWakeLock()
+        showOrUpdateOverlay()
+        notificationManager.notify(notificationId, buildNotification())
     }
 
     private fun createNotificationChannel() {
@@ -225,10 +351,16 @@ class AgentForegroundService : Service() {
 
     private fun buildNotification(): Notification {
         val label = activeLabel()
-        val text = when (taskIds.size) {
+        val approval = activeApprovalLabel()
+        val taskText = when (taskIds.size) {
             0 -> "Agent 启动中"
             1 -> label
             else -> "${taskIds.size} 个任务 · $label"
+        }
+        val text = when {
+            approval != null -> "需要授权 · $approval"
+            overlayEnabled && !canDrawOverlays() -> "需要悬浮窗权限 · $taskText"
+            else -> taskText
         }
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
@@ -243,8 +375,40 @@ class AgentForegroundService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openAppPendingIntent())
-            .setProgress(0, 0, true)
+            .setProgress(0, 0, hasRunningTask())
+        if (approval != null) {
+            builder.addAction(
+                Notification.Action.Builder(
+                    null,
+                    "查看并授权",
+                    openAppPendingIntent(),
+                ).build(),
+            )
+        }
+        if (overlayEnabled && !canDrawOverlays()) {
+            builder.addAction(
+                Notification.Action.Builder(
+                    null,
+                    "去系统设置",
+                    overlayPermissionPendingIntent(),
+                ).build(),
+            )
+        }
         return builder.build()
+    }
+
+    private fun overlayPermissionPendingIntent(): PendingIntent {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName"),
+        )
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_IMMUTABLE
+            } else {
+                0
+            }
+        return PendingIntent.getActivity(this, overlayPermissionRequestCode, intent, flags)
     }
 
     private fun openAppPendingIntent(): PendingIntent {
@@ -263,29 +427,111 @@ class AgentForegroundService : Service() {
     }
 
     private fun openApp() {
+        val taskId = activeTaskId()
+        val shouldClose = taskId != null && isTerminalStatus(taskStatuses[taskId])
         startActivity(
             Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                if (shouldClose) putExtra(EXTRA_OPEN_TASK_ID, taskId)
             },
         )
+        if (shouldClose && taskId != null) {
+            sendOverlayTaskOpened(taskId)
+            removeTask(taskId)
+        }
     }
 
     private fun activeLabel(): String {
-        val taskId = lastTaskId ?: taskIds.lastOrNull()
+        val taskId = activeTaskId()
         return taskLabels[taskId] ?: "处理中"
     }
 
+    private fun activeTaskId(): String? {
+        return lastTaskId?.takeIf { taskIds.contains(it) } ?: taskIds.lastOrNull()
+    }
+
+    private fun activeStatus(): String {
+        return taskStatuses[activeTaskId()] ?: "running"
+    }
+
+    private fun hasRunningTask(): Boolean {
+        return taskIds.any { !isTerminalStatus(taskStatuses[it]) }
+    }
+
+    private fun isTerminalStatus(status: String?): Boolean {
+        return status == "completed" ||
+            status == "failed" ||
+            status == "cancelled" ||
+            status == "canceled" ||
+            status == "unknown"
+    }
+
+    private fun normalizeTaskStatus(status: String?): String {
+        return when (status?.trim()?.lowercase()) {
+            "completed" -> "completed"
+            "failed" -> "failed"
+            "cancelled", "canceled" -> "cancelled"
+            "unknown" -> "unknown"
+            else -> "unknown"
+        }
+    }
+
+    private fun terminalTaskLabel(status: String): String {
+        return when (status) {
+            "completed" -> "已完成"
+            "failed" -> "执行失败"
+            "cancelled" -> "已停止"
+            else -> "状态未知"
+        }
+    }
+
+    private fun activeApprovalLabel(): String? {
+        return activeApproval()?.label
+    }
+
+    private fun activeApproval(): PendingApproval? {
+        val activeTask = lastTaskId
+        if (activeTask != null) {
+            pendingApprovals[activeTask]?.let { return it }
+        }
+        return pendingApprovals.values.lastOrNull()
+    }
+
+    private fun resolveOverlayApproval(decision: String) {
+        val taskId = lastApprovalTaskId() ?: return
+        sendOverlayApprovalDecision(taskId, decision)
+    }
+
+    private fun lastApprovalTaskId(): String? {
+        val activeTask = lastTaskId
+        if (activeTask != null && pendingApprovals.containsKey(activeTask)) {
+            return activeTask
+        }
+        return pendingApprovals.keys.lastOrNull()
+    }
+
+    private fun sendOverlayApprovalDecision(taskId: String, decision: String) {
+        val engine = FlutterEngineCache.getInstance()
+            .get(MobileAgentApplication.ENGINE_ID) ?: return
+        MethodChannel(engine.dartExecutor.binaryMessenger, overlayEventsChannel)
+            .invokeMethod(
+                "overlayApprovalDecision",
+                mapOf("taskId" to taskId, "decision" to decision),
+            )
+    }
+
     private fun activeTitle(): String {
-        val taskId = lastTaskId ?: taskIds.lastOrNull()
+        val taskId = activeTaskId()
         return taskTitles[taskId]?.takeIf { it.isNotBlank() } ?: "后台任务"
     }
 
     private fun activeRuntime(): String {
-        val taskId = lastTaskId ?: taskIds.lastOrNull()
+        val taskId = activeTaskId()
         val started = taskStartedAt[taskId] ?: System.currentTimeMillis()
-        val seconds = ((System.currentTimeMillis() - started) / 1000L)
+        val ended = taskFinishedAt[taskId] ?: System.currentTimeMillis()
+        val seconds = ((ended - started) / 1000L)
             .coerceAtLeast(0L)
         val hours = seconds / 3600L
         val minutes = (seconds % 3600L) / 60L
@@ -295,6 +541,16 @@ class AgentForegroundService : Service() {
         } else {
             "%02d:%02d".format(minutes, remaining)
         }
+    }
+
+    private fun sendOverlayTaskOpened(taskId: String) {
+        val engine = FlutterEngineCache.getInstance()
+            .get(MobileAgentApplication.ENGINE_ID) ?: return
+        MethodChannel(engine.dartExecutor.binaryMessenger, overlayEventsChannel)
+            .invokeMethod(
+                "overlayTaskOpened",
+                mapOf("taskId" to taskId),
+            )
     }
 
     private fun taskTitle(intent: Intent, taskId: String): String {
@@ -343,14 +599,72 @@ class AgentForegroundService : Service() {
             setTypeface(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            maxWidth = scaledDp(220)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
         }
         val actionView = TextView(this).apply {
             setTextColor(Color.argb(232, 214, 226, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, scaledSp(11f))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            maxWidth = scaledDp(220)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        val approvalLabelView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, scaledSp(12f))
+            maxLines = 5
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(scaledDp(10), scaledDp(8), scaledDp(10), scaledDp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        val approvalReadButton = approvalButton("仅读取", "read").apply {
+            visibility = if (activeApproval()?.allowReadOnly == true) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+        }
+        val approvalView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (activeApproval() == null) View.GONE else View.VISIBLE
+            background = GradientDrawable().apply {
+                setColor(Color.argb(92, 255, 255, 255))
+                cornerRadius = scaledDp(12).toFloat()
+            }
+            addView(approvalLabelView, approvalLabelView.layoutParams)
+            addView(
+                LinearLayout(this@AgentForegroundService).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END
+                    setPadding(
+                        scaledDp(8),
+                        scaledDp(2),
+                        scaledDp(8),
+                        scaledDp(8),
+                    )
+                    addView(approvalButton("拒绝", "deny"))
+                    addView(approvalReadButton)
+                    addView(approvalButton("允许", "allow"))
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = scaledDp(6)
+            }
         }
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -371,21 +685,18 @@ class AgentForegroundService : Service() {
             setOnTouchListener { _, event -> handleOverlayTouch(event) }
             addView(
                 titleView,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ),
+                titleView.layoutParams,
             )
             addView(
                 actionView,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = scaledDp(2) },
+                (actionView.layoutParams as LinearLayout.LayoutParams).apply {
+                    topMargin = scaledDp(2)
+                },
             )
+            addView(approvalView, approvalView.layoutParams)
         }
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayWindowWidth(),
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -401,12 +712,12 @@ class AgentForegroundService : Service() {
             overlayView = view
             overlayTitleView = titleView
             overlayActionView = actionView
+            overlayApprovalView = approvalView
+            overlayApprovalLabelView = approvalLabelView
+            overlayApprovalReadButton = approvalReadButton
             overlayParams = params
             refreshOverlayText()
             scheduleOverlayRefresh()
-            view.post {
-                if (!preferences.contains("overlay_x")) snapToEdge()
-            }
         } catch (_: SecurityException) {
             removeOverlay()
         } catch (_: IllegalStateException) {
@@ -416,7 +727,101 @@ class AgentForegroundService : Service() {
 
     private fun refreshOverlayText() {
         overlayTitleView?.text = "${activeTitle()}  ·  运行 ${activeRuntime()}"
-        overlayActionView?.text = activeLabel()
+        val approval = activeApproval()
+        val status = activeStatus()
+        overlayActionView?.text = if (approval != null) {
+            "需要人工授权"
+        } else if (isTerminalStatus(status)) {
+            "● ${terminalTaskLabel(status)}"
+        } else {
+            activeLabel()
+        }
+        overlayActionView?.setTextColor(
+            when {
+                approval != null -> Color.argb(232, 255, 224, 150)
+                status == "completed" -> Color.argb(245, 105, 225, 156)
+                status == "failed" || status == "unknown" ->
+                    Color.argb(245, 255, 120, 120)
+                status == "cancelled" || status == "canceled" ->
+                    Color.argb(245, 255, 196, 110)
+                else -> Color.argb(232, 214, 226, 255)
+            },
+        )
+        overlayApprovalView?.visibility =
+            if (approval == null) View.GONE else View.VISIBLE
+        overlayApprovalLabelView?.text = approval?.label.orEmpty()
+        overlayApprovalReadButton?.visibility =
+            if (approval?.allowReadOnly == true) View.VISIBLE else View.GONE
+        updateOverlayApprovalLayout()
+    }
+
+    private fun approvalButton(label: String, decision: String): TextView {
+        return TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, scaledSp(11f))
+            gravity = Gravity.CENTER
+            isClickable = true
+            minWidth = scaledDp(54)
+            setPadding(scaledDp(10), scaledDp(6), scaledDp(10), scaledDp(6))
+            background = GradientDrawable().apply {
+                setColor(
+                    when (decision) {
+                        "allow" -> Color.argb(215, 31, 113, 92)
+                        "deny" -> Color.argb(185, 125, 52, 57)
+                        else -> Color.argb(185, 56, 83, 126)
+                    },
+                )
+                cornerRadius = scaledDp(9).toFloat()
+            }
+            text = label
+            setOnClickListener { resolveOverlayApproval(decision) }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                marginStart = scaledDp(5)
+            }
+        }
+    }
+
+    private fun updateOverlayApprovalLayout() {
+        val view = overlayView ?: return
+        val params = overlayParams ?: return
+        val hasApproval = activeApproval() != null
+        val targetWidth = overlayWindowWidth()
+        if (params.width != targetWidth) params.width = targetWidth
+        if (hasApproval) {
+            val screenWidth = resources.displayMetrics.widthPixels
+            if (!approvalLayoutActive) {
+                params.x = ((screenWidth - targetWidth) / 2).coerceAtLeast(dp(8))
+                approvalLayoutActive = true
+            }
+            params.y = boundedY(params.y, view.height)
+        } else {
+            val restoreX = approvalRestoreX
+            val restoreY = approvalRestoreY
+            if (restoreX != null && restoreY != null) {
+                params.x = restoreX
+                params.y = restoreY
+                if (approvalRestoreHidden) {
+                    params.x = if (restoreX < resources.displayMetrics.widthPixels / 2) {
+                        -targetWidth + dp(overlayVisiblePixels)
+                    } else {
+                        resources.displayMetrics.widthPixels - dp(overlayVisiblePixels)
+                    }
+                } else {
+                    val maximumX = (resources.displayMetrics.widthPixels - targetWidth - dp(8))
+                        .coerceAtLeast(dp(8))
+                    params.x = params.x.coerceIn(dp(8), maximumX)
+                }
+                params.y = boundedY(params.y, view.height)
+            }
+            approvalRestoreX = null
+            approvalRestoreY = null
+            approvalRestoreHidden = false
+            approvalLayoutActive = false
+        }
+        updateOverlayLayout(params)
     }
 
     private fun scheduleOverlayRefresh() {
@@ -437,7 +842,14 @@ class AgentForegroundService : Service() {
         overlayView = null
         overlayTitleView = null
         overlayActionView = null
+        overlayApprovalView = null
+        overlayApprovalLabelView = null
+        overlayApprovalReadButton = null
         overlayParams = null
+        approvalRestoreX = null
+        approvalRestoreY = null
+        approvalRestoreHidden = false
+        approvalLayoutActive = false
     }
 
     private fun handleOverlayTouch(event: MotionEvent): Boolean {
@@ -465,7 +877,13 @@ class AgentForegroundService : Service() {
                 if (!touchMoved &&
                     System.currentTimeMillis() - touchStartedAt < 500
                 ) {
-                    if (isHalfHidden()) revealOverlay() else openApp()
+                    if (isTerminalStatus(taskStatuses[activeTaskId()])) {
+                        openApp()
+                    } else if (isHalfHidden()) {
+                        revealOverlay()
+                    } else {
+                        openApp()
+                    }
                 } else if (isTouchingScreenEdge()) {
                     snapToEdge()
                 } else {
@@ -502,6 +920,7 @@ class AgentForegroundService : Service() {
         preferences.edit()
             .putInt("overlay_x", params.x)
             .putInt("overlay_y", params.y)
+            .putBoolean("overlay_edge_hidden", true)
             .apply()
         updateOverlayLayout(params)
     }
@@ -517,6 +936,7 @@ class AgentForegroundService : Service() {
         preferences.edit()
             .putInt("overlay_x", params.x)
             .putInt("overlay_y", params.y)
+            .putBoolean("overlay_edge_hidden", false)
             .apply()
         updateOverlayLayout(params)
     }
@@ -539,6 +959,7 @@ class AgentForegroundService : Service() {
         preferences.edit()
             .putInt("overlay_x", params.x)
             .putInt("overlay_y", params.y)
+            .putBoolean("overlay_edge_hidden", false)
             .apply()
         updateOverlayLayout(params)
     }
@@ -558,11 +979,28 @@ class AgentForegroundService : Service() {
     }
 
     private fun initialOverlayX(): Int {
-        return if (preferences.contains("overlay_x")) {
-            preferences.getInt("overlay_x", 0)
-        } else {
-            resources.displayMetrics.widthPixels - dp(overlayVisiblePixels)
+        val screenWidth = resources.displayMetrics.widthPixels
+        val width = overlayWidth()
+        if (!preferences.contains("overlay_x")) {
+            return (screenWidth - width - scaledDp(overlayHorizontalMargin))
+                .coerceAtLeast(scaledDp(overlayHorizontalMargin))
         }
+        val savedX = preferences.getInt("overlay_x", 0)
+        val edgeHidden = if (preferences.contains("overlay_edge_hidden")) {
+            preferences.getBoolean("overlay_edge_hidden", false)
+        } else {
+            savedX < 0 || savedX >= screenWidth - dp(overlayVisiblePixels)
+        }
+        if (edgeHidden) {
+            return if (savedX < screenWidth / 2) {
+                -width + dp(overlayVisiblePixels)
+            } else {
+                screenWidth - dp(overlayVisiblePixels)
+            }
+        }
+        val maximumX = (screenWidth - width - scaledDp(overlayHorizontalMargin))
+            .coerceAtLeast(scaledDp(overlayHorizontalMargin))
+        return savedX.coerceIn(scaledDp(overlayHorizontalMargin), maximumX)
     }
 
     private fun initialOverlayY(): Int {
@@ -589,4 +1027,19 @@ class AgentForegroundService : Service() {
     }
 
     private fun scaledSp(value: Float): Float = value * overlayScale
+
+    private fun overlayWidth(): Int {
+        return (scaledDp(overlayBaseWidth) * overlayLengthScale)
+            .toInt()
+            .coerceAtLeast(dp(160))
+    }
+
+    private fun overlayWindowWidth(): Int {
+        val screenWidth = resources.displayMetrics.widthPixels
+        val available = (screenWidth - dp(24)).coerceAtLeast(dp(160))
+        val normal = overlayWidth().coerceAtMost(available)
+        if (activeApproval() == null) return normal
+        val expanded = (screenWidth * 0.82f).toInt().coerceAtMost(dp(420))
+        return expanded.coerceAtLeast(normal).coerceAtMost(available)
+    }
 }

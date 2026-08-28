@@ -69,4 +69,37 @@ void main() {
       if (await outside.exists()) await outside.delete(recursive: true);
     }
   });
+
+  test('manual file manager supports cross-directory clipboard operations', () async {
+    final project = Directory(
+      '/www/mobile-agent-manual-project-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    final outside = Directory(
+      '/www/mobile-agent-manual-outside-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    const files = ManualFileStore();
+    final sourcePath = '${outside.path}/source.txt';
+    final projectPath = '${project.path}/source.txt';
+    final renamedPath = '${project.path}/renamed.txt';
+    try {
+      await project.create(recursive: true);
+      await outside.create(recursive: true);
+      await File(sourcePath).writeAsString('manual file');
+
+      expect((await files.list(outside.path)).single.name, 'source.txt');
+      await files.copy([sourcePath], project.path);
+      expect(await File(projectPath).readAsString(), 'manual file');
+
+      final info = await files.info(projectPath);
+      expect(info.isDirectory, isFalse);
+      expect(info.size, 'manual file'.length);
+      await files.rename(projectPath, 'renamed.txt');
+      await files.move([renamedPath], outside.path);
+      expect(await File('${outside.path}/renamed.txt').exists(), isTrue);
+      expect(await File(projectPath).exists(), isFalse);
+    } finally {
+      if (await project.exists()) await project.delete(recursive: true);
+      if (await outside.exists()) await outside.delete(recursive: true);
+    }
+  });
 }

@@ -70,6 +70,7 @@ void main() {
     );
     await controller.load();
     await controller.setFloatingCapsuleScale(1.25);
+    await controller.setFloatingCapsuleLengthScale(1.35);
     await controller.setSidebarSectionExpanded('other', false);
 
     final reloaded = AppController(
@@ -79,6 +80,7 @@ void main() {
     await reloaded.load();
 
     expect(reloaded.floatingCapsuleScale, 1.25);
+    expect(reloaded.floatingCapsuleLengthScale, 1.35);
     expect(reloaded.sidebarSectionExpanded('other'), isFalse);
     controller.dispose();
     reloaded.dispose();

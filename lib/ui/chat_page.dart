@@ -393,18 +393,14 @@ class ChatPageState extends State<ChatPage> {
                                     : _openComposerActions,
                                 icon: const Icon(Icons.add_circle_outline),
                               ),
-                              const Spacer(),
-                              Flexible(
-                                child: Align(
-                                  alignment: Alignment.centerRight,
-                                  child: Wrap(
-                                    alignment: WrapAlignment.end,
-                                    crossAxisAlignment:
-                                        WrapCrossAlignment.center,
-                                    spacing: 2,
-                                    runSpacing: 2,
-                                    children: [
-                                      ConstrainedBox(
+                              Expanded(
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                    Flexible(
+                                      fit: FlexFit.loose,
+                                      child: ConstrainedBox(
                                         constraints: BoxConstraints(
                                           maxWidth: modelMaxWidth,
                                         ),
@@ -423,84 +419,74 @@ class ChatPageState extends State<ChatPage> {
                                               : _selectModelAndReasoning,
                                         ),
                                       ),
-                                      _ChatUtilityBar(
-                                        hasProject: activeProject != null,
-                                        hasServers:
-                                            usesServer &&
-                                            widget
-                                                .controller
-                                                .servers
-                                                .isNotEmpty,
-                                        onProjectFiles: activeProject == null
-                                            ? null
-                                            : _openProjectFiles,
-                                        onServerFiles:
-                                            !usesServer ||
+                                    ),
+                                    _ChatUtilityBar(
+                                      hasProject: activeProject != null,
+                                      hasServers:
+                                          usesServer &&
+                                          widget.controller.servers.isNotEmpty,
+                                      onProjectFiles: activeProject == null
+                                          ? null
+                                          : _openProjectFiles,
+                                      onServerFiles:
+                                          !usesServer ||
+                                              widget.controller.servers.isEmpty
+                                          ? null
+                                          : _openFilesFromTools,
+                                      onTerminal:
+                                          !usesServer ||
+                                              widget.controller.servers.isEmpty
+                                          ? null
+                                          : _openTerminalFromTools,
+                                    ),
+                                    const SizedBox(width: 2),
+                                    if (running)
+                                      IconButton.filled(
+                                        tooltip: '停止',
+                                        visualDensity: VisualDensity.compact,
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                              width: 34,
+                                              height: 34,
+                                            ),
+                                        padding: EdgeInsets.zero,
+                                        onPressed: () =>
+                                            widget.controller.stopTask(
+                                              task.id,
+                                              expectedTurnId: widget.controller
+                                                  .activeTurnIdFor(task.id),
+                                            ),
+                                        icon: const Icon(Icons.stop),
+                                      )
+                                    else
+                                      IconButton.filled(
+                                        tooltip: '发送',
+                                        visualDensity: VisualDensity.compact,
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                              width: 34,
+                                              height: 34,
+                                            ),
+                                        padding: EdgeInsets.zero,
+                                        onPressed:
+                                            _sending ||
                                                 widget
                                                     .controller
-                                                    .servers
+                                                    .providers
                                                     .isEmpty
                                             ? null
-                                            : _openFilesFromTools,
-                                        onTerminal:
-                                            !usesServer ||
-                                                widget
-                                                    .controller
-                                                    .servers
-                                                    .isEmpty
-                                            ? null
-                                            : _openTerminalFromTools,
+                                            : _send,
+                                        icon: _sending
+                                            ? const SizedBox.square(
+                                                dimension: 18,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                    ),
+                                              )
+                                            : const Icon(Icons.send_outlined),
                                       ),
-                                      const SizedBox(width: 2),
-                                      if (running)
-                                        IconButton.filled(
-                                          tooltip: '停止',
-                                          visualDensity: VisualDensity.compact,
-                                          constraints:
-                                              const BoxConstraints.tightFor(
-                                                width: 34,
-                                                height: 34,
-                                              ),
-                                          padding: EdgeInsets.zero,
-                                          onPressed: () =>
-                                              widget.controller.stopTask(
-                                                task.id,
-                                                expectedTurnId: widget
-                                                    .controller
-                                                    .activeTurnIdFor(task.id),
-                                              ),
-                                          icon: const Icon(Icons.stop),
-                                        )
-                                      else
-                                        IconButton.filled(
-                                          tooltip: '发送',
-                                          visualDensity: VisualDensity.compact,
-                                          constraints:
-                                              const BoxConstraints.tightFor(
-                                                width: 34,
-                                                height: 34,
-                                              ),
-                                          padding: EdgeInsets.zero,
-                                          onPressed:
-                                              _sending ||
-                                                  widget
-                                                      .controller
-                                                      .providers
-                                                      .isEmpty
-                                              ? null
-                                              : _send,
-                                          icon: _sending
-                                              ? const SizedBox.square(
-                                                  dimension: 18,
-                                                  child:
-                                                      CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                      ),
-                                                )
-                                              : const Icon(Icons.send_outlined),
-                                        ),
-                                    ],
-                                  ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -1107,19 +1093,26 @@ class ChatPageState extends State<ChatPage> {
     }
     setState(() => _loadingModels = true);
     try {
-      final loaded = await widget.controller.loadProviderModels(provider);
+      var modelLoadFailed = false;
+      List<String> loaded = const [];
+      try {
+        loaded = await widget.controller.loadProviderModels(provider);
+      } catch (_) {
+        modelLoadFailed = true;
+      }
       if (!mounted) return;
-      final models = <String>[
-        provider.model,
-        for (final model in loaded)
-          if (model != provider.model) model,
-      ];
       var selectedModel =
           task?.modelOverride ?? _modelOverride ?? provider.model;
       var selectedReasoningEffort =
           task?.reasoningEffortOverride ??
           _reasoningEffortOverride ??
           provider.reasoningEffort;
+      final models = <String>{
+        if (provider.model.trim().isNotEmpty) provider.model,
+        ...provider.modelMetadata.keys,
+        ...loaded,
+        if (selectedModel.trim().isNotEmpty) selectedModel,
+      }.toList();
       final selected = await showModalBottomSheet<_ModelReasoningSelection>(
         context: context,
         showDragHandle: true,
@@ -1139,6 +1132,16 @@ class ChatPageState extends State<ChatPage> {
                       '$selectedReasoningEffort',
                     ),
                   ),
+                  if (modelLoadFailed)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        '模型列表暂时不可用，当前配置仍可使用',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
                   const Divider(),
                   ExpansionTile(
                     initiallyExpanded: false,
@@ -2703,6 +2706,8 @@ class _TaskStatusBar extends StatefulWidget {
   State<_TaskStatusBar> createState() => _TaskStatusBarState();
 }
 
+const _taskCapsuleHeight = 16.0;
+
 class _TaskStatusBarState extends State<_TaskStatusBar> {
   Timer? _clock;
 
@@ -2741,19 +2746,17 @@ class _TaskStatusBarState extends State<_TaskStatusBar> {
     final presentation = _taskStatusPresentation(widget.task, widget.events);
     final colors = Theme.of(context).colorScheme;
     final color = _taskStatusColor(presentation.status, colors);
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final maxWidth = (screenWidth * 0.48).clamp(112.0, 184.0).toDouble();
     final borderColor = color.withValues(alpha: 0.35);
 
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
+    return SizedBox(
+      width: double.infinity,
+      height: _taskCapsuleHeight,
       child: Semantics(
         container: true,
         liveRegion: true,
         label: presentation.accessibleLabel,
         child: Container(
-          constraints: const BoxConstraints(minHeight: 12),
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
           decoration: BoxDecoration(
             color: colors.surface.withValues(alpha: 0.24),
             border: Border.all(color: borderColor),
@@ -3173,47 +3176,49 @@ class _TaskPlanOverlayState extends State<_TaskPlanOverlay> {
             child: InkWell(
               onTap: () => setState(() => _expanded = !_expanded),
               borderRadius: BorderRadius.circular(3),
-              child: Container(
-                constraints: const BoxConstraints(minHeight: 16),
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
-                decoration: BoxDecoration(
-                  color: colors.surface.withValues(alpha: 0.24),
-                  border: Border.all(
-                    color: colors.primary.withValues(alpha: 0.35),
+              child: SizedBox(
+                height: _taskCapsuleHeight,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  decoration: BoxDecoration(
+                    color: colors.surface.withValues(alpha: 0.24),
+                    border: Border.all(
+                      color: colors.primary.withValues(alpha: 0.35),
+                    ),
+                    borderRadius: BorderRadius.circular(3),
                   ),
-                  borderRadius: BorderRadius.circular(3),
-                ),
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.checklist_rounded,
-                        size: 10,
-                        color: colors.primary,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        summary,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: colors.onSurface,
-                          fontSize: 7,
-                          height: 1,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.checklist_rounded,
+                          size: 10,
+                          color: colors.primary,
                         ),
-                      ),
-                      const SizedBox(width: 2),
-                      Icon(
-                        _expanded
-                            ? Icons.keyboard_arrow_down_rounded
-                            : Icons.keyboard_arrow_up_rounded,
-                        size: 10,
-                        color: colors.onSurfaceVariant,
-                      ),
-                    ],
+                        const SizedBox(width: 3),
+                        Text(
+                          summary,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: colors.onSurface,
+                            fontSize: 7,
+                            height: 1,
+                          ),
+                        ),
+                        const SizedBox(width: 2),
+                        Icon(
+                          _expanded
+                              ? Icons.keyboard_arrow_down_rounded
+                              : Icons.keyboard_arrow_up_rounded,
+                          size: 10,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

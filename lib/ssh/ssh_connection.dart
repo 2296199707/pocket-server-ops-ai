@@ -115,6 +115,24 @@ class SshDirectoryEntry {
   final int? size;
 }
 
+class SshFileInfo {
+  const SshFileInfo({
+    required this.name,
+    required this.path,
+    required this.isDirectory,
+    required this.isSymbolicLink,
+    required this.size,
+    required this.modified,
+  });
+
+  final String name;
+  final String path;
+  final bool isDirectory;
+  final bool isSymbolicLink;
+  final int? size;
+  final DateTime? modified;
+}
+
 class SshFileChunk {
   const SshFileChunk({
     required this.offset,
@@ -273,6 +291,32 @@ abstract class SshConnection {
   });
 
   Future<List<SshDirectoryEntry>> listDirectory(String remotePath);
+
+  Future<SshFileInfo> statPath(String remotePath) async {
+    throw UnsupportedError('当前 SSH 连接不支持文件属性读取');
+  }
+
+  Future<void> createDirectory(String remotePath) async {
+    throw UnsupportedError('当前 SSH 连接不支持创建文件夹');
+  }
+
+  /// Copy one remote file or directory to the exact destination path.
+  Future<void> copyPath(String sourcePath, String destinationPath) async {
+    throw UnsupportedError('当前 SSH 连接不支持文件复制');
+  }
+
+  Future<void> movePath(String sourcePath, String destinationPath) async {
+    throw UnsupportedError('当前 SSH 连接不支持文件移动');
+  }
+
+  Future<void> renamePath(String sourcePath, String destinationPath) async {
+    throw UnsupportedError('当前 SSH 连接不支持文件重命名');
+  }
+
+  /// Delete a remote file, link, or directory recursively.
+  Future<void> deletePath(String remotePath) async {
+    throw UnsupportedError('当前 SSH 连接不支持文件删除');
+  }
 
   Future<String> readFile(String remotePath);
 
@@ -579,6 +623,67 @@ class DartSshConnection implements SshConnection {
   }
 
   @override
+  Future<SshFileInfo> statPath(String remotePath) async {
+    final path = remotePath.trim();
+    if (path.isEmpty) throw ArgumentError.value(remotePath, 'remotePath');
+    return _withSftp((sftp) async {
+      final attributes = await sftp.stat(path, followLink: false);
+      final modifyTime = attributes.modifyTime;
+      final modified = modifyTime == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(modifyTime * 1000, isUtc: true);
+      return SshFileInfo(
+        name: path == '/' ? '/' : path_util.posix.basename(path),
+        path: path,
+        isDirectory: attributes.isDirectory,
+        isSymbolicLink: attributes.isSymbolicLink,
+        size: attributes.size,
+        modified: modified,
+      );
+    });
+  }
+
+  @override
+  Future<void> createDirectory(String remotePath) async {
+    final path = remotePath.trim();
+    if (path.isEmpty) throw ArgumentError.value(remotePath, 'remotePath');
+    await _withSftp<void>((sftp) => sftp.mkdir(path));
+  }
+
+  @override
+  Future<void> copyPath(String sourcePath, String destinationPath) async {
+    final source = sourcePath.trim();
+    final destination = destinationPath.trim();
+    if (source.isEmpty) throw ArgumentError.value(sourcePath, 'sourcePath');
+    if (destination.isEmpty) {
+      throw ArgumentError.value(destinationPath, 'destinationPath');
+    }
+    await _withSftp<void>((sftp) async {
+      final attributes = await sftp.stat(source, followLink: false);
+      if (attributes.isDirectory && _isRemotePathWithin(destination, source)) {
+        throw StateError('不能把文件夹复制到自身内部');
+      }
+      await _ensureRemotePathAbsent(sftp, destination);
+      await _copySftpPath(sftp, source, destination, attributes);
+    });
+  }
+
+  @override
+  Future<void> movePath(String sourcePath, String destinationPath) async {
+    await _renameRemotePathWithSftp(sourcePath, destinationPath);
+  }
+
+  @override
+  Future<void> renamePath(String sourcePath, String destinationPath) async {
+    await _renameRemotePathWithSftp(sourcePath, destinationPath);
+  }
+
+  @override
+  Future<void> deletePath(String remotePath) async {
+    await _withSftp<void>((sftp) => _deleteSftpPath(sftp, remotePath));
+  }
+
+  @override
   Future<String> readFile(String remotePath) async {
     return _withSftp((sftp) async {
       final file = await sftp.open(remotePath);
@@ -852,6 +957,117 @@ class DartSshConnection implements SshConnection {
       await sftp.remove(path);
     } on SftpStatusError catch (error) {
       if (error.code != SftpStatusCode.noSuchFile) rethrow;
+    }
+  }
+
+  static Future<void> _deleteSftpPath(SftpClient sftp, String path) async {
+    final attributes = await sftp.stat(path, followLink: false);
+    if (attributes.isDirectory) {
+      final children = await sftp.listdir(path);
+      for (final child in children) {
+        if (child.filename == '.' || child.filename == '..') continue;
+        await _deleteSftpPath(sftp, _joinRemotePath(path, child.filename));
+      }
+      await sftp.rmdir(path);
+      return;
+    }
+    await sftp.remove(path);
+  }
+
+  static Future<void> _renameSftpPath(
+    SftpClient sftp,
+    String sourcePath,
+    String destinationPath,
+  ) async {
+    final source = sourcePath.trim();
+    final destination = destinationPath.trim();
+    if (source.isEmpty) throw ArgumentError.value(sourcePath, 'sourcePath');
+    if (destination.isEmpty) {
+      throw ArgumentError.value(destinationPath, 'destinationPath');
+    }
+    final sourceAttributes = await sftp.stat(source, followLink: false);
+    if (sourceAttributes.isDirectory &&
+        _isRemotePathWithin(destination, source)) {
+      throw StateError('不能把文件夹移动到自身内部');
+    }
+    await _ensureRemotePathAbsent(sftp, destination);
+    await sftp.rename(source, destination);
+  }
+
+  Future<void> _renameRemotePathWithSftp(
+    String sourcePath,
+    String destinationPath,
+  ) async {
+    await _withSftp<void>(
+      (sftp) => _renameSftpPath(sftp, sourcePath, destinationPath),
+    );
+  }
+
+  static Future<void> _ensureRemotePathAbsent(
+    SftpClient sftp,
+    String path,
+  ) async {
+    if (await _tryStat(sftp, path, followLink: false) != null) {
+      throw StateError('目标已存在：$path');
+    }
+  }
+
+  static bool _isRemotePathWithin(String candidate, String root) {
+    final normalizedCandidate = path_util.posix.normalize(candidate);
+    final normalizedRoot = path_util.posix.normalize(root);
+    if (normalizedRoot == '/') return normalizedCandidate.startsWith('/');
+    return normalizedCandidate == normalizedRoot ||
+        normalizedCandidate.startsWith('$normalizedRoot/');
+  }
+
+  static Future<void> _copySftpPath(
+    SftpClient sftp,
+    String source,
+    String destination,
+    SftpFileAttrs attributes,
+  ) async {
+    if (attributes.isSymbolicLink) {
+      throw StateError('暂不支持复制符号链接：$source');
+    }
+    if (attributes.isDirectory) {
+      await sftp.mkdir(destination);
+      final children = await sftp.listdir(source);
+      for (final child in children) {
+        if (child.filename == '.' || child.filename == '..') continue;
+        final childSource = _joinRemotePath(source, child.filename);
+        final childDestination = _joinRemotePath(destination, child.filename);
+        final childAttributes = await sftp.stat(childSource, followLink: false);
+        await _copySftpPath(
+          sftp,
+          childSource,
+          childDestination,
+          childAttributes,
+        );
+      }
+      return;
+    }
+    if (!attributes.isFile) {
+      throw StateError('暂不支持复制此类型的远程路径：$source');
+    }
+
+    final sourceFile = await sftp.open(source);
+    SftpFile? destinationFile;
+    try {
+      destinationFile = await sftp.open(
+        destination,
+        mode:
+            SftpFileOpenMode.create |
+            SftpFileOpenMode.write |
+            SftpFileOpenMode.exclusive,
+      );
+      var offset = 0;
+      await for (final chunk in sourceFile.read()) {
+        await destinationFile.writeBytes(chunk, offset: offset);
+        offset += chunk.length;
+      }
+    } finally {
+      await destinationFile?.close();
+      await sourceFile.close();
     }
   }
 

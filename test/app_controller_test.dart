@@ -386,6 +386,24 @@ void main() {
     restored.dispose();
   });
 
+  test('image model is disabled by default until configured', () async {
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    await controller.saveProvider(
+      name: '普通供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'secret',
+      isDefault: true,
+    );
+
+    expect(controller.imageModelFor(controller.providers.single.id), isEmpty);
+    controller.dispose();
+  });
+
   test(
     'context usage resolves Codex fallback for id-only provider metadata',
     () async {
@@ -2690,6 +2708,25 @@ void main() {
       '/srv/app/new.txt',
       'new content',
     );
+    final info = await controller.statServerFile(
+      controller.servers.single,
+      '/srv/app/README.md',
+    );
+    await controller.createServerDirectory(
+      controller.servers.single,
+      '/srv/app/assets',
+    );
+    await controller.copyServerFiles(controller.servers.single, [
+      '/tmp/source.txt',
+    ], '/srv/app');
+    await controller.moveServerFiles(controller.servers.single, [
+      '/tmp/move.txt',
+    ], '/srv/app');
+    await controller.renameServerFile(
+      controller.servers.single,
+      '/srv/app/README.md',
+      'README-old.md',
+    );
     await controller.listServerDirectory(controller.servers.single, '/srv/app');
     await controller.installServerStatusScript(controller.servers.single);
 
@@ -2705,6 +2742,18 @@ void main() {
     expect(connector.directoryCalls, ['/srv/app', '/srv/app']);
     expect(content, 'remote content');
     expect(connector.writes.single.path, '/srv/app/new.txt');
+    expect(info.path, '/srv/app/README.md');
+    expect(info.size, 14);
+    expect(
+      connector.fileOperations,
+      containsAll(<String>[
+        'stat:/srv/app/README.md',
+        'mkdir:/srv/app/assets',
+        'copy:/tmp/source.txt->/srv/app/source.txt',
+        'move:/tmp/move.txt->/srv/app/move.txt',
+        'rename:/srv/app/README.md->/srv/app/README-old.md',
+      ]),
+    );
     expect(
       connector.commands.any(
         (command) => command.contains('mobile-agent-status'),
@@ -2790,6 +2839,7 @@ class _FakeConnector implements SshConnector {
   final commands = <String>[];
   final directoryCalls = <String>[];
   final writes = <({String path, Uint8List contents})>[];
+  final fileOperations = <String>[];
 
   @override
   Future<SshConnection> connect(SshConnectionConfig config) async {
@@ -2797,6 +2847,7 @@ class _FakeConnector implements SshConnector {
       commands: commands,
       directoryCalls: directoryCalls,
       writes: writes,
+      fileOperations: fileOperations,
     );
   }
 }
@@ -2806,11 +2857,13 @@ class _FakeConnection implements SshConnection {
     required this.commands,
     required this.directoryCalls,
     required this.writes,
+    required this.fileOperations,
   });
 
   final List<String> commands;
   final List<String> directoryCalls;
   final List<({String path, Uint8List contents})> writes;
+  final List<String> fileOperations;
   bool closed = false;
 
   @override
@@ -2882,6 +2935,42 @@ class _FakeConnection implements SshConnection {
         size: 14,
       ),
     ];
+  }
+
+  @override
+  Future<void> deletePath(String remotePath) async {}
+
+  @override
+  Future<SshFileInfo> statPath(String remotePath) async {
+    fileOperations.add('stat:$remotePath');
+    return SshFileInfo(
+      name: 'README.md',
+      path: remotePath,
+      isDirectory: false,
+      isSymbolicLink: false,
+      size: 14,
+      modified: DateTime.utc(2026, 1, 1),
+    );
+  }
+
+  @override
+  Future<void> createDirectory(String remotePath) async {
+    fileOperations.add('mkdir:$remotePath');
+  }
+
+  @override
+  Future<void> copyPath(String sourcePath, String destinationPath) async {
+    fileOperations.add('copy:$sourcePath->$destinationPath');
+  }
+
+  @override
+  Future<void> movePath(String sourcePath, String destinationPath) async {
+    fileOperations.add('move:$sourcePath->$destinationPath');
+  }
+
+  @override
+  Future<void> renamePath(String sourcePath, String destinationPath) async {
+    fileOperations.add('rename:$sourcePath->$destinationPath');
   }
 
   @override
@@ -2976,6 +3065,7 @@ class _NoopAndroidTaskService extends AndroidTaskService {
     String taskId, {
     bool overlayEnabled = false,
     double overlayScale = 1.0,
+    double overlayLengthScale = 1.0,
     String? title,
   }) async {}
 

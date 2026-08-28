@@ -1099,6 +1099,18 @@
   `a8946f0`，并上传上述 APK；未推送 `main`。Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.24`。
 
+### 2026-08-28：本地与服务器文件管理 Beta 1.0.3-beta.25
+
+- 内容：手机文件管理器和服务器文件管理器都支持长按多选、复制、粘贴、移动、删除、重命名、
+  属性查看、排序、新建文件夹和文件选择器打开；服务器文件操作复用 SFTP，目录缓存仍先显
+  示缓存再刷新；服务器文件打开会以断点续传下载到手机项目后调用系统应用选择器。
+- 实现：新增 SFTP 属性读取、目录创建、二进制文件/目录复制、移动、重命名和递归删除；本地
+  人工文件操作使用绝对路径，不与 AI 项目文件边界或审批逻辑混用。
+- 验证：`flutter analyze --no-pub` 通过；定向测试 86 项通过；debug APK 和 release APK
+  均构建通过；`git diff --check` 通过。构建输出、Gradle 缓存和 APK 均位于 `/www` 数据盘。
+- 发布结果：待创建 GitHub Pre-release `v1.0.3-beta.25`，tag 应指向本次 `beta` 提交并上传
+  `pocket-server-ops-ai-v1.0.3-beta.25-release.apk`。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：

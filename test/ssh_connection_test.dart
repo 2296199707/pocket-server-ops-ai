@@ -423,6 +423,29 @@ class _FakeConnection implements SshConnection {
   }
 
   @override
+  Future<void> deletePath(String remotePath) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<SshFileInfo> statPath(String remotePath) => throw UnimplementedError();
+
+  @override
+  Future<void> createDirectory(String remotePath) => throw UnimplementedError();
+
+  @override
+  Future<void> copyPath(String sourcePath, String destinationPath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> movePath(String sourcePath, String destinationPath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> renamePath(String sourcePath, String destinationPath) =>
+      throw UnimplementedError();
+
+  @override
   Future<String> readFile(String remotePath) async {
     return fileContent;
   }

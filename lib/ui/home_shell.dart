@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path_util;
 
 import '../agent/agent_tools.dart';
+import '../agent/tool_display.dart';
 import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
@@ -41,7 +42,13 @@ class _HomeShellState extends State<HomeShell> {
   String? _pendingProjectId;
   String _draftWorkMode = 'chat';
   bool _didRestoreLastConversation = false;
+  String? _pendingOverlayTaskId;
   final Map<String, Future<void>> _agentConfirmationQueues = {};
+  static const _overlayEventsChannel = MethodChannel(
+    'mobile_agent/foreground_events',
+  );
+  static const _foregroundChannel = MethodChannel('mobile_agent/foreground');
+  final Map<String, Completer<String>> _overlayApprovalWaiters = {};
 
   Task? get _activeTask {
     final id = _activeTaskId;
@@ -55,22 +62,101 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    _overlayEventsChannel.setMethodCallHandler(_handleOverlayEvent);
     widget.controller.addListener(_restoreLastConversation);
     if (!widget.controller.isLoading) _restoreLastConversation();
+    unawaited(_consumeOverlayTask());
+  }
+
+  Future<void> _consumeOverlayTask() async {
+    try {
+      final taskId = await _foregroundChannel.invokeMethod<String>(
+        'consumeOverlayTask',
+      );
+      if (taskId == null || taskId.isEmpty) return;
+      _pendingOverlayTaskId = taskId;
+      _restoreLastConversation();
+    } on PlatformException {
+      // The native channel is unavailable outside Android.
+    } on MissingPluginException {
+      // The native channel is unavailable outside Android.
+    }
   }
 
   @override
   void dispose() {
+    _overlayEventsChannel.setMethodCallHandler(null);
+    for (final waiter in _overlayApprovalWaiters.values) {
+      if (!waiter.isCompleted) waiter.complete('deny');
+    }
+    _overlayApprovalWaiters.clear();
     widget.controller.removeListener(_restoreLastConversation);
     super.dispose();
   }
 
+  Future<Object?> _handleOverlayEvent(MethodCall call) async {
+    if (call.arguments is! Map) {
+      return null;
+    }
+    final arguments = call.arguments as Map;
+    final taskId = arguments['taskId'];
+    if (call.method == 'overlayTaskOpened') {
+      if (taskId is! String || taskId.isEmpty) return null;
+      Task? task;
+      for (final candidate in widget.controller.tasks) {
+        if (candidate.id == taskId) {
+          task = candidate;
+          break;
+        }
+      }
+      if (task == null) {
+        if (widget.controller.isLoading) _pendingOverlayTaskId = taskId;
+        return null;
+      }
+      _activateOverlayTask(task);
+      return null;
+    }
+    if (call.method != 'overlayApprovalDecision') {
+      return null;
+    }
+    final decision = arguments['decision'];
+    if (taskId is! String ||
+        decision is! String ||
+        !const {'allow', 'read', 'deny'}.contains(decision)) {
+      return null;
+    }
+    final waiter = _overlayApprovalWaiters[taskId];
+    if (waiter != null && !waiter.isCompleted) waiter.complete(decision);
+    return null;
+  }
+
+  void _activateOverlayTask(Task task) {
+    _pendingOverlayTaskId = null;
+    if (!mounted) return;
+    setState(() {
+      _activeTaskId = task.id;
+      _pendingProjectId = task.projectId;
+      _selectedIndex = 0;
+    });
+    unawaited(widget.controller.setLastConversationTask(task.id));
+  }
+
   void _restoreLastConversation() {
-    if (_didRestoreLastConversation ||
-        widget.controller.isLoading ||
-        widget.controller.loadError != null) {
+    if (widget.controller.isLoading || widget.controller.loadError != null) {
       return;
     }
+    final pendingTaskId = _pendingOverlayTaskId;
+    if (pendingTaskId != null) {
+      for (final task in widget.controller.tasks) {
+        if (task.id == pendingTaskId) {
+          _didRestoreLastConversation = true;
+          _activateOverlayTask(task);
+          return;
+        }
+      }
+      _pendingOverlayTaskId = null;
+    }
+    if (_didRestoreLastConversation) return;
     _didRestoreLastConversation = true;
     final savedId = widget.controller.lastConversationTaskId;
     Task? task;
@@ -552,8 +638,17 @@ class _HomeShellState extends State<HomeShell> {
     final enabled = !widget.controller.floatingCapsuleEnabled;
     final changed = await widget.controller.setFloatingCapsuleEnabled(enabled);
     if (!changed && enabled && mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('请允许悬浮窗权限后再开启')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('需要悬浮窗权限才能开启'),
+          action: SnackBarAction(
+            label: '去系统设置',
+            onPressed: () {
+              unawaited(widget.controller.requestOverlayPermission());
+            },
+          ),
+        ),
+      );
     }
   }
 
@@ -655,43 +750,75 @@ class _HomeShellState extends State<HomeShell> {
   ) {
     return _queueAgentConfirmation(task.id, () async {
       if (!mounted || !widget.controller.isTaskRunning(task.id)) return false;
-      if (tool.definition.name == 'local.request_access') {
-        return _requestLocalAccess(task, arguments);
+      final overlayDecision = Completer<String>();
+      _overlayApprovalWaiters[task.id] = overlayDecision;
+      final detail = toolArgumentSummary(tool.definition.name, arguments);
+      final action = toolActionSummary(tool.definition.name, arguments);
+      await widget.controller.setFloatingCapsuleApproval(
+        task.id,
+        label: detail.isEmpty ? action : '$action · $detail',
+        allowReadOnly:
+            tool.definition.name == 'local.request_access' &&
+            arguments['write'] == true,
+      );
+      try {
+        if (!mounted) return false;
+        if (tool.definition.name == 'local.request_access') {
+          return await _requestLocalAccess(
+            task,
+            arguments,
+            overlayDecision: overlayDecision.future,
+          );
+        }
+        if (tool.definition.name == 'server.download_to_phone') {
+          return await _requestServerDownloadAccess(
+            task,
+            arguments,
+            overlayDecision: overlayDecision.future,
+          );
+        }
+        final value = jsonEncode(arguments);
+        final preview = value.length <= _maxToolPreviewCharacters
+            ? value
+            : '${value.substring(0, _maxToolPreviewCharacters ~/ 2)}\n'
+                  '…中间参数过长，已省略；以下为结尾…\n'
+                  '${value.substring(value.length - _maxToolPreviewCharacters ~/ 2)}';
+        final inAppDecision = showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('${task.title} 请求执行 ${tool.definition.name}'),
+            content: SingleChildScrollView(child: SelectableText(preview)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('拒绝'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('执行'),
+              ),
+            ],
+          ),
+        ).then((value) => value == true ? 'allow' : 'deny');
+        final decision = await Future.any<String>([
+          inAppDecision,
+          overlayDecision.future,
+        ]);
+        return decision == 'allow';
+      } finally {
+        if (identical(_overlayApprovalWaiters[task.id], overlayDecision)) {
+          _overlayApprovalWaiters.remove(task.id);
+        }
+        await widget.controller.setFloatingCapsuleApproval(task.id);
       }
-      if (tool.definition.name == 'server.download_to_phone') {
-        return _requestServerDownloadAccess(task, arguments);
-      }
-      final value = jsonEncode(arguments);
-      final preview = value.length <= _maxToolPreviewCharacters
-          ? value
-          : '${value.substring(0, _maxToolPreviewCharacters ~/ 2)}\n'
-                '…中间参数过长，已省略；以下为结尾…\n'
-                '${value.substring(value.length - _maxToolPreviewCharacters ~/ 2)}';
-      return await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: Text('${task.title} 请求执行 ${tool.definition.name}'),
-              content: SingleChildScrollView(child: SelectableText(preview)),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('拒绝'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('执行'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
     });
   }
 
   Future<bool> _requestLocalAccess(
     Task task,
-    Map<String, Object?> arguments,
-  ) async {
+    Map<String, Object?> arguments, {
+    Future<String>? overlayDecision,
+  }) async {
     final requestedPath = arguments['path'];
     if (requestedPath is! String || requestedPath.trim().isEmpty) return false;
     final path = requestedPath.trim();
@@ -707,7 +834,7 @@ class _HomeShellState extends State<HomeShell> {
     final reason = arguments['reason'] is String
         ? (arguments['reason'] as String).trim()
         : '';
-    final access = await showDialog<String>(
+    final inAppDecision = showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
@@ -750,6 +877,9 @@ class _HomeShellState extends State<HomeShell> {
         ],
       ),
     );
+    final access = overlayDecision == null
+        ? await inAppDecision
+        : await Future.any<String?>([inAppDecision, overlayDecision]);
     if (access == null || access == 'deny' || !mounted) return false;
     try {
       await widget.controller.grantLocalAccess(
@@ -769,8 +899,9 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<bool> _requestServerDownloadAccess(
     Task task,
-    Map<String, Object?> arguments,
-  ) async {
+    Map<String, Object?> arguments, {
+    Future<String>? overlayDecision,
+  }) async {
     final requestedPath = arguments['local_path'];
     if (requestedPath is! String || requestedPath.trim().isEmpty) return false;
     final path = requestedPath.trim();
@@ -787,44 +918,49 @@ class _HomeShellState extends State<HomeShell> {
     if (!mounted) return false;
     final remotePath = arguments['remote_path'];
     final remote = remotePath is String ? remotePath.trim() : '';
-    final allowed =
-        await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) => AlertDialog(
-            title: const Text('允许 Agent 下载文件到手机？'),
-            content: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (remote.isNotEmpty) ...[
-                    const Text('服务器文件：'),
-                    SelectableText(remote),
-                    const SizedBox(height: 12),
-                  ],
-                  const Text('手机目标：'),
-                  SelectableText(path),
-                  const SizedBox(height: 12),
-                  Text('本次允许写入目标目录：$directory'),
-                  const SizedBox(height: 12),
-                  const Text('这是二进制安全传输，不会把文件内容放入 AI 上下文；授权只对当前对话有效。'),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('拒绝'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('允许下载'),
-              ),
+    final inAppDecision = showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('允许 Agent 下载文件到手机？'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (remote.isNotEmpty) ...[
+                const Text('服务器文件：'),
+                SelectableText(remote),
+                const SizedBox(height: 12),
+              ],
+              const Text('手机目标：'),
+              SelectableText(path),
+              const SizedBox(height: 12),
+              Text('本次允许写入目标目录：$directory'),
+              const SizedBox(height: 12),
+              const Text('这是二进制安全传输，不会把文件内容放入 AI 上下文；授权只对当前对话有效。'),
             ],
           ),
-        ) ??
-        false;
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('拒绝'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('允许下载'),
+          ),
+        ],
+      ),
+    );
+    final decision = overlayDecision == null
+        ? ((await inAppDecision) == true ? 'allow' : 'deny')
+        : await Future.any<String>([
+            inAppDecision.then((value) => value == true ? 'allow' : 'deny'),
+            overlayDecision,
+          ]);
+    final allowed = decision == 'allow';
     if (!allowed || !mounted) return false;
     try {
       await widget.controller.grantLocalAccess(
@@ -1572,9 +1708,17 @@ class _FloatingCapsuleSettingsTile extends StatelessWidget {
   Future<void> _toggle(BuildContext context, bool enabled) async {
     final changed = await controller.setFloatingCapsuleEnabled(enabled);
     if (!changed && enabled && context.mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请在系统设置中允许悬浮窗权限，再重新打开此开关')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('需要悬浮窗权限才能开启'),
+          action: SnackBarAction(
+            label: '去系统设置',
+            onPressed: () {
+              unawaited(controller.requestOverlayPermission());
+            },
+          ),
+        ),
+      );
     }
   }
 
@@ -1598,31 +1742,48 @@ class _FloatingCapsuleScaleSettingsTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final percent = (controller.floatingCapsuleScale * 100).round();
+    final scalePercent = (controller.floatingCapsuleScale * 100).round();
+    final lengthPercent = (controller.floatingCapsuleLengthScale * 100).round();
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
       leading: const CircleAvatar(child: Icon(Icons.open_in_full_outlined)),
-      title: const Text('悬浮窗大小'),
-      subtitle: Text('$percent% · 调整悬浮胶囊的显示大小'),
+      title: const Text('悬浮窗大小与长度'),
+      subtitle: Text('整体 $scalePercent% · 长度 $lengthPercent%'),
       trailing: const Icon(Icons.chevron_right),
       onTap: () async {
-        var value = controller.floatingCapsuleScale;
+        var scale = controller.floatingCapsuleScale;
+        var length = controller.floatingCapsuleLengthScale;
         await showDialog<void>(
           context: context,
           builder: (context) => StatefulBuilder(
             builder: (context, setState) => AlertDialog(
-              title: const Text('悬浮窗大小'),
+              title: const Text('悬浮窗大小与长度'),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('${(value * 100).round()}%'),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('整体 ${(scale * 100).round()}%'),
+                  ),
                   Slider(
                     min: 0.75,
                     max: 1.4,
                     divisions: 13,
-                    value: value,
-                    label: '${(value * 100).round()}%',
-                    onChanged: (next) => setState(() => value = next),
+                    value: scale,
+                    label: '${(scale * 100).round()}%',
+                    onChanged: (next) => setState(() => scale = next),
+                  ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('长度 ${(length * 100).round()}%'),
+                  ),
+                  Slider(
+                    min: 0.75,
+                    max: 1.4,
+                    divisions: 13,
+                    value: length,
+                    label: '${(length * 100).round()}%',
+                    onChanged: (next) => setState(() => length = next),
                   ),
                 ],
               ),
@@ -1633,7 +1794,8 @@ class _FloatingCapsuleScaleSettingsTile extends StatelessWidget {
                 ),
                 FilledButton(
                   onPressed: () {
-                    unawaited(controller.setFloatingCapsuleScale(value));
+                    unawaited(controller.setFloatingCapsuleScale(scale));
+                    unawaited(controller.setFloatingCapsuleLengthScale(length));
                     Navigator.pop(context);
                   },
                   child: const Text('保存'),

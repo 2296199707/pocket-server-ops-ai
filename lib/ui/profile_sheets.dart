@@ -267,9 +267,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _baseUrl = TextEditingController(text: profile?.baseUrl);
     _model = TextEditingController(text: profile?.model);
     _imageModel = TextEditingController(
-      text: profile == null
-          ? defaultImageModel
-          : widget.controller.imageModelFor(profile.id),
+      text: profile == null ? '' : widget.controller.imageModelFor(profile.id),
     );
     _secret = TextEditingController();
     _reasoningEffort = profile?.reasoningEffort ?? 'default';
@@ -307,12 +305,13 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
               runSpacing: 8,
               children: [
                 _ProviderPresetButton(
-                  label: 'WFL AI',
+                  label: 'OpenAI',
                   onPressed: () => _applyPreset(
-                    name: 'WFL AI',
-                    baseUrl: 'https://api.ai-pixel.online/v1',
+                    name: 'OpenAI',
+                    baseUrl: 'https://api.openai.com/v1',
                     model: 'gpt-5.6-luna',
                     wireApi: 'responses',
+                    imageModel: defaultImageModel,
                   ),
                 ),
                 _ProviderPresetButton(
@@ -322,6 +321,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                     baseUrl: 'https://api.deepseek.com/v1',
                     model: 'deepseek-chat',
                     wireApi: 'chat-completions',
+                    imageModel: '',
                   ),
                 ),
                 _ProviderPresetButton(
@@ -331,6 +331,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                     baseUrl: 'https://opencode.ai/zen/go/v1',
                     model: '',
                     wireApi: 'chat-completions',
+                    imageModel: '',
                   ),
                 ),
               ],
@@ -392,7 +393,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                     controller: _imageModel,
                     decoration: const InputDecoration(
                       labelText: '图片模型',
-                      helperText: 'image.generate 使用的模型，默认 gpt-image-2',
+                      helperText: '没有生图能力的供应商请选择“无”',
                     ),
                   ),
                 ),
@@ -409,20 +410,22 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 ),
               ],
             ),
-            if (_imageModels.isNotEmpty)
-              DropdownButtonFormField<String>(
-                initialValue: _imageModels.contains(_imageModel.text)
-                    ? _imageModel.text
-                    : null,
-                decoration: const InputDecoration(labelText: '已发现图片模型'),
-                items: [
-                  for (final model in _imageModels)
-                    DropdownMenuItem(value: model, child: Text(model)),
-                ],
-                onChanged: (value) {
-                  if (value != null) setState(() => _imageModel.text = value);
-                },
-              ),
+            DropdownButtonFormField<String>(
+              initialValue: _imageModel.text.trim().isEmpty
+                  ? ''
+                  : _imageModels.contains(_imageModel.text.trim())
+                  ? _imageModel.text.trim()
+                  : null,
+              decoration: const InputDecoration(labelText: '图片模型选择'),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('无')),
+                for (final model in _imageModels)
+                  DropdownMenuItem(value: model, child: Text(model)),
+              ],
+              onChanged: (value) {
+                if (value != null) setState(() => _imageModel.text = value);
+              },
+            ),
             DropdownButtonFormField<String>(
               initialValue: wireApiOptions.contains(_wireApi)
                   ? _wireApi
@@ -618,12 +621,14 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     required String baseUrl,
     required String model,
     required String wireApi,
+    String imageModel = '',
   }) {
     setState(() {
       _name.text = name;
       _baseUrl.text = baseUrl;
       _model.text = model;
       _wireApi = wireApi;
+      _imageModel.text = imageModel;
     });
   }
 }

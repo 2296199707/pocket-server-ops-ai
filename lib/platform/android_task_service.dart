@@ -11,6 +11,7 @@ class AndroidTaskService {
     String taskId, {
     bool overlayEnabled = false,
     double overlayScale = 1.0,
+    double overlayLengthScale = 1.0,
     String? title,
   }) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
@@ -21,6 +22,7 @@ class AndroidTaskService {
         'taskId': taskId,
         'overlayEnabled': overlayEnabled,
         'overlayScale': overlayScale,
+        'overlayLengthScale': overlayLengthScale,
         if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
       });
     } catch (_) {
@@ -63,6 +65,39 @@ class AndroidTaskService {
       await _channel.invokeMethod<void>('setOverlayScale', {'scale': scale});
     } catch (_) {
       // The task can continue with the previous overlay size.
+    }
+  }
+
+  Future<void> setOverlayLengthScale(double scale) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('setOverlayLengthScale', {
+        'scale': scale,
+      });
+    } catch (_) {
+      // The task can continue with the previous overlay length.
+    }
+  }
+
+  Future<void> setOverlayApproval(
+    String taskId, {
+    String? label,
+    bool allowReadOnly = false,
+  }) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('setOverlayApproval', {
+        'taskId': taskId,
+        if (label != null && label.trim().isNotEmpty) 'label': label.trim(),
+        if (label != null && label.trim().isNotEmpty)
+          'allowReadOnly': allowReadOnly,
+      });
+    } catch (_) {
+      // The foreground task can continue with the in-app approval dialog.
     }
   }
 
@@ -122,6 +157,20 @@ class AndroidTaskService {
       await _channel.invokeMethod<void>('stop', {'taskId': taskId});
     } catch (_) {
       // The foreground service may already have been stopped by Android.
+    }
+  }
+
+  Future<void> finish(String taskId, String status) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('finish', {
+        'taskId': taskId,
+        'status': status,
+      });
+    } catch (_) {
+      // The optional overlay may already have been removed by Android.
     }
   }
 }

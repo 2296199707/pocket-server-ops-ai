@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
@@ -18,6 +19,7 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val channelName = "mobile_agent/foreground"
     private val storageChannelName = "mobile_agent/storage"
+    private val fileChannelName = "mobile_agent/file"
     private val updateChannelName = "mobile_agent/update"
     private val storageRequestCode = 2007
     private val legacyStorageRequestCode = 2008
@@ -52,6 +54,10 @@ class MainActivity : FlutterActivity() {
                                 call.argument<Double>("overlayScale") ?: 1.0,
                             )
                             .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_LENGTH_SCALE,
+                                call.argument<Double>("overlayLengthScale") ?: 1.0,
+                            )
+                            .putExtra(
                                 AgentForegroundService.EXTRA_TASK_TITLE,
                                 call.argument<String>("title"),
                             )
@@ -64,6 +70,24 @@ class MainActivity : FlutterActivity() {
                             .putExtra(AgentForegroundService.EXTRA_TASK_ID, call.argument<String>("taskId"))
                         sendTaskServiceCommand(intent)
                         result.success(null)
+                    }
+                    "finish" -> {
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .setAction(AgentForegroundService.ACTION_FINISH_TASK)
+                            .putExtra(AgentForegroundService.EXTRA_TASK_ID, call.argument<String>("taskId"))
+                            .putExtra(
+                                AgentForegroundService.EXTRA_TASK_STATUS,
+                                call.argument<String>("status"),
+                            )
+                        sendTaskServiceCommand(intent)
+                        result.success(null)
+                    }
+                    "consumeOverlayTask" -> {
+                        val taskId = intent?.getStringExtra(
+                            AgentForegroundService.EXTRA_OPEN_TASK_ID,
+                        )
+                        intent?.removeExtra(AgentForegroundService.EXTRA_OPEN_TASK_ID)
+                        result.success(taskId)
                     }
                     "updateProgress" -> {
                         val intent = Intent(this, AgentForegroundService::class.java)
@@ -96,6 +120,34 @@ class MainActivity : FlutterActivity() {
                         sendTaskServiceCommand(intent)
                         result.success(null)
                     }
+                    "setOverlayLengthScale" -> {
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .setAction(AgentForegroundService.ACTION_SET_OVERLAY_LENGTH_SCALE)
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_LENGTH_SCALE,
+                                call.argument<Double>("scale") ?: 1.0,
+                            )
+                        sendTaskServiceCommand(intent)
+                        result.success(null)
+                    }
+                    "setOverlayApproval" -> {
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .setAction(AgentForegroundService.ACTION_SET_OVERLAY_APPROVAL)
+                            .putExtra(
+                                AgentForegroundService.EXTRA_TASK_ID,
+                                call.argument<String>("taskId"),
+                            )
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_APPROVAL_LABEL,
+                                call.argument<String>("label"),
+                            )
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_APPROVAL_READ_ONLY,
+                                call.argument<Boolean>("allowReadOnly") ?: false,
+                            )
+                        sendTaskServiceCommand(intent)
+                        result.success(null)
+                    }
                     "canDrawOverlays" -> result.success(canDrawOverlays())
                     "requestOverlayPermission" -> requestOverlayPermission(result)
                     "canPostNotifications" -> result.success(canPostNotifications())
@@ -114,6 +166,14 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, fileChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "openFile" -> openFile(call.argument<String>("path"), result)
+                    else -> result.notImplemented()
+                }
+            }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -123,6 +183,11 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
     }
 
     private fun hasExternalStorageAccess(): Boolean {
@@ -332,6 +397,45 @@ class MainActivity : FlutterActivity() {
             result.error(
                 "install_failed",
                 error.message ?: "无法启动系统安装器",
+                null,
+            )
+        }
+    }
+
+    private fun openFile(path: String?, result: MethodChannel.Result) {
+        if (path.isNullOrBlank()) {
+            result.error("invalid_file", "文件路径为空", null)
+            return
+        }
+        val file = File(path)
+        if (!file.isFile) {
+            result.error("invalid_file", "文件不存在", null)
+            return
+        }
+        try {
+            val shareFile = File(
+                cacheDir,
+                "mobile-agent-open-${System.currentTimeMillis()}-${file.name}",
+            )
+            file.copyTo(shareFile, overwrite = true)
+            val uri = FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                shareFile,
+            )
+            val mimeType = MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(shareFile.extension.lowercase()) ?: "*/*"
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "使用其他应用打开"))
+            result.success(null)
+        } catch (error: Exception) {
+            result.error(
+                "open_file_failed",
+                error.message ?: "没有可打开此文件的应用",
                 null,
             )
         }

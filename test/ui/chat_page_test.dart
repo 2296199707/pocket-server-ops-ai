@@ -7,6 +7,7 @@ import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
 import 'package:mobile_agent/domain/models.dart';
 import 'package:mobile_agent/providers/provider_usage_client.dart';
+import 'package:mobile_agent/providers/provider_connection_tester.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 import 'package:mobile_agent/storage/memory_app_database.dart';
 import 'package:mobile_agent/ui/chat_page.dart';
@@ -337,6 +338,63 @@ void main() {
     final send = tester.getTopLeft(find.byTooltip('发送'));
     expect(attachment.dx, lessThan(100));
     expect(send.dx, greaterThan(700));
+
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pump();
+    final model = tester.getTopLeft(find.text('model-a'));
+    final compactSend = tester.getTopLeft(find.byTooltip('发送'));
+    expect((model.dy - compactSend.dy).abs(), lessThan(12));
+  });
+
+  testWidgets('model picker keeps working when the model catalog fails', (
+    tester,
+  ) async {
+    tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final modelClient = MockClient((_) async => http.Response('{}', 502));
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+      providerTester: ProviderConnectionTester(client: modelClient),
+      providerUsageClient: ProviderUsageClient(
+        client: MockClient((_) async => http.Response('', 404)),
+      ),
+    );
+    addTearDown(() {
+      modelClient.close();
+      controller.dispose();
+    });
+    await controller.load();
+    await controller.saveProvider(
+      name: '目录异常供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatPage(
+            controller: controller,
+            taskId: null,
+            onTaskActivated: (_) {},
+            onOpenSettings: () {},
+            onConfirmTool: (_, _, _) async => true,
+            onConfirmHostKey: (_, _) async => true,
+            onUserInfoRequest: (_, _) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('model-a'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('模型与推理强度'), findsOneWidget);
+    expect(find.text('模型列表暂时不可用，当前配置仍可使用'), findsOneWidget);
+    expect(find.textContaining('读取模型或推理设置失败'), findsNothing);
   });
 
   testWidgets('Responses context details expose manual compaction', (

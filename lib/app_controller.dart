@@ -123,6 +123,7 @@ class AppController extends ChangeNotifier {
   bool _betaUpdatesEnabled = false;
   bool _floatingCapsuleEnabled = false;
   double _floatingCapsuleScale = 1.0;
+  double _floatingCapsuleLengthScale = 1.0;
   bool _documentModuleEnabled = true;
   String? _imageProviderId;
   String? _lastDashboardServerId;
@@ -140,13 +141,13 @@ class AppController extends ChangeNotifier {
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
   bool get floatingCapsuleEnabled => _floatingCapsuleEnabled;
   double get floatingCapsuleScale => _floatingCapsuleScale;
+  double get floatingCapsuleLengthScale => _floatingCapsuleLengthScale;
   bool get documentModuleEnabled => _documentModuleEnabled;
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
   String? get imageProviderId => _imageProviderId;
-  String imageModelFor(String providerId) =>
-      _imageModels[providerId] ?? defaultImageModel;
+  String imageModelFor(String providerId) => _imageModels[providerId] ?? '';
   bool get isLoading => _loading;
   String? get loadError => _loadError;
 
@@ -342,6 +343,16 @@ class AppController extends ChangeNotifier {
     _floatingCapsuleScale =
         (double.tryParse(
                   await _database.readSetting(_floatingCapsuleScaleSetting) ??
+                      '',
+                ) ??
+                1.0)
+            .clamp(0.75, 1.4)
+            .toDouble();
+    _floatingCapsuleLengthScale =
+        (double.tryParse(
+                  await _database.readSetting(
+                        _floatingCapsuleLengthScaleSetting,
+                      ) ??
                       '',
                 ) ??
                 1.0)
@@ -688,11 +699,10 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
-  /// Enables the optional cross-app status overlay. The Android permission is
-  /// requested here so the setting never appears enabled without permission.
+  /// Enables the optional cross-app status overlay when its system permission
+  /// is already available. The UI offers the permission action separately.
   Future<bool> setFloatingCapsuleEnabled(bool enabled) async {
     if (enabled && !await _taskService.canDrawOverlays()) {
-      await _taskService.requestOverlayPermission();
       return false;
     }
     await _database.writeSetting(
@@ -715,6 +725,28 @@ class AppController extends ChangeNotifier {
       await _taskService.setOverlayScale(value);
     }
     _notify();
+  }
+
+  Future<void> setFloatingCapsuleLengthScale(double scale) async {
+    final value = scale.clamp(0.75, 1.4).toDouble();
+    await _database.writeSetting(_floatingCapsuleLengthScaleSetting, '$value');
+    _floatingCapsuleLengthScale = value;
+    if (_runningTasks.isNotEmpty) {
+      await _taskService.setOverlayLengthScale(value);
+    }
+    _notify();
+  }
+
+  Future<void> setFloatingCapsuleApproval(
+    String taskId, {
+    String? label,
+    bool allowReadOnly = false,
+  }) {
+    return _taskService.setOverlayApproval(
+      taskId,
+      label: label,
+      allowReadOnly: allowReadOnly,
+    );
   }
 
   Future<void> setDocumentModuleEnabled(bool enabled) async {
@@ -1340,7 +1372,8 @@ class AppController extends ChangeNotifier {
       }
 
       final imageProvider = imageProviderFor(task);
-      if (imageProvider != null) {
+      if (imageProvider != null &&
+          imageModelFor(imageProvider.id).trim().isNotEmpty) {
         tools.add(
           _imageGenerationTool(
             imageProvider,
@@ -1617,6 +1650,7 @@ class AppController extends ChangeNotifier {
         title: task.title,
         overlayEnabled: _floatingCapsuleEnabled,
         overlayScale: _floatingCapsuleScale,
+        overlayLengthScale: _floatingCapsuleLengthScale,
       );
       serviceStarted = true;
       _foregroundServiceTasks.add(task.id);
@@ -1732,7 +1766,8 @@ class AppController extends ChangeNotifier {
       }
 
       final imageProvider = imageProviderFor(task);
-      if (imageProvider != null) {
+      if (imageProvider != null &&
+          imageModelFor(imageProvider.id).trim().isNotEmpty) {
         tools.add(
           _imageGenerationTool(
             imageProvider,
@@ -1908,7 +1943,14 @@ class AppController extends ChangeNotifier {
       }
       if (serviceStarted) {
         try {
-          await _taskService.stop(task.id);
+          final current = _tasks.firstWhere(
+            (item) => item.id == task.id,
+            orElse: () => task,
+          );
+          final status = _isTerminalTaskStatus(current.status)
+              ? current.status
+              : 'unknown';
+          await _taskService.finish(task.id, status);
         } catch (_) {
           // The foreground service may already have been stopped by Android.
         }
@@ -2482,6 +2524,7 @@ class AppController extends ChangeNotifier {
         title: '文件下载',
         overlayEnabled: _floatingCapsuleEnabled,
         overlayScale: _floatingCapsuleScale,
+        overlayLengthScale: _floatingCapsuleLengthScale,
       );
       serviceStarted = true;
       publishProgress(0, null);
@@ -2570,6 +2613,7 @@ class AppController extends ChangeNotifier {
           title: '文件上传',
           overlayEnabled: _floatingCapsuleEnabled,
           overlayScale: _floatingCapsuleScale,
+          overlayLengthScale: _floatingCapsuleLengthScale,
         );
         serviceStarted = true;
         final uploaded = await const ResumableFileUploader().upload(
@@ -2636,6 +2680,182 @@ class AppController extends ChangeNotifier {
         ),
         onFirstHostKey: onFirstHostKey,
       ),
+      cancellation: AgentCancellation(),
+    );
+    _invalidateServerDirectoryCache(profile);
+  }
+
+  Future<void> deleteServerFiles(
+    ServerProfile profile,
+    Iterable<String> remotePaths, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final paths = remotePaths
+        .map((path) => path.trim())
+        .where((path) => path.isNotEmpty)
+        .toList(growable: false);
+    if (paths.isEmpty) throw ArgumentError('没有选择文件');
+    if (previewMode) return;
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(profile, (connection) async {
+        for (final path in paths) {
+          await connection.deletePath(path);
+        }
+      }, onFirstHostKey: onFirstHostKey),
+      cancellation: AgentCancellation(),
+    );
+    _invalidateServerDirectoryCache(profile);
+  }
+
+  Future<SshFileInfo> statServerFile(
+    ServerProfile profile,
+    String remotePath, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final path = remotePath.trim();
+    if (path.isEmpty) throw ArgumentError('文件路径不能为空');
+    if (previewMode) {
+      return SshFileInfo(
+        name: path_util.posix.basename(path),
+        path: path,
+        isDirectory: false,
+        isSymbolicLink: false,
+        size: null,
+        modified: null,
+      );
+    }
+    return _withServerConnection(
+      profile,
+      (connection) => connection.statPath(path),
+      onFirstHostKey: onFirstHostKey,
+    );
+  }
+
+  Future<void> createServerDirectory(
+    ServerProfile profile,
+    String remotePath, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final path = remotePath.trim();
+    if (path.isEmpty) throw ArgumentError('文件夹路径不能为空');
+    if (previewMode) return;
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(
+        profile,
+        (connection) => connection.createDirectory(path),
+        onFirstHostKey: onFirstHostKey,
+      ),
+      cancellation: AgentCancellation(),
+    );
+    _invalidateServerDirectoryCache(profile);
+  }
+
+  Future<void> copyServerFiles(
+    ServerProfile profile,
+    Iterable<String> remotePaths,
+    String destinationDirectory, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) {
+    return _copyOrMoveServerFiles(
+      profile,
+      remotePaths,
+      destinationDirectory,
+      move: false,
+      onFirstHostKey: onFirstHostKey,
+    );
+  }
+
+  Future<void> moveServerFiles(
+    ServerProfile profile,
+    Iterable<String> remotePaths,
+    String destinationDirectory, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) {
+    return _copyOrMoveServerFiles(
+      profile,
+      remotePaths,
+      destinationDirectory,
+      move: true,
+      onFirstHostKey: onFirstHostKey,
+    );
+  }
+
+  Future<void> renameServerFile(
+    ServerProfile profile,
+    String remotePath,
+    String newName, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final source = remotePath.trim();
+    final name = newName.trim();
+    if (source.isEmpty) throw ArgumentError('文件路径不能为空');
+    if (name.isEmpty ||
+        name == '.' ||
+        name == '..' ||
+        name.contains('/') ||
+        name.contains('\\')) {
+      throw ArgumentError('文件名无效');
+    }
+    final destination = path_util.posix.join(
+      path_util.posix.dirname(source),
+      name,
+    );
+    if (previewMode) return;
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(
+        profile,
+        (connection) => connection.renamePath(source, destination),
+        onFirstHostKey: onFirstHostKey,
+      ),
+      cancellation: AgentCancellation(),
+    );
+    _invalidateServerDirectoryCache(profile);
+  }
+
+  Future<void> _copyOrMoveServerFiles(
+    ServerProfile profile,
+    Iterable<String> remotePaths,
+    String destinationDirectory, {
+    required bool move,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final sources = remotePaths
+        .map((path) => _normalizeRemotePath(path))
+        .where((path) => path.isNotEmpty)
+        .toList(growable: false);
+    final destination = _normalizeRemotePath(destinationDirectory);
+    if (sources.isEmpty) throw ArgumentError('没有选择文件');
+    if (destination.isEmpty) throw ArgumentError('目标文件夹不能为空');
+
+    final operations = <({String source, String destination})>[];
+    final targets = <String>{};
+    for (final source in sources) {
+      final target = path_util.posix.join(
+        destination,
+        path_util.posix.basename(source),
+      );
+      if (source == target) throw StateError('目标位置与原位置相同');
+      if (!targets.add(target)) {
+        throw StateError('选中的文件包含相同名称，无法粘贴到此文件夹');
+      }
+      operations.add((source: source, destination: target));
+    }
+    if (previewMode) return;
+
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(profile, (connection) async {
+        for (final operation in operations) {
+          if (move) {
+            await connection.movePath(operation.source, operation.destination);
+          } else {
+            await connection.copyPath(operation.source, operation.destination);
+          }
+        }
+      }, onFirstHostKey: onFirstHostKey),
       cancellation: AgentCancellation(),
     );
     _invalidateServerDirectoryCache(profile);
@@ -4482,7 +4702,10 @@ class AppController extends ChangeNotifier {
     if (prompt is! String || prompt.trim().isEmpty) {
       throw ArgumentError('prompt is required');
     }
-    final model = imageModelFor(provider.id);
+    final model = imageModelFor(provider.id).trim();
+    if (model.isEmpty) {
+      throw StateError('当前图片供应商未配置图片模型');
+    }
     final size =
         arguments['size'] is String &&
             (arguments['size'] as String).trim().isNotEmpty
@@ -4736,6 +4959,7 @@ const _agentAutoExecuteSetting = 'agent_auto_execute';
 const _betaUpdatesSetting = 'beta_updates_enabled';
 const _floatingCapsuleSetting = 'floating_capsule_enabled';
 const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
+const _floatingCapsuleLengthScaleSetting = 'floating_capsule_length_scale';
 const _documentModuleSetting = 'document_module_enabled';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';

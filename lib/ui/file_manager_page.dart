@@ -4,10 +4,21 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path_util;
+import 'package:path_provider/path_provider.dart';
 
 import '../app_controller.dart';
 import '../domain/models.dart';
+import '../platform/android_file_opener.dart';
 import '../ssh/ssh_connection.dart';
+
+enum _RemoteSortOption {
+  nameAscending,
+  nameDescending,
+  modifiedNewest,
+  modifiedOldest,
+  sizeLargest,
+  sizeSmallest,
+}
 
 class FileManagerPage extends StatefulWidget {
   const FileManagerPage({
@@ -40,6 +51,11 @@ class _FileManagerPageState extends State<FileManagerPage> {
   int _uploadedBytes = 0;
   int? _uploadTotalBytes;
   String? _error;
+  final Set<String> _selected = {};
+  final List<String> _clipboard = [];
+  bool _clipboardMoves = false;
+  final Map<String, DateTime?> _modifiedTimes = {};
+  _RemoteSortOption _sortOption = _RemoteSortOption.nameAscending;
 
   @override
   void initState() {
@@ -52,17 +68,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
           ? widget.server.defaultWorkingDirectory
           : '/',
     );
-    final cached = widget.controller.cachedServerDirectory(
-      widget.server,
-      _path.text,
-    );
-    if (cached == null) {
-      unawaited(_load());
-    } else {
-      _entries = cached;
-      _loading = true;
-      unawaited(_refresh(_path.text));
-    }
+    unawaited(_initialize());
   }
 
   @override
@@ -75,38 +81,90 @@ class _FileManagerPageState extends State<FileManagerPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('${widget.server.name} · 文件'),
+        leading: _selected.isEmpty
+            ? null
+            : IconButton(
+                tooltip: '退出选择',
+                onPressed: _clearSelection,
+                icon: const Icon(Icons.close),
+              ),
+        title: Text(
+          _selected.isEmpty
+              ? '${widget.server.name} · 文件'
+              : '已选择 ${_selected.length} 项',
+        ),
         actions: [
-          IconButton(
-            tooltip: '上传文件',
-            onPressed: _loading || _transferInProgress ? null : _upload,
-            icon: const Icon(Icons.upload_file_outlined),
-          ),
-          IconButton(
-            tooltip: '新建文件',
-            onPressed: _loading || _transferInProgress ? null : _createFile,
-            icon: const Icon(Icons.note_add_outlined),
-          ),
-          if (widget.onCdToDirectory != null)
+          if (_selected.isEmpty) ...[
             IconButton(
-              tooltip: 'cd 到当前位置',
+              tooltip: '上传文件',
+              onPressed: _loading || _transferInProgress ? null : _upload,
+              icon: const Icon(Icons.upload_file_outlined),
+            ),
+            IconButton(
+              tooltip: '新建文件',
+              onPressed: _loading || _transferInProgress ? null : _createFile,
+              icon: const Icon(Icons.note_add_outlined),
+            ),
+            IconButton(
+              tooltip: '新建文件夹',
               onPressed: _loading || _transferInProgress
                   ? null
-                  : _cdToCurrentDirectory,
-              icon: const Icon(Icons.subdirectory_arrow_right),
+                  : _createDirectory,
+              icon: const Icon(Icons.create_new_folder_outlined),
             ),
-          IconButton(
-            tooltip: '刷新目录',
-            onPressed: _loading || _transferInProgress ? null : _load,
-            icon: _loading
-                ? const SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.refresh),
-          ),
+            if (widget.onCdToDirectory != null)
+              IconButton(
+                tooltip: 'cd 到当前位置',
+                onPressed: _loading || _transferInProgress
+                    ? null
+                    : _cdToCurrentDirectory,
+                icon: const Icon(Icons.subdirectory_arrow_right),
+              ),
+            PopupMenuButton<_RemoteSortOption>(
+              tooltip: '排序设置',
+              initialValue: _sortOption,
+              onSelected: _selectSortOption,
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: _RemoteSortOption.nameAscending,
+                  child: Text('名称 A-Z'),
+                ),
+                const PopupMenuItem(
+                  value: _RemoteSortOption.nameDescending,
+                  child: Text('名称 Z-A'),
+                ),
+                const PopupMenuItem(
+                  value: _RemoteSortOption.modifiedNewest,
+                  child: Text('修改时间 新-旧'),
+                ),
+                const PopupMenuItem(
+                  value: _RemoteSortOption.modifiedOldest,
+                  child: Text('修改时间 旧-新'),
+                ),
+                const PopupMenuItem(
+                  value: _RemoteSortOption.sizeLargest,
+                  child: Text('大小 大-小'),
+                ),
+                const PopupMenuItem(
+                  value: _RemoteSortOption.sizeSmallest,
+                  child: Text('大小 小-大'),
+                ),
+              ],
+            ),
+            IconButton(
+              tooltip: '刷新目录',
+              onPressed: _loading || _transferInProgress ? null : _load,
+              icon: _loading
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh),
+            ),
+          ],
         ],
       ),
+      bottomNavigationBar: _buildActionBar(),
       body: Column(
         children: [
           Padding(
@@ -193,11 +251,17 @@ class _FileManagerPageState extends State<FileManagerPage> {
                     itemBuilder: (context, index) {
                       final entry = _entries[index];
                       return ListTile(
-                        leading: Icon(
-                          entry.isDirectory
-                              ? Icons.folder_outlined
-                              : Icons.description_outlined,
-                        ),
+                        selected: _selected.contains(entry.path),
+                        leading: _selected.isNotEmpty
+                            ? Checkbox(
+                                value: _selected.contains(entry.path),
+                                onChanged: (_) => _toggleSelection(entry.path),
+                              )
+                            : Icon(
+                                entry.isDirectory
+                                    ? Icons.folder_outlined
+                                    : Icons.description_outlined,
+                              ),
                         title: Text(
                           entry.name,
                           maxLines: 1,
@@ -206,7 +270,9 @@ class _FileManagerPageState extends State<FileManagerPage> {
                         subtitle: entry.isDirectory
                             ? const Text('目录')
                             : Text(_formatSize(entry.size)),
-                        trailing: entry.isDirectory
+                        trailing: _selected.isNotEmpty
+                            ? null
+                            : entry.isDirectory
                             ? const Icon(Icons.chevron_right)
                             : Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -221,7 +287,11 @@ class _FileManagerPageState extends State<FileManagerPage> {
                                   const Icon(Icons.chevron_right),
                                 ],
                               ),
-                        onTap: () => _open(entry),
+                        onTap: () => _selected.isEmpty
+                            ? _open(entry)
+                            : _toggleSelection(entry.path),
+                        onLongPress: () =>
+                            _toggleSelection(entry.path, select: true),
                       );
                     },
                   ),
@@ -231,14 +301,41 @@ class _FileManagerPageState extends State<FileManagerPage> {
     );
   }
 
+  Future<void> _initialize() async {
+    final saved = await _readFileManagerSortPreference(_sortPreferenceKey);
+    if (!mounted) return;
+    if (saved != null) {
+      setState(() => _sortOption = _remoteSortOptionFromStorage(saved));
+    }
+    final cached = widget.controller.cachedServerDirectory(
+      widget.server,
+      _path.text,
+    );
+    if (cached == null) {
+      await _load();
+      return;
+    }
+    final sorted = await _sortEntries(cached);
+    if (!mounted) return;
+    setState(() {
+      _entries = sorted;
+      _loading = true;
+      _error = null;
+    });
+    await _refresh(_path.text);
+  }
+
+  String get _sortPreferenceKey => 'server:${widget.server.id}';
+
   Future<void> _load({bool forceRefresh = false}) async {
     final path = _path.text.trim();
     if (path.isEmpty) return;
     final cached = widget.controller.cachedServerDirectory(widget.server, path);
     if (!forceRefresh && cached != null) {
+      final sorted = await _sortEntries(cached);
       if (mounted) {
         setState(() {
-          _entries = cached;
+          _entries = sorted;
           _loading = true;
           _error = null;
         });
@@ -261,8 +358,10 @@ class _FileManagerPageState extends State<FileManagerPage> {
         onFirstHostKey: _confirmHostKey,
         forceRefresh: true,
       );
+      _modifiedTimes.clear();
+      final sorted = await _sortEntries(entries);
       if (mounted && _path.text.trim() == path) {
-        setState(() => _entries = entries);
+        setState(() => _entries = sorted);
       }
     } catch (error) {
       if (mounted && _path.text.trim() == path) {
@@ -276,6 +375,397 @@ class _FileManagerPageState extends State<FileManagerPage> {
       if (mounted && _path.text.trim() == path) {
         setState(() => _loading = false);
       }
+    }
+  }
+
+  Future<void> _selectSortOption(_RemoteSortOption option) async {
+    if (option == _sortOption) return;
+    setState(() {
+      _sortOption = option;
+      _loading = true;
+      _error = null;
+    });
+    unawaited(_writeFileManagerSortPreference(_sortPreferenceKey, option.name));
+    try {
+      final sorted = await _sortEntries(_entries);
+      if (mounted) setState(() => _entries = sorted);
+    } catch (error) {
+      if (mounted) setState(() => _error = '排序失败：$error');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<List<SshDirectoryEntry>> _sortEntries(
+    Iterable<SshDirectoryEntry> source,
+  ) async {
+    if (_sortOption == _RemoteSortOption.modifiedNewest ||
+        _sortOption == _RemoteSortOption.modifiedOldest) {
+      await _loadModifiedTimes(source);
+    }
+    final entries = List<SshDirectoryEntry>.of(source);
+    entries.sort(_compareEntries);
+    return entries;
+  }
+
+  Future<void> _loadModifiedTimes(Iterable<SshDirectoryEntry> source) async {
+    final missing = source
+        .where((entry) => !_modifiedTimes.containsKey(entry.path))
+        .toList(growable: false);
+    if (missing.isEmpty) return;
+    final command =
+        'for p in ${missing.map((entry) => _shellQuote(entry.path)).join(' ')}; '
+        'do stat -c %Y -- "\$p" 2>/dev/null || printf \'0\\n\'; done';
+    final result = await widget.controller.runServerCommand(
+      widget.server,
+      command,
+      onFirstHostKey: _confirmHostKey,
+    );
+    if (result.exitCode != 0) return;
+    final lines = result.stdout.trim().split(RegExp(r'\s+'));
+    for (
+      var index = 0;
+      index < missing.length && index < lines.length;
+      index++
+    ) {
+      final seconds = int.tryParse(lines[index]);
+      _modifiedTimes[missing[index].path] = seconds == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+    }
+  }
+
+  int _compareEntries(SshDirectoryEntry left, SshDirectoryEntry right) {
+    if (left.isDirectory != right.isDirectory) {
+      return left.isDirectory ? -1 : 1;
+    }
+    int comparison;
+    switch (_sortOption) {
+      case _RemoteSortOption.nameAscending:
+      case _RemoteSortOption.nameDescending:
+        comparison = left.name.compareTo(right.name);
+      case _RemoteSortOption.modifiedNewest:
+      case _RemoteSortOption.modifiedOldest:
+        comparison = _compareNullable(
+          _modifiedTimes[left.path],
+          _modifiedTimes[right.path],
+        );
+      case _RemoteSortOption.sizeLargest:
+      case _RemoteSortOption.sizeSmallest:
+        comparison = _compareNullable(left.size, right.size);
+    }
+    if (comparison != 0 && _isDescending) return -comparison;
+    if (comparison != 0) return comparison;
+    return left.name.compareTo(right.name);
+  }
+
+  bool get _isDescending =>
+      _sortOption == _RemoteSortOption.nameDescending ||
+      _sortOption == _RemoteSortOption.modifiedNewest ||
+      _sortOption == _RemoteSortOption.sizeLargest;
+
+  int _compareNullable<T extends Comparable<Object>>(T? left, T? right) {
+    if (left == null) return right == null ? 0 : 1;
+    if (right == null) return -1;
+    return left.compareTo(right);
+  }
+
+  void _toggleSelection(String entryPath, {bool select = false}) {
+    setState(() {
+      if (select || !_selected.contains(entryPath)) {
+        _selected.add(entryPath);
+      } else {
+        _selected.remove(entryPath);
+      }
+    });
+  }
+
+  void _clearSelection() {
+    if (_selected.isEmpty) return;
+    setState(_selected.clear);
+  }
+
+  Widget? _buildActionBar() {
+    if (_selected.isEmpty && _clipboard.isEmpty) return null;
+    final selectedEntry = _selectedEntry;
+    return BottomAppBar(
+      padding: EdgeInsets.zero,
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 68,
+          child: Row(
+            children: [
+              _actionButton(
+                icon: Icons.copy_outlined,
+                label: '复制',
+                onPressed: _selected.isEmpty || _loading || _transferInProgress
+                    ? null
+                    : () => _copySelection(move: false),
+              ),
+              _actionButton(
+                icon: Icons.content_paste_outlined,
+                label: '粘贴',
+                onPressed: _clipboard.isEmpty || _loading || _transferInProgress
+                    ? null
+                    : _paste,
+              ),
+              _actionButton(
+                icon: Icons.drive_file_move_outlined,
+                label: '移动',
+                onPressed: _selected.isEmpty || _loading || _transferInProgress
+                    ? null
+                    : () => _copySelection(move: true),
+              ),
+              _actionButton(
+                icon: Icons.info_outline,
+                label: '属性',
+                onPressed: _selected.isEmpty || _loading || _transferInProgress
+                    ? null
+                    : _showInfo,
+              ),
+              _actionButton(
+                icon: Icons.drive_file_rename_outline,
+                label: '重命名',
+                onPressed:
+                    _selected.length != 1 || _loading || _transferInProgress
+                    ? null
+                    : _renameSelected,
+              ),
+              _actionButton(
+                icon: Icons.open_in_new,
+                label: '打开',
+                onPressed:
+                    selectedEntry == null ||
+                        selectedEntry.isDirectory ||
+                        _loading ||
+                        _transferInProgress
+                    ? null
+                    : _openSelected,
+              ),
+              _actionButton(
+                icon: Icons.delete_outline,
+                label: '删除',
+                onPressed: _selected.isEmpty || _loading || _transferInProgress
+                    ? null
+                    : _deleteSelected,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+  }) {
+    final color = onPressed == null
+        ? Theme.of(context).disabledColor
+        : Theme.of(context).colorScheme.primary;
+    return Expanded(
+      child: InkWell(
+        onTap: onPressed,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 21, color: color),
+            const SizedBox(height: 3),
+            Text(label, style: TextStyle(fontSize: 11, color: color)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  SshDirectoryEntry? get _selectedEntry {
+    if (_selected.length != 1) return null;
+    final path = _selected.single;
+    for (final entry in _entries) {
+      if (entry.path == path) return entry;
+    }
+    return null;
+  }
+
+  void _copySelection({required bool move}) {
+    setState(() {
+      _clipboard
+        ..clear()
+        ..addAll(_selected);
+      _clipboardMoves = move;
+      _selected.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(move ? '已准备移动，进入目标文件夹后粘贴' : '已复制，进入目标文件夹后粘贴')),
+    );
+  }
+
+  Future<void> _paste() async {
+    if (_clipboard.isEmpty) return;
+    final destination = _normalizeRemotePath(_path.text);
+    final paths = List<String>.from(_clipboard);
+    final move = _clipboardMoves;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      if (move) {
+        await widget.controller.moveServerFiles(
+          widget.server,
+          paths,
+          destination,
+          onFirstHostKey: _confirmHostKey,
+        );
+      } else {
+        await widget.controller.copyServerFiles(
+          widget.server,
+          paths,
+          destination,
+          onFirstHostKey: _confirmHostKey,
+        );
+      }
+      if (move) _clipboard.clear();
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(move ? '移动完成' : '粘贴完成')));
+        await _load(forceRefresh: true);
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = '粘贴失败：$error');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _renameSelected() async {
+    final entry = _selectedEntry;
+    if (entry == null) return;
+    final name = await _askName(
+      '重命名',
+      '名称',
+      initialValue: entry.name,
+      confirmLabel: '保存',
+    );
+    if (name == null || name.trim().isEmpty) return;
+    try {
+      await widget.controller.renameServerFile(
+        widget.server,
+        entry.path,
+        name,
+        onFirstHostKey: _confirmHostKey,
+      );
+      _clearSelection();
+      if (mounted) await _load(forceRefresh: true);
+    } catch (error) {
+      if (mounted) setState(() => _error = '重命名失败：$error');
+    }
+  }
+
+  Future<void> _showInfo() async {
+    final selected = List<String>.from(_selected);
+    if (selected.length != 1) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text('属性'),
+          content: Text('已选择 ${selected.length} 项'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    try {
+      final info = await widget.controller.statServerFile(
+        widget.server,
+        selected.single,
+        onFirstHostKey: _confirmHostKey,
+      );
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: Text(info.name),
+          content: Text(
+            '位置：${info.path}\n'
+            '类型：${info.isSymbolicLink
+                ? '符号链接'
+                : info.isDirectory
+                ? '文件夹'
+                : '文件'}\n'
+            '大小：${_formatSize(info.size)}\n'
+            '修改时间：${_formatRemoteDate(info.modified)}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = '读取属性失败：$error');
+    }
+  }
+
+  Future<void> _openSelected() async {
+    final entry = _selectedEntry;
+    if (entry == null || entry.isDirectory) return;
+    _clearSelection();
+    await _download(entry, openAfterDownload: true);
+  }
+
+  Future<void> _deleteSelected() async {
+    final paths = List<String>.from(_selected);
+    if (paths.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除文件'),
+        content: Text('确定删除已选择的 ${paths.length} 项？文件夹及其内容也会删除。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      await widget.controller.deleteServerFiles(
+        widget.server,
+        paths,
+        onFirstHostKey: _confirmHostKey,
+      );
+      if (mounted) {
+        setState(_selected.clear);
+        await _load(forceRefresh: true);
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('删除完成')));
+        }
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = '删除失败：$error');
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -323,7 +813,10 @@ class _FileManagerPageState extends State<FileManagerPage> {
     return '${(progress * 100).round()}%';
   }
 
-  Future<void> _download(SshDirectoryEntry entry) async {
+  Future<void> _download(
+    SshDirectoryEntry entry, {
+    bool openAfterDownload = false,
+  }) async {
     final projects = widget.controller.projects;
     if (projects.isEmpty) {
       ScaffoldMessenger.of(context)
@@ -345,7 +838,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
       _error = null;
     });
     try {
-      await widget.controller.downloadServerFileToProject(
+      final downloaded = await widget.controller.downloadServerFileToProject(
         widget.server,
         project,
         entry.path,
@@ -359,9 +852,16 @@ class _FileManagerPageState extends State<FileManagerPage> {
           });
         },
       );
+      if (openAfterDownload) await AndroidFileOpener.open(downloaded.path);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已下载到 ${project.name}/$projectPath')),
+          SnackBar(
+            content: Text(
+              openAfterDownload
+                  ? '已下载并打开 ${project.name}/$projectPath'
+                  : '已下载到 ${project.name}/$projectPath',
+            ),
+          ),
         );
       }
     } catch (error) {
@@ -592,6 +1092,63 @@ class _FileManagerPageState extends State<FileManagerPage> {
     }
   }
 
+  Future<void> _createDirectory() async {
+    final name = await _askName('新建文件夹', '文件夹名称');
+    if (name == null || name.trim().isEmpty) return;
+    if (name.contains('/') || name.contains('\\')) {
+      setState(() => _error = '文件夹名称不能包含路径分隔符');
+      return;
+    }
+    final directory = _normalizeRemotePath(_path.text);
+    final path = path_util.posix.join(directory, name.trim());
+    try {
+      await widget.controller.createServerDirectory(
+        widget.server,
+        path,
+        onFirstHostKey: _confirmHostKey,
+      );
+      await _load(forceRefresh: true);
+    } catch (error) {
+      if (mounted) setState(() => _error = '新建文件夹失败：$error');
+    }
+  }
+
+  Future<String?> _askName(
+    String title,
+    String label, {
+    String? initialValue,
+    String confirmLabel = '创建',
+  }) {
+    final controller = TextEditingController(text: initialValue);
+    if (initialValue != null) {
+      controller.selection = TextSelection.collapsed(
+        offset: initialValue.length,
+      );
+    }
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(labelText: label),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
+  }
+
   void _cdToCurrentDirectory() {
     final path = _path.text.trim();
     if (path.isEmpty) return;
@@ -776,4 +1333,53 @@ String _formatSize(int? size) {
   if (size < 1024) return '$size B';
   if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KiB';
   return '${(size / (1024 * 1024)).toStringAsFixed(1)} MiB';
+}
+
+String _normalizeRemotePath(String value) {
+  final path = value.trim().replaceAll('\\', '/');
+  if (path.isEmpty) return '/';
+  return path_util.posix.normalize(path);
+}
+
+String _formatRemoteDate(DateTime? value) {
+  if (value == null) return '未知';
+  return value.toLocal().toString().split('.').first;
+}
+
+_RemoteSortOption _remoteSortOptionFromStorage(String value) {
+  for (final option in _RemoteSortOption.values) {
+    if (option.name == value) return option;
+  }
+  return _RemoteSortOption.nameAscending;
+}
+
+String _shellQuote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
+
+Future<String?> _readFileManagerSortPreference(String key) async {
+  try {
+    final directory = await getApplicationSupportDirectory();
+    final file = File(
+      path_util.join(
+        directory.path,
+        'file-manager-sort-${Uri.encodeComponent(key)}',
+      ),
+    );
+    if (!await file.exists()) return null;
+    return (await file.readAsString()).trim();
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> _writeFileManagerSortPreference(String key, String value) async {
+  try {
+    final directory = await getApplicationSupportDirectory();
+    await directory.create(recursive: true);
+    await File(
+      path_util.join(
+        directory.path,
+        'file-manager-sort-${Uri.encodeComponent(key)}',
+      ),
+    ).writeAsString(value, flush: true);
+  } catch (_) {}
 }
