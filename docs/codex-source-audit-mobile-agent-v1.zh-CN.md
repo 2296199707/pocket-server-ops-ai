@@ -809,6 +809,19 @@
 - 发布前验证：`flutter test` 全量 156 项通过；`flutter analyze` 通过；`git diff --check`
   通过。构建输出和 APK 均位于 `/www` 数据盘。
 
+### 2026-08-28：Beta 1.0.3-beta.15 发布记录
+
+- 发布内容：工作模式、项目、服务器和工作目录切换不再截断对话上下文；追加配置变更
+  提示并保留旧对话，兼容旧版本遗留的历史边界事件。新建对话只创建空任务，不清理已有
+  对话或历史。
+- 功能修复提交：`ccd2d58`；版本提交：`cecb7f4`；GitHub 标签：`v1.0.3-beta.15`。
+- 版本：`1.0.3-beta.15+24`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.15-release.apk`。
+- APK 校验：`76,493,795` bytes；SHA-256
+  `ba6fff6487804617f7e9f7aa291ac36c21a5fef1f48a3171bf068fbaf08478e1`。
+- 发布前验证：`flutter analyze` 通过；聚焦测试 46 项通过；`flutter test` 全量通过；
+  `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
