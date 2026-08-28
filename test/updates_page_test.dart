@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -49,5 +51,41 @@ void main() {
       UpdateService.compareVersions('1.0.3', '1.0.3-beta.9'),
       greaterThan(0),
     );
+  });
+
+  test('downloads an APK to a local file and reports progress', () async {
+    final bytes = List<int>.generate(2048, (index) => index % 251);
+    final service = UpdateService(
+      client: MockClient((request) async {
+        expect(request.method, 'GET');
+        return http.Response.bytes(bytes, 200);
+      }),
+    );
+    addTearDown(service.close);
+    final destination = await Directory.systemTemp.createTemp(
+      'pocket-server-ops-update-',
+    );
+    addTearDown(() => destination.delete(recursive: true));
+    final release = AppRelease(
+      version: '1.0.3-beta.17',
+      title: 'Beta',
+      notes: '',
+      releaseUrl: Uri.parse('https://github.com/example/release'),
+      isPrerelease: true,
+      apkUrl: Uri.parse('https://github.com/example/app.apk'),
+    );
+    final progress = <List<int>>[];
+
+    final file = await service.downloadApk(
+      release,
+      destination,
+      onProgress: (received, total) => progress.add([received, total ?? -1]),
+    );
+
+    expect(await file.readAsBytes(), bytes);
+    expect(file.path, contains('pocket-server-ops-ai-v1.0.3-beta.17.apk'));
+    expect(progress.first, [0, bytes.length]);
+    expect(progress.last, [bytes.length, bytes.length]);
+    expect(await File('${file.path}.part').exists(), isFalse);
   });
 }

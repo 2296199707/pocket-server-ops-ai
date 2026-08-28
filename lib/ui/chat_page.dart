@@ -355,99 +355,117 @@ class ChatPageState extends State<ChatPage> {
                         ),
                         onSubmitted: (_) => _send(),
                       ),
-                      Row(
-                        children: [
-                          IconButton(
-                            tooltip: '附件、图片和项目文件',
-                            visualDensity: VisualDensity.compact,
-                            constraints: const BoxConstraints.tightFor(
-                              width: 34,
-                              height: 34,
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final modelMaxWidth = constraints.maxWidth < 420
+                              ? 104.0
+                              : 180.0;
+                          return Align(
+                            alignment: Alignment.centerRight,
+                            child: Wrap(
+                              alignment: WrapAlignment.end,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              spacing: 2,
+                              runSpacing: 2,
+                              children: [
+                                IconButton(
+                                  tooltip: '附件、图片和项目文件',
+                                  visualDensity: VisualDensity.compact,
+                                  constraints: const BoxConstraints.tightFor(
+                                    width: 34,
+                                    height: 34,
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  onPressed:
+                                      widget.controller.providers.isEmpty ||
+                                          running ||
+                                          _sending
+                                      ? null
+                                      : _openComposerActions,
+                                  icon: const Icon(Icons.add_circle_outline),
+                                ),
+                                ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxWidth: modelMaxWidth,
+                                  ),
+                                  child: _ModelReasoningPill(
+                                    model:
+                                        task?.modelOverride ??
+                                        _modelOverride ??
+                                        provider?.model,
+                                    reasoningEffort:
+                                        task?.reasoningEffortOverride ??
+                                        _reasoningEffortOverride ??
+                                        provider?.reasoningEffort ??
+                                        'default',
+                                    onTap: running || _loadingModels
+                                        ? null
+                                        : _selectModelAndReasoning,
+                                  ),
+                                ),
+                                _ChatUtilityBar(
+                                  hasProject: activeProject != null,
+                                  hasServers:
+                                      usesServer &&
+                                      widget.controller.servers.isNotEmpty,
+                                  onProjectFiles: activeProject == null
+                                      ? null
+                                      : _openProjectFiles,
+                                  onServerFiles:
+                                      !usesServer ||
+                                          widget.controller.servers.isEmpty
+                                      ? null
+                                      : _openFilesFromTools,
+                                  onTerminal:
+                                      !usesServer ||
+                                          widget.controller.servers.isEmpty
+                                      ? null
+                                      : _openTerminalFromTools,
+                                ),
+                                const SizedBox(width: 2),
+                                if (running)
+                                  IconButton.filled(
+                                    tooltip: '停止',
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 34,
+                                      height: 34,
+                                    ),
+                                    padding: EdgeInsets.zero,
+                                    onPressed: () => widget.controller.stopTask(
+                                      task.id,
+                                      expectedTurnId: widget.controller
+                                          .activeTurnIdFor(task.id),
+                                    ),
+                                    icon: const Icon(Icons.stop),
+                                  )
+                                else
+                                  IconButton.filled(
+                                    tooltip: '发送',
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 34,
+                                      height: 34,
+                                    ),
+                                    padding: EdgeInsets.zero,
+                                    onPressed:
+                                        _sending ||
+                                            widget.controller.providers.isEmpty
+                                        ? null
+                                        : _send,
+                                    icon: _sending
+                                        ? const SizedBox.square(
+                                            dimension: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(Icons.send_outlined),
+                                  ),
+                              ],
                             ),
-                            padding: EdgeInsets.zero,
-                            onPressed:
-                                widget.controller.providers.isEmpty ||
-                                    running ||
-                                    _sending
-                                ? null
-                                : _openComposerActions,
-                            icon: const Icon(Icons.add_circle_outline),
-                          ),
-                          const Spacer(),
-                          Flexible(
-                            child: _ModelReasoningPill(
-                              model:
-                                  task?.modelOverride ??
-                                  _modelOverride ??
-                                  provider?.model,
-                              reasoningEffort:
-                                  task?.reasoningEffortOverride ??
-                                  _reasoningEffortOverride ??
-                                  provider?.reasoningEffort ??
-                                  'default',
-                              onTap: running || _loadingModels
-                                  ? null
-                                  : _selectModelAndReasoning,
-                            ),
-                          ),
-                          _ChatUtilityBar(
-                            hasProject: activeProject != null,
-                            hasServers:
-                                usesServer &&
-                                widget.controller.servers.isNotEmpty,
-                            onProjectFiles: activeProject == null
-                                ? null
-                                : _openProjectFiles,
-                            onServerFiles:
-                                !usesServer || widget.controller.servers.isEmpty
-                                ? null
-                                : _openFilesFromTools,
-                            onTerminal:
-                                !usesServer || widget.controller.servers.isEmpty
-                                ? null
-                                : _openTerminalFromTools,
-                          ),
-                          const SizedBox(width: 2),
-                          if (running)
-                            IconButton.filled(
-                              tooltip: '停止',
-                              visualDensity: VisualDensity.compact,
-                              constraints: const BoxConstraints.tightFor(
-                                width: 34,
-                                height: 34,
-                              ),
-                              padding: EdgeInsets.zero,
-                              onPressed: () => widget.controller.stopTask(
-                                task.id,
-                                expectedTurnId: widget.controller
-                                    .activeTurnIdFor(task.id),
-                              ),
-                              icon: const Icon(Icons.stop),
-                            )
-                          else
-                            IconButton.filled(
-                              tooltip: '发送',
-                              visualDensity: VisualDensity.compact,
-                              constraints: const BoxConstraints.tightFor(
-                                width: 34,
-                                height: 34,
-                              ),
-                              padding: EdgeInsets.zero,
-                              onPressed:
-                                  _sending ||
-                                      widget.controller.providers.isEmpty
-                                  ? null
-                                  : _send,
-                              icon: _sending
-                                  ? const SizedBox.square(
-                                      dimension: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.send_outlined),
-                            ),
-                        ],
+                          );
+                        },
                       ),
                     ],
                   ),

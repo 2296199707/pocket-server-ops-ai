@@ -8,14 +8,17 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import androidx.core.content.FileProvider
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     private val channelName = "mobile_agent/foreground"
     private val storageChannelName = "mobile_agent/storage"
+    private val updateChannelName = "mobile_agent/update"
     private val storageRequestCode = 2007
     private val legacyStorageRequestCode = 2008
     private var storageResult: MethodChannel.Result? = null
@@ -55,6 +58,14 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "hasExternalStorageAccess" -> result.success(hasExternalStorageAccess())
                     "requestExternalStorageAccess" -> requestExternalStorageAccess(result)
+                    else -> result.notImplemented()
+                }
+            }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, updateChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "installApk" -> installApk(call.argument<String>("path"), result)
                     else -> result.notImplemented()
                 }
             }
@@ -134,5 +145,54 @@ class MainActivity : FlutterActivity() {
         // its command channel avoids a second foreground-service start when
         // the Dart isolate finishes after the Activity is backgrounded.
         startService(intent)
+    }
+
+    private fun installApk(path: String?, result: MethodChannel.Result) {
+        if (path.isNullOrBlank()) {
+            result.error("invalid_apk", "APK 路径为空", null)
+            return
+        }
+        val file = File(path)
+        if (!file.isFile) {
+            result.error("invalid_apk", "APK 文件不存在", null)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
+            result.error(
+                "install_permission_required",
+                "请允许本应用安装未知应用",
+                null,
+            )
+            return
+        }
+
+        try {
+            val uri = FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                file,
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(intent)
+            result.success(null)
+        } catch (error: Exception) {
+            result.error(
+                "install_failed",
+                error.message ?: "无法启动系统安装器",
+                null,
+            )
+        }
     }
 }

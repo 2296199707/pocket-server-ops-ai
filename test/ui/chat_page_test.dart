@@ -296,6 +296,47 @@ void main() {
     expect(settings, greaterThan(provider));
   });
 
+  testWidgets('composer actions stay right aligned on a tablet', (
+    tester,
+  ) async {
+    tester.binding.setSurfaceSize(const Size(800, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveProvider(
+      name: '平板布局供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      secret: 'test-key',
+      isDefault: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatPage(
+            controller: controller,
+            taskId: null,
+            onTaskActivated: (_) {},
+            onOpenSettings: () {},
+            onConfirmTool: (_, _, _) async => true,
+            onConfirmHostKey: (_, _) async => true,
+            onUserInfoRequest: (_, _) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final attachment = tester.getTopLeft(find.byTooltip('附件、图片和项目文件'));
+    final send = tester.getTopLeft(find.byTooltip('发送'));
+    expect(attachment.dx, greaterThan(400));
+    expect(send.dx, greaterThan(740));
+  });
+
   testWidgets('Responses context details expose manual compaction', (
     tester,
   ) async {

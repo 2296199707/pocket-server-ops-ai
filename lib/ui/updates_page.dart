@@ -1,14 +1,22 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import '../platform/app_update_installer.dart';
 
 const _repositoryOwner = '2296199707';
 const _repositoryName = 'pocket-server-ops-ai';
-const _fallbackVersion = '1.0.2';
+const _fallbackVersion = '1.0.3-beta.17';
+
+typedef UpdateDownloadProgress = void Function(int received, int? total);
 
 class AppRelease {
   const AppRelease({
@@ -110,6 +118,63 @@ class UpdateService {
     return releases;
   }
 
+  static String apkFileName(String version) =>
+      'pocket-server-ops-ai-v$version.apk';
+
+  Future<File> downloadApk(
+    AppRelease release,
+    Directory destination, {
+    UpdateDownloadProgress? onProgress,
+  }) async {
+    final uri = release.apkUrl;
+    if (uri == null) {
+      throw StateError('此版本没有可下载的 APK');
+    }
+    await destination.create(recursive: true);
+    final target = File(
+      path.join(destination.path, apkFileName(release.version)),
+    );
+    final partial = File('${target.path}.part');
+    if (await partial.exists()) await partial.delete();
+
+    final request = http.Request('GET', uri)
+      ..headers.addAll(const {
+        'Accept': 'application/vnd.android.package-archive',
+        'User-Agent': 'PocketServerOps-AI',
+      });
+    final response = await _client
+        .send(request)
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('APK 下载失败：HTTP ${response.statusCode}');
+    }
+
+    final sink = partial.openWrite();
+    var received = 0;
+    var closed = false;
+    onProgress?.call(0, response.contentLength);
+    try {
+      await for (final chunk in response.stream.timeout(
+        const Duration(seconds: 30),
+      )) {
+        sink.add(chunk);
+        received += chunk.length;
+        onProgress?.call(received, response.contentLength);
+      }
+      if (received == 0) throw StateError('APK 下载内容为空');
+      await sink.flush();
+      await sink.close();
+      closed = true;
+      if (await target.exists()) await target.delete();
+      await partial.rename(target.path);
+      return target;
+    } catch (_) {
+      if (!closed) await sink.close();
+      if (await partial.exists()) await partial.delete();
+      rethrow;
+    }
+  }
+
   void close() => _client.close();
 
   static int compareVersions(String left, String right) {
@@ -181,9 +246,15 @@ class _VersionParts {
 }
 
 class UpdatesPage extends StatefulWidget {
-  const UpdatesPage({super.key, this.service, this.includePrereleases = false});
+  const UpdatesPage({
+    super.key,
+    this.service,
+    this.installer,
+    this.includePrereleases = false,
+  });
 
   final UpdateService? service;
+  final AppUpdateInstaller? installer;
   final bool includePrereleases;
 
   @override
@@ -192,10 +263,19 @@ class UpdatesPage extends StatefulWidget {
 
 class _UpdatesPageState extends State<UpdatesPage> {
   late final UpdateService _service = widget.service ?? UpdateService();
+  late final AppUpdateInstaller _installer =
+      widget.installer ?? const AppUpdateInstaller();
   String _currentVersion = _fallbackVersion;
   List<AppRelease> _releases = const [];
   bool _loading = false;
   bool _checked = false;
+  bool _downloading = false;
+  bool _installing = false;
+  bool _downloadOperationActive = false;
+  String? _downloadVersion;
+  File? _downloadedApk;
+  int _downloadedBytes = 0;
+  int? _downloadTotal;
   String? _error;
 
   @override
@@ -255,7 +335,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
           ],
           const SizedBox(height: 16),
           Text(
-            '更新来源：GitHub Releases。旧版本下载后，Android 可能要求先处理当前版本后才能回退安装。',
+            '更新来源：GitHub Releases。APK 默认在 APP 内下载并交给 Android 安装；也可从版本菜单打开浏览器或复制链接。',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
@@ -270,6 +350,9 @@ class _UpdatesPageState extends State<UpdatesPage> {
     );
     final isCurrent = comparison == 0;
     final isNewer = comparison > 0;
+    final isDownloading = _downloading && _downloadVersion == release.version;
+    final isDownloaded =
+        _downloadVersion == release.version && _downloadedApk != null;
     final actionLabel = isCurrent
         ? '当前'
         : isNewer
@@ -283,23 +366,75 @@ class _UpdatesPageState extends State<UpdatesPage> {
     ].join('\n');
 
     return Card(
-      child: ListTile(
-        leading: Icon(
-          isCurrent
-              ? Icons.check_circle_outline
-              : isNewer
-              ? Icons.system_update_outlined
-              : Icons.history,
-        ),
-        title: Text('v${release.version}'),
-        subtitle: subtitle.isEmpty ? null : Text(subtitle),
-        isThreeLine: subtitle.split('\n').length > 2,
-        trailing: isCurrent
-            ? null
-            : OutlinedButton(
-                onPressed: () => _openRelease(release, isNewer: isNewer),
-                child: Text(actionLabel),
+      child: Column(
+        children: [
+          ListTile(
+            leading: Icon(
+              isCurrent
+                  ? Icons.check_circle_outline
+                  : isNewer
+                  ? Icons.system_update_outlined
+                  : Icons.history,
+            ),
+            title: Text('v${release.version}'),
+            subtitle: subtitle.isEmpty ? null : Text(subtitle),
+            isThreeLine: subtitle.split('\n').length > 2,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!isCurrent)
+                  OutlinedButton.icon(
+                    onPressed:
+                        release.apkUrl == null || _downloading || _installing
+                        ? null
+                        : () => _downloadOrInstall(release, isNewer: isNewer),
+                    icon: Icon(
+                      isDownloaded
+                          ? Icons.install_mobile_outlined
+                          : Icons.download_outlined,
+                    ),
+                    label: Text(
+                      isDownloading
+                          ? _downloadPercentLabel()
+                          : isDownloaded
+                          ? '安装'
+                          : actionLabel,
+                    ),
+                  ),
+                PopupMenuButton<_ReleaseMenuAction>(
+                  tooltip: '更多下载方式',
+                  onSelected: (action) => _handleMenuAction(action, release),
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: _ReleaseMenuAction.browser,
+                      child: ListTile(
+                        leading: Icon(Icons.open_in_browser_outlined),
+                        title: Text('浏览器打开'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: _ReleaseMenuAction.copy,
+                      child: ListTile(
+                        leading: Icon(Icons.link_outlined),
+                        title: Text('复制下载链接'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (isDownloading)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: LinearProgressIndicator(
+                value: _downloadProgress,
+                minHeight: 3,
               ),
+            ),
+        ],
       ),
     );
   }
@@ -347,7 +482,47 @@ class _UpdatesPageState extends State<UpdatesPage> {
     }
   }
 
-  Future<void> _openRelease(AppRelease release, {required bool isNewer}) async {
+  double? get _downloadProgress {
+    final total = _downloadTotal;
+    if (total == null || total <= 0) return null;
+    return (_downloadedBytes / total).clamp(0, 1).toDouble();
+  }
+
+  String _downloadPercentLabel() {
+    final progress = _downloadProgress;
+    return progress == null ? '下载中' : '${(progress * 100).round()}%';
+  }
+
+  Future<Directory> _downloadDirectory() async {
+    final support = await getApplicationSupportDirectory();
+    return Directory(path.join(support.path, 'updates'));
+  }
+
+  Future<void> _downloadOrInstall(
+    AppRelease release, {
+    required bool isNewer,
+  }) async {
+    if (_downloadOperationActive) return;
+    _downloadOperationActive = true;
+    try {
+      await _downloadOrInstallOnce(release, isNewer: isNewer);
+    } finally {
+      _downloadOperationActive = false;
+    }
+  }
+
+  Future<void> _downloadOrInstallOnce(
+    AppRelease release, {
+    required bool isNewer,
+  }) async {
+    if (_downloadVersion == release.version && _downloadedApk != null) {
+      if (await _downloadedApk!.exists()) {
+        if (!mounted) return;
+        await _installApk(_downloadedApk!);
+        return;
+      }
+    }
+    if (!mounted) return;
     if (!isNewer) {
       final confirmed = await showDialog<bool>(
         context: context,
@@ -370,12 +545,93 @@ class _UpdatesPageState extends State<UpdatesPage> {
       );
       if (confirmed != true) return;
     }
-    final uri = release.apkUrl ?? release.releaseUrl;
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
-        mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('无法打开下载页面')));
+    final uri = release.apkUrl;
+    if (uri == null) {
+      _showMessage('此版本没有可下载的 APK，请使用版本菜单查看 Release 页面');
+      return;
     }
+
+    final directory = await _downloadDirectory();
+    if (!mounted) return;
+    final cached = File(
+      path.join(directory.path, UpdateService.apkFileName(release.version)),
+    );
+    if (await cached.exists() && await cached.length() > 0) {
+      if (!mounted) return;
+      setState(() {
+        _downloadVersion = release.version;
+        _downloadedApk = cached;
+      });
+      await _installApk(cached);
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _downloading = true;
+      _downloadVersion = release.version;
+      _downloadedApk = null;
+      _downloadedBytes = 0;
+      _downloadTotal = null;
+      _error = null;
+    });
+    try {
+      final file = await _service.downloadApk(
+        release,
+        directory,
+        onProgress: (received, total) {
+          if (!mounted) return;
+          setState(() {
+            _downloadedBytes = received;
+            _downloadTotal = total;
+          });
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _downloading = false;
+        _downloadedApk = file;
+      });
+      await _installApk(file);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _downloading = false);
+      _showMessage('下载更新失败：$error');
+    }
+  }
+
+  Future<void> _installApk(File file) async {
+    if (mounted) setState(() => _installing = true);
+    try {
+      await _installer.install(file);
+      if (mounted) _showMessage('已打开系统安装器');
+    } catch (error) {
+      if (mounted) _showMessage('安装更新失败：$error');
+    } finally {
+      if (mounted) setState(() => _installing = false);
+    }
+  }
+
+  Future<void> _handleMenuAction(
+    _ReleaseMenuAction action,
+    AppRelease release,
+  ) async {
+    final uri = release.apkUrl ?? release.releaseUrl;
+    switch (action) {
+      case _ReleaseMenuAction.browser:
+        if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
+            mounted) {
+          _showMessage('无法打开浏览器');
+        }
+      case _ReleaseMenuAction.copy:
+        await Clipboard.setData(ClipboardData(text: uri.toString()));
+        if (mounted) _showMessage('下载链接已复制');
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   String _formatDate(DateTime date) {
@@ -391,3 +647,5 @@ class _UpdatesPageState extends State<UpdatesPage> {
         : singleLine;
   }
 }
+
+enum _ReleaseMenuAction { browser, copy }

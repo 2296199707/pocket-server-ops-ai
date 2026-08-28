@@ -28,11 +28,11 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   static const _compactDrawerDensity = VisualDensity(
-    horizontal: -2,
-    vertical: -4,
+    horizontal: -1,
+    vertical: -2,
   );
-  static const _drawerTitleStyle = TextStyle(fontSize: 12, height: 1.05);
-  static const _drawerSubtitleStyle = TextStyle(fontSize: 9, height: 1.0);
+  static const _drawerTitleStyle = TextStyle(fontSize: 13, height: 1.1);
+  static const _drawerSubtitleStyle = TextStyle(fontSize: 10, height: 1.05);
 
   final _chatKey = GlobalKey<ChatPageState>();
   int _selectedIndex = 0;
@@ -207,7 +207,9 @@ class _HomeShellState extends State<HomeShell> {
     final otherTasks = widget.controller.tasks
         .where((task) => task.projectId == null)
         .toList(growable: false);
+    final drawerWidth = MediaQuery.sizeOf(context).width >= 600 ? 360.0 : null;
     return Drawer(
+      width: drawerWidth,
       child: SafeArea(
         child: Column(
           children: [
@@ -254,7 +256,7 @@ class _HomeShellState extends State<HomeShell> {
             ListTile(
               dense: true,
               visualDensity: _compactDrawerDensity,
-              minTileHeight: 32,
+              minTileHeight: 36,
               minVerticalPadding: 0,
               minLeadingWidth: 20,
               horizontalTitleGap: 6,
@@ -273,7 +275,7 @@ class _HomeShellState extends State<HomeShell> {
                     key: const PageStorageKey<String>('other-conversations'),
                     dense: true,
                     visualDensity: _compactDrawerDensity,
-                    minTileHeight: 32,
+                    minTileHeight: 36,
                     tilePadding: const EdgeInsets.symmetric(horizontal: 12),
                     childrenPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.chat_bubble_outline, size: 18),
@@ -283,7 +285,7 @@ class _HomeShellState extends State<HomeShell> {
                         const ListTile(
                           dense: true,
                           visualDensity: _compactDrawerDensity,
-                          minTileHeight: 28,
+                          minTileHeight: 32,
                           minVerticalPadding: 0,
                           contentPadding: EdgeInsets.only(left: 40),
                           title: Text('暂无对话', style: _drawerSubtitleStyle),
@@ -297,7 +299,7 @@ class _HomeShellState extends State<HomeShell> {
                     const ListTile(
                       dense: true,
                       visualDensity: _compactDrawerDensity,
-                      minTileHeight: 28,
+                      minTileHeight: 32,
                       minVerticalPadding: 0,
                       contentPadding: EdgeInsets.symmetric(horizontal: 12),
                       leading: Icon(Icons.folder_off_outlined, size: 18),
@@ -309,7 +311,7 @@ class _HomeShellState extends State<HomeShell> {
                         key: PageStorageKey<String>('project-${project.id}'),
                         dense: true,
                         visualDensity: _compactDrawerDensity,
-                        minTileHeight: 40,
+                        minTileHeight: 44,
                         tilePadding: const EdgeInsets.symmetric(horizontal: 12),
                         childrenPadding: EdgeInsets.zero,
                         leading: const Icon(Icons.folder_outlined, size: 18),
@@ -359,7 +361,7 @@ class _HomeShellState extends State<HomeShell> {
                             const ListTile(
                               dense: true,
                               visualDensity: _compactDrawerDensity,
-                              minTileHeight: 28,
+                              minTileHeight: 32,
                               minVerticalPadding: 0,
                               contentPadding: EdgeInsets.only(left: 40),
                               title: Text(
@@ -376,7 +378,7 @@ class _HomeShellState extends State<HomeShell> {
             ListTile(
               dense: true,
               visualDensity: _compactDrawerDensity,
-              minTileHeight: 32,
+              minTileHeight: 36,
               minVerticalPadding: 0,
               minLeadingWidth: 20,
               horizontalTitleGap: 6,
@@ -397,12 +399,12 @@ class _HomeShellState extends State<HomeShell> {
 
   Widget _drawerSectionTitle(String title) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Text(
           title,
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         ),
       ),
     );
@@ -451,9 +453,9 @@ class _HomeShellState extends State<HomeShell> {
           ),
           PopupMenuButton<String>(
             tooltip: '对话操作',
-            constraints: const BoxConstraints.tightFor(width: 24, height: 24),
+            constraints: const BoxConstraints.tightFor(width: 26, height: 26),
             padding: EdgeInsets.zero,
-            iconSize: 14,
+            iconSize: 15,
             position: PopupMenuPosition.under,
             onSelected: (value) {
               if (value == 'rename') {
@@ -1152,8 +1154,8 @@ class _DrawerActionButton extends StatelessWidget {
       child: OutlinedButton(
         onPressed: onPressed,
         style: OutlinedButton.styleFrom(
-          minimumSize: const Size(0, 38),
-          padding: const EdgeInsets.symmetric(horizontal: 4),
+          minimumSize: const Size(0, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 5),
           visualDensity: VisualDensity.compact,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
@@ -1161,7 +1163,7 @@ class _DrawerActionButton extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(icon, size: 16),
+            Icon(icon, size: 17),
             const SizedBox(width: 3),
             Expanded(
               child: Text(
@@ -1169,7 +1171,7 @@ class _DrawerActionButton extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 11),
+                style: const TextStyle(fontSize: 12),
               ),
             ),
           ],
@@ -1195,17 +1197,17 @@ class _DrawerItemIconButton extends StatelessWidget {
     return IconButton(
       tooltip: tooltip,
       onPressed: onPressed,
-      constraints: const BoxConstraints.tightFor(width: 24, height: 24),
+      constraints: const BoxConstraints.tightFor(width: 26, height: 26),
       padding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
       style: IconButton.styleFrom(
-        fixedSize: const Size(24, 24),
+        fixedSize: const Size(26, 26),
         minimumSize: Size.zero,
-        maximumSize: const Size(24, 24),
+        maximumSize: const Size(26, 26),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         padding: EdgeInsets.zero,
       ),
-      icon: Icon(icon, size: 13),
+      icon: Icon(icon, size: 14),
     );
   }
 }
