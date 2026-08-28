@@ -1003,6 +1003,19 @@
 - 发布前验证：`flutter analyze` 通过；本轮完整 `flutter test` 164 项通过；
   `git diff --check` 通过；APK 构建和图标资源检查通过。构建输出和 APK 均位于 `/www` 数据盘。
 
+### 2026-08-28：Beta 1.0.3-beta.21 发布记录
+
+- 发布内容：为服务器文件下载增加 512KB SFTP 分块读取和 `.part` 续传元数据；文件管理器
+  和 `server.download_to_project` 都使用同一套可恢复下载流程，断线后按已写入字节继续，
+  完成后才替换正式文件；后台任务增加前台服务进度、部分唤醒锁和可选跨 App 悬浮胶囊。
+- 功能提交：`b391f74`；版本提交：`372f8e5`。
+- 版本：`1.0.3-beta.21+30`；GitHub 标签：`v1.0.3-beta.21`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.21-release.apk`。
+- APK 校验：`77,422,583` bytes；SHA-256
+  `f7147e9ec90eca1097780610ff9e0dfef5d094de2055c7db6dc4a97b9c55b734`。
+- 发布前验证：`flutter analyze` 通过；续传、SSH、Agent、远程工具和设置页聚焦测试 89 项
+  全部通过；`git diff --check` 通过；release APK 构建通过。构建输出和 APK 均位于 `/www` 数据盘。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
