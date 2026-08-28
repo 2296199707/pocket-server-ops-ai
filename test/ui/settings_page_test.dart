@@ -84,6 +84,27 @@ void main() {
     reloaded.dispose();
   });
 
+  test('document module is enabled by default and can be disabled', () async {
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    expect(controller.documentModuleEnabled, isTrue);
+
+    await controller.setDocumentModuleEnabled(false);
+    final reloaded = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await reloaded.load();
+
+    expect(reloaded.documentModuleEnabled, isFalse);
+    controller.dispose();
+    reloaded.dispose();
+  });
+
   testWidgets('permissions page exposes the app permissions', (tester) async {
     final controller = AppController(
       database: MemoryAppDatabase(),

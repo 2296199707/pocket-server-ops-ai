@@ -1,10 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path_util;
 
 import '../app_controller.dart';
 import '../domain/models.dart';
+import '../local/document_export.dart';
 import '../local/project_files.dart';
+import 'document_preview_page.dart';
 import 'local_preview_page.dart';
 
 class ProjectFileManagerPage extends StatefulWidget {
@@ -359,6 +362,20 @@ class _ProjectFileEditorPageState extends State<ProjectFileEditorPage> {
       appBar: AppBar(
         title: Text(widget.name, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          if (widget.controller.documentModuleEnabled &&
+              isDocumentSourceFile(widget.name))
+            IconButton(
+              tooltip: '文档预览',
+              onPressed: _loading ? null : _previewDocument,
+              icon: const Icon(Icons.article_outlined),
+            ),
+          if (widget.controller.documentModuleEnabled &&
+              isDocumentSourceFile(widget.name))
+            IconButton(
+              tooltip: '导出 DOCX',
+              onPressed: _loading || _saving ? null : _exportDocx,
+              icon: const Icon(Icons.file_download_outlined),
+            ),
           IconButton(
             tooltip: '保存文件',
             onPressed: _loading || _saving ? null : _save,
@@ -438,6 +455,51 @@ class _ProjectFileEditorPageState extends State<ProjectFileEditorPage> {
         setState(() {
           _saving = false;
           _error = '保存文件失败：$error';
+        });
+      }
+    }
+  }
+
+  Future<void> _previewDocument() async {
+    if (_loading) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            DocumentPreviewPage(fileName: widget.name, content: _content.text),
+      ),
+    );
+  }
+
+  Future<void> _exportDocx() async {
+    if (_loading || _saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final extension = path_util.posix.extension(widget.path);
+    final outputPath = extension.isEmpty
+        ? '${widget.path}.docx'
+        : '${widget.path.substring(0, widget.path.length - extension.length)}.docx';
+    try {
+      final bytes = const DocumentExportService().exportDocx(
+        fileName: widget.name,
+        content: _content.text,
+      );
+      await widget.controller.writeProjectBytes(
+        widget.project,
+        outputPath,
+        bytes,
+      );
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('已导出：$outputPath')));
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _error = '导出 DOCX 失败：$error';
         });
       }
     }

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:path/path.dart' as path_util;
 
 import '../domain/models.dart';
+import '../local/document_export.dart';
 import '../local/local_file_access.dart';
 import '../local/local_preview.dart';
 import '../local/project_files.dart';
@@ -19,6 +20,7 @@ class AgentTool {
     required this.definition,
     required this.call,
     this.callWithOperationStart,
+    this.userApprovalRequired,
     this.requiresConfirmation = true,
     this.requiresUserApproval = false,
     this.isRemote = false,
@@ -40,6 +42,22 @@ class AgentTool {
   /// Requests that change the app's technical boundary always need the user.
   final bool requiresUserApproval;
 
+  /// Optional parameter-aware override for tools whose approval requirement
+  /// depends on the requested path or execution mode.
+  final FutureOr<bool> Function(
+    Map<String, Object?> arguments,
+    String executionMode,
+  )?
+  userApprovalRequired;
+
+  FutureOr<bool> shouldRequestUserApproval(
+    Map<String, Object?> arguments,
+    String executionMode,
+  ) {
+    return userApprovalRequired?.call(arguments, executionMode) ??
+        requiresUserApproval;
+  }
+
   /// Whether executing this tool contacts or operates on the selected server.
   /// Read-only remote tools use this flag without setting
   /// [writesRemoteState].
@@ -53,12 +71,14 @@ class RemoteAgentTools {
     this.workingDirectory,
     this.project,
     this.projectFiles,
+    this.localAccess,
   });
 
   final SshConnection _connection;
   final String? workingDirectory;
-  final Project? project;
-  final ProjectFileStore? projectFiles;
+  Project? project;
+  ProjectFileStore? projectFiles;
+  LocalFileAccessStore? localAccess;
   final Map<String, _ManagedProcess> _processes = {};
   final List<Future<SshCommandStream>> _startingProcesses = [];
   Future<void>? _closeFuture;
@@ -67,6 +87,16 @@ class RemoteAgentTools {
   bool get isClosed => _connection.isClosed;
 
   SshConnection get connection => _connection;
+
+  void configureContext({
+    required Project? project,
+    required ProjectFileStore? projectFiles,
+    required LocalFileAccessStore? localAccess,
+  }) {
+    this.project = project;
+    this.projectFiles = projectFiles;
+    this.localAccess = localAccess;
+  }
 
   List<AgentTool> get tools => [
     AgentTool(
@@ -229,8 +259,9 @@ class RemoteAgentTools {
           name: 'server.download_to_project',
           description:
               'Download one file from the selected server into the current '
-              'phone project. The destination path is relative to the '
-              'project folder.',
+              'phone project. This transfer is binary-safe and does not put the '
+              'file contents in the AI context. The destination path is '
+              'relative to the project folder.',
           parameters: {
             'type': 'object',
             'required': ['remote_path', 'project_path'],
@@ -242,6 +273,38 @@ class RemoteAgentTools {
           },
         ),
         call: _downloadToProject,
+        isRemote: true,
+      ),
+    if (localAccess != null)
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'server.download_to_phone',
+          description:
+              'Download one binary or text file from the selected server '
+              'directly to an absolute phone path. This is a binary-safe '
+              'transfer and does not put the file contents in the AI context. '
+              'The destination must be inside a user-authorized writable '
+              'phone directory, unless it is inside the bound phone project '
+              'during free execution. Use /storage/emulated/0/Download for a '
+              'normal shared download when the user has approved it. Never '
+              'use local.write for binary files.',
+          parameters: {
+            'type': 'object',
+            'required': ['remote_path', 'local_path'],
+            'properties': {
+              'remote_path': {'type': 'string'},
+              'local_path': {
+                'type': 'string',
+                'description': 'Absolute phone destination path',
+              },
+              'overwrite': {'type': 'boolean'},
+            },
+          },
+        ),
+        call: _downloadToPhone,
+        requiresConfirmation: false,
+        requiresUserApproval: true,
+        userApprovalRequired: _downloadToPhoneNeedsApproval,
         isRemote: true,
       ),
     if (project != null && projectFiles != null)
@@ -431,6 +494,68 @@ class RemoteAgentTools {
     };
   }
 
+  Future<Object?> _downloadToPhone(Map<String, Object?> arguments) async {
+    final remotePath = _requiredString(arguments, 'remote_path');
+    final localPath = _requiredString(arguments, 'local_path');
+    if (!path_util.posix.isAbsolute(localPath)) {
+      throw ArgumentError('local_path must be an absolute phone path');
+    }
+    final overwrite = arguments['overwrite'] != false;
+    final projectTarget = await _resolveProjectDestination(localPath);
+    final resolvedPath =
+        projectTarget ??
+        await (localAccess ?? (throw StateError('当前对话没有手机文件写入授权'))).resolve(
+          localPath,
+          write: true,
+        );
+    final target = File(resolvedPath);
+    if (!overwrite && await target.exists()) {
+      throw StateError('手机目标文件已存在：$localPath');
+    }
+    final sourcePath = _resolveRemotePath(remotePath);
+    final downloaded = await const ResumableFileDownloader().download(
+      target: target,
+      sourceKey: sourcePath,
+      readChunk: (offset) =>
+          _connection.readFileBytesChunk(sourcePath, offset: offset),
+      overwrite: overwrite,
+    );
+    return {
+      'remote_path': remotePath,
+      'local_path': localPath,
+      'bytes': await downloaded.length(),
+      'written': true,
+    };
+  }
+
+  Future<bool> _downloadToPhoneNeedsApproval(
+    Map<String, Object?> arguments,
+    String executionMode,
+  ) async {
+    if (executionMode != 'auto') return true;
+    final localPath = arguments['local_path'];
+    if (localPath is! String || !path_util.posix.isAbsolute(localPath)) {
+      return true;
+    }
+    try {
+      return await _resolveProjectDestination(localPath) == null;
+    } on StateError {
+      // A project symlink that leaves the project must not be auto-approved.
+      return true;
+    }
+  }
+
+  Future<String?> _resolveProjectDestination(String localPath) async {
+    final targetProject = project;
+    final files = projectFiles;
+    if (targetProject == null || files == null) return null;
+    try {
+      return await files.resolveAbsoluteForIo(targetProject, localPath);
+    } on ArgumentError {
+      return null;
+    }
+  }
+
   Future<Object?> _uploadFromProject(Map<String, Object?> arguments) async {
     final sourceProject = project;
     final files = projectFiles;
@@ -571,11 +696,17 @@ class RemoteAgentTools {
 }
 
 class ProjectAgentTools {
-  ProjectAgentTools(this._project, this._files, {this._preview});
+  ProjectAgentTools(
+    this._project,
+    this._files, {
+    this._preview,
+    this.documentModuleEnabled = true,
+  });
 
   final Project _project;
   final ProjectFileStore _files;
   LocalPreviewServer? _preview;
+  final bool documentModuleEnabled;
 
   List<AgentTool> get tools => [
     AgentTool(
@@ -650,6 +781,32 @@ class ProjectAgentTools {
       ),
       call: _replace,
     ),
+    if (documentModuleEnabled)
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'document.export_docx',
+          description:
+              'Export a Markdown, HTML, or UTF-8 text file from the current '
+              'phone project as a real DOCX file. The source is read as text '
+              'and the output is written inside the same project. Supports '
+              'headings, paragraphs, lists, tables, basic inline emphasis, '
+              'and HTML color spans.',
+          parameters: {
+            'type': 'object',
+            'required': ['source_path'],
+            'properties': {
+              'source_path': {'type': 'string'},
+              'output_path': {
+                'type': 'string',
+                'description':
+                    'Optional project-relative .docx path. Defaults to the '
+                    'source name with a .docx extension.',
+              },
+            },
+          },
+        ),
+        call: _exportDocx,
+      ),
     AgentTool(
       definition: const AiToolDefinition(
         name: 'local.test_web',
@@ -800,6 +957,31 @@ class ProjectAgentTools {
     return {'path': path, 'replaced': true};
   }
 
+  Future<Object?> _exportDocx(Map<String, Object?> arguments) async {
+    final sourcePath = _requiredString(arguments, 'source_path');
+    if (!isDocumentSourceFile(sourcePath)) {
+      throw ArgumentError('source_path must be a Markdown, HTML, or text file');
+    }
+    final outputPath =
+        _optionalString(arguments, 'output_path') ??
+        _defaultDocxPath(sourcePath);
+    if (path_util.posix.extension(outputPath).toLowerCase() != '.docx') {
+      throw ArgumentError('output_path must end with .docx');
+    }
+    final content = await _files.readText(_project, sourcePath);
+    final bytes = const DocumentExportService().exportDocx(
+      fileName: sourcePath,
+      content: content,
+    );
+    await _files.writeBytes(_project, outputPath, bytes);
+    return {
+      'source_path': sourcePath,
+      'output_path': outputPath,
+      'bytes': bytes.length,
+      'written': true,
+    };
+  }
+
   Future<Object?> _testWeb(Map<String, Object?> arguments) {
     return _previewOrFiles
         .testWeb(
@@ -872,6 +1054,12 @@ class ProjectAgentTools {
   static String? _optionalString(Map<String, Object?> arguments, String key) {
     final value = arguments[key];
     return value is String && value.isNotEmpty ? value : null;
+  }
+
+  static String _defaultDocxPath(String sourcePath) {
+    final extension = path_util.posix.extension(sourcePath);
+    if (extension.isEmpty) return '$sourcePath.docx';
+    return '${sourcePath.substring(0, sourcePath.length - extension.length)}.docx';
   }
 
   static int? _optionalNonNegativeInt(

@@ -365,9 +365,13 @@ class AgentLoop {
                 ]);
         }
 
+        final requiresUserApproval = await tool.shouldRequestUserApproval(
+          arguments,
+          executionMode,
+        );
         var allowed = true;
         String? deniedReason;
-        if (tool.requiresUserApproval) {
+        if (requiresUserApproval) {
           // A permission grant changes the technical boundary. It always
           // requires the person using the app, even in automatic modes.
           allowed = await askUser();
@@ -431,7 +435,7 @@ class AgentLoop {
             allowed = await askUser();
           }
         }
-        if (tool.requiresConfirmation || tool.requiresUserApproval) {
+        if (tool.requiresConfirmation || requiresUserApproval) {
           if (stop.isCancelled) {
             const message = 'Tool call cancelled before execution.';
             await _emit(onEvent, 'tool.failed', {

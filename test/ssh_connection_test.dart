@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -7,6 +8,9 @@ import 'package:dartssh2/src/message/msg_channel.dart';
 import 'package:dartssh2/src/ssh_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_agent/agent/agent_tools.dart';
+import 'package:mobile_agent/domain/models.dart';
+import 'package:mobile_agent/local/local_file_access.dart';
+import 'package:mobile_agent/local/project_files.dart';
 import 'package:mobile_agent/ssh/resumable_file_upload.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 
@@ -219,6 +223,115 @@ void main() {
     expect(result['error'], contains('without an exit status'));
     await tools.close();
   });
+
+  test('server download to phone preserves binary bytes', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'mobile-agent-phone-download-',
+    );
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final access = LocalFileAccessStore();
+    await access.add(root.path, canWrite: true);
+    final connection = _FakeConnection(
+      fileBytes: Uint8List.fromList([0, 255, 1, 2, 128, 13, 10]),
+    );
+    final tools = RemoteAgentTools(connection, localAccess: access);
+    final download = tools.tools.singleWhere(
+      (tool) => tool.definition.name == 'server.download_to_phone',
+    );
+
+    expect(download.requiresUserApproval, isTrue);
+    await download.call({
+      'remote_path': '/tmp/report.docx',
+      'local_path': '${root.path}/report.docx',
+    });
+
+    expect(await File('${root.path}/report.docx').readAsBytes(), [
+      0,
+      255,
+      1,
+      2,
+      128,
+      13,
+      10,
+    ]);
+    await tools.close();
+  });
+
+  test('free execution downloads directly into the bound project', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'mobile-agent-project-download-',
+    );
+    final outside = await Directory.systemTemp.createTemp(
+      'mobile-agent-project-download-outside-',
+    );
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+      if (await outside.exists()) await outside.delete(recursive: true);
+    });
+    final project = Project(
+      id: 'project-download',
+      name: 'Download project',
+      localPath: root.path,
+    );
+    const files = ProjectFileStore();
+    final connection = _FakeConnection(
+      fileBytes: Uint8List.fromList([0, 255, 1, 128]),
+    );
+    final tools = RemoteAgentTools(
+      connection,
+      project: project,
+      projectFiles: files,
+      localAccess: LocalFileAccessStore(),
+    );
+    final download = tools.tools.singleWhere(
+      (tool) => tool.definition.name == 'server.download_to_phone',
+    );
+    final projectArguments = {
+      'remote_path': '/tmp/app.bin',
+      'local_path': '${root.path}/build/app.bin',
+    };
+
+    expect(
+      await download.shouldRequestUserApproval(projectArguments, 'auto'),
+      isFalse,
+    );
+    expect(
+      await download.shouldRequestUserApproval(projectArguments, 'confirm'),
+      isTrue,
+    );
+    await download.call(projectArguments);
+    expect(await File('${root.path}/build/app.bin').readAsBytes(), [
+      0,
+      255,
+      1,
+      128,
+    ]);
+    expect(
+      await download.shouldRequestUserApproval({
+        'remote_path': '/tmp/app.bin',
+        'local_path': '${outside.path}/app.bin',
+      }, 'auto'),
+      isTrue,
+    );
+    await Link('${root.path}/escape').create(outside.path);
+    expect(
+      await download.shouldRequestUserApproval({
+        'remote_path': '/tmp/app.bin',
+        'local_path': '${root.path}/escape/app.bin',
+      }, 'auto'),
+      isTrue,
+    );
+    await expectLater(
+      download.call({
+        'remote_path': '/tmp/app.bin',
+        'local_path': '${root.path}/escape/app.bin',
+      }),
+      throwsStateError,
+    );
+    await tools.close();
+  });
 }
 
 class _SessionHarness {
@@ -255,10 +368,11 @@ class _SessionHarness {
 }
 
 class _FakeConnection implements SshConnection {
-  _FakeConnection({this.fileContent = '', this.stream});
+  _FakeConnection({this.fileContent = '', this.stream, this.fileBytes});
 
   final String fileContent;
   final SshCommandStream? stream;
+  final Uint8List? fileBytes;
   final pendingExecutes = <Completer<SshCommandStream>>[];
 
   @override
@@ -315,7 +429,7 @@ class _FakeConnection implements SshConnection {
 
   @override
   Future<Uint8List> readFileBytes(String remotePath) async {
-    return Uint8List.fromList(utf8.encode(fileContent));
+    return fileBytes ?? Uint8List.fromList(utf8.encode(fileContent));
   }
 
   @override

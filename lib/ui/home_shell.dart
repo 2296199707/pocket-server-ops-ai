@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as path_util;
 
 import '../agent/agent_tools.dart';
 import '../app_controller.dart';
@@ -657,6 +658,9 @@ class _HomeShellState extends State<HomeShell> {
       if (tool.definition.name == 'local.request_access') {
         return _requestLocalAccess(task, arguments);
       }
+      if (tool.definition.name == 'server.download_to_phone') {
+        return _requestServerDownloadAccess(task, arguments);
+      }
       final value = jsonEncode(arguments);
       final preview = value.length <= _maxToolPreviewCharacters
           ? value
@@ -758,6 +762,81 @@ class _HomeShellState extends State<HomeShell> {
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('无法授权该路径：$error')));
+      }
+      return false;
+    }
+  }
+
+  Future<bool> _requestServerDownloadAccess(
+    Task task,
+    Map<String, Object?> arguments,
+  ) async {
+    final requestedPath = arguments['local_path'];
+    if (requestedPath is! String || requestedPath.trim().isEmpty) return false;
+    final path = requestedPath.trim();
+    if (!path_util.posix.isAbsolute(path)) return false;
+    final directory = path_util.posix.dirname(path);
+    if (await widget.controller.hasLocalAccess(task.id, path, write: true) ||
+        await widget.controller.hasLocalAccess(
+          task.id,
+          directory,
+          write: true,
+        )) {
+      return true;
+    }
+    if (!mounted) return false;
+    final remotePath = arguments['remote_path'];
+    final remote = remotePath is String ? remotePath.trim() : '';
+    final allowed =
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            title: const Text('允许 Agent 下载文件到手机？'),
+            content: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (remote.isNotEmpty) ...[
+                    const Text('服务器文件：'),
+                    SelectableText(remote),
+                    const SizedBox(height: 12),
+                  ],
+                  const Text('手机目标：'),
+                  SelectableText(path),
+                  const SizedBox(height: 12),
+                  Text('本次允许写入目标目录：$directory'),
+                  const SizedBox(height: 12),
+                  const Text('这是二进制安全传输，不会把文件内容放入 AI 上下文；授权只对当前对话有效。'),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('拒绝'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('允许下载'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!allowed || !mounted) return false;
+    try {
+      await widget.controller.grantLocalAccess(
+        task.id,
+        directory,
+        canWrite: true,
+      );
+      return true;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('无法授权下载目录：$error')));
       }
       return false;
     }
@@ -1430,7 +1509,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 8,
+              itemCount: 9,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1445,23 +1524,37 @@ class SettingsPage extends StatelessWidget {
                   );
                 }
                 if (index == 1) {
-                  return _FloatingCapsuleSettingsTile(controller: controller);
+                  return SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    secondary: const Icon(Icons.description_outlined),
+                    title: const Text('文档编辑模块'),
+                    subtitle: const Text(
+                      '为 Markdown、HTML 和文本文件提供本地预览与 DOCX 导出；关闭后仍可读写项目文件。',
+                    ),
+                    value: controller.documentModuleEnabled,
+                    onChanged: (value) {
+                      unawaited(controller.setDocumentModuleEnabled(value));
+                    },
+                  );
                 }
                 if (index == 2) {
+                  return _FloatingCapsuleSettingsTile(controller: controller);
+                }
+                if (index == 3) {
                   return _FloatingCapsuleScaleSettingsTile(
                     controller: controller,
                   );
                 }
-                if (index == 3) {
+                if (index == 4) {
                   return _VersionSettingsTile(controller: controller);
                 }
-                if (index == 4) {
+                if (index == 5) {
                   return _FontScaleSettingsTile(controller: controller);
                 }
-                if (index == 5) {
+                if (index == 6) {
                   return _StorageSettingsTile(controller: controller);
                 }
-                if (index == 6) {
+                if (index == 7) {
                   return _PermissionsSettingsTile(controller: controller);
                 }
                 return _DeveloperSettingsTile(controller: controller);

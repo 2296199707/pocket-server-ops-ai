@@ -41,6 +41,14 @@ void main() {
         '${root.path}/lib/main.txt',
       );
       expect(
+        await files.resolveAbsoluteForIo(project, '${root.path}/new/file.bin'),
+        '${root.path}/new/file.bin',
+      );
+      expect(
+        await files.resolveAbsoluteForIo(project, '${outside.path}/file.bin'),
+        isNull,
+      );
+      expect(
         () => files.resolve(project, '../outside.txt'),
         throwsArgumentError,
       );

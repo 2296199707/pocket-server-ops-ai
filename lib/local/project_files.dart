@@ -245,6 +245,30 @@ class ProjectFileStore {
     return _resolveForIo(project, relativePath);
   }
 
+  /// Resolve an absolute phone path when it is inside the bound project.
+  /// Returns null for paths outside the project; an existing symlink that
+  /// leaves the project still throws from [_resolveForIo].
+  Future<String?> resolveAbsoluteForIo(
+    Project project,
+    String absolutePath,
+  ) async {
+    final normalized = absolutePath.trim().replaceAll('\\', '/');
+    if (!path_util.posix.isAbsolute(normalized)) {
+      throw ArgumentError('项目目标路径必须是绝对路径');
+    }
+    final relative = path_util
+        .relative(
+          path_util.posix.normalize(normalized),
+          from: path_util.posix.normalize(project.localPath),
+        )
+        .replaceAll(path_util.separator, '/');
+    try {
+      return await _resolveForIo(project, relative);
+    } on ArgumentError {
+      return null;
+    }
+  }
+
   static String normalizeRelativePath(String value) {
     return _normalizeRelativePath(value);
   }

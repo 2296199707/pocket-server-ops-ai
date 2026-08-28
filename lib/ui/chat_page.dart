@@ -2920,6 +2920,7 @@ String _toolStatusPhase(Object? value) {
       name == 'server.download_to_project') {
     return '修改文件';
   }
+  if (name == 'server.download_to_phone') return '下载文件';
   return '调用工具';
 }
 

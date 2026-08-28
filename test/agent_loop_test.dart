@@ -725,6 +725,43 @@ void main() {
     expect(executions, 1);
   });
 
+  test('automatic execution can skip parameter-aware user approval', () async {
+    var confirmations = 0;
+    var executions = 0;
+    final result =
+        await AgentLoop(
+          client: _ToolThenTextClient(toolName: 'project.download'),
+          tools: [
+            AgentTool(
+              definition: const AiToolDefinition(
+                name: 'project.download',
+                description: 'download',
+                parameters: {'type': 'object'},
+              ),
+              requiresConfirmation: false,
+              requiresUserApproval: true,
+              userApprovalRequired: (_, executionMode) =>
+                  executionMode != 'auto',
+              call: (_) async {
+                executions++;
+                return const {'written': true};
+              },
+            ),
+          ],
+        ).run(
+          prompt: '下载',
+          executionMode: 'auto',
+          confirm: (_, _) async {
+            confirmations++;
+            return true;
+          },
+        );
+
+    expect(result.status, 'completed');
+    expect(confirmations, 0);
+    expect(executions, 1);
+  });
+
   test('length finish reason is not reported as success', () async {
     final events = <String>[];
     final result = await AgentLoop(client: _LengthClient(), tools: const [])

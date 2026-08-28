@@ -1052,6 +1052,26 @@
 - 结论：此前属于 `需修复`；现已处理。修复尚未提交，最终提交前需再次运行全量分析、测试和
   `git diff --check`。
 
+### 2026-08-29：服务器二进制文件下载到手机
+
+- 复现：服务器 Agent 生成或找到 DOCX、ZIP、图片等二进制文件后，模型只能看到
+  `local.write` 文本工具；当用户目标是 `/storage/emulated/0/Download/...` 时，模型无法把
+  文件字节直接落盘，只能建议用户手工复制。
+- 根因：SFTP 和 `server.download_to_project` 已经支持二进制分块及断点续传，但后者只在有
+  手机项目时暴露，且没有项目外手机目标工具。`local.write` 明确是 UTF-8 文本写入，不能承担
+  二进制复制。
+- 修复：`RemoteAgentTools` 新增 `server.download_to_phone`，复用
+  `ResumableFileDownloader` 和 `readFileBytesChunk`，结果只返回路径和字节数，不把文件内容
+  放进模型上下文。服务器模式和协同模式都暴露该工具；项目目录目标在自由执行模式下复用
+  `ProjectFileStore` 的目录边界，不重复请求授权；项目外目标和其他执行模式仍按原流程授权，
+  不影响手机保存的 SSH 凭据和应用内部目录保护。模式切换复用连接时同步更新工具上下文。
+- UI 与提示：明确区分项目下载和手机路径下载；需要授权时，下载授权弹窗显示服务器源路径、
+  手机目标和写入目录；系统提示禁止使用 `file.read`、`project.write` 或 `local.write` 复制二进制。
+- 定向测试：`test/ssh_connection_test.dart` 验证包含 `0xff`、`0x80` 等非 UTF-8 字节的文件
+  下载后字节完全一致，并验证自由执行时项目内目标不授权、项目外目标仍授权；
+  `test/agent_loop_test.dart` 验证 AgentLoop 使用参数感知的授权结果。
+- 结论：此前属于 `需修复`；已按现有 SFTP 传输设计补齐 Agent 到手机的二进制桥接。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：

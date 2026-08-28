@@ -122,6 +122,7 @@ class AppController extends ChangeNotifier {
   bool _betaUpdatesEnabled = false;
   bool _floatingCapsuleEnabled = false;
   double _floatingCapsuleScale = 1.0;
+  bool _documentModuleEnabled = true;
   String? _imageProviderId;
   String? _lastDashboardServerId;
   String? _lastConversationTaskId;
@@ -138,6 +139,7 @@ class AppController extends ChangeNotifier {
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
   bool get floatingCapsuleEnabled => _floatingCapsuleEnabled;
   double get floatingCapsuleScale => _floatingCapsuleScale;
+  bool get documentModuleEnabled => _documentModuleEnabled;
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
@@ -342,6 +344,8 @@ class AppController extends ChangeNotifier {
                 1.0)
             .clamp(0.75, 1.4)
             .toDouble();
+    _documentModuleEnabled =
+        (await _database.readSetting(_documentModuleSetting)) != 'false';
     _sidebarExpanded['other'] = await _readSidebarExpandedSetting('other');
     for (final project in _projects) {
       final sectionId = 'project:${project.id}';
@@ -454,7 +458,9 @@ class AppController extends ChangeNotifier {
     if (await _isProtectedLocalPath(canonical)) {
       throw StateError('应用凭据和内部数据不能授权给 AI');
     }
-    await AndroidStorageAccess.ensureForPath(canonical);
+    if (!await AndroidStorageAccess.ensureForPath(canonical)) {
+      throw StateError('没有手机共享存储写入权限，无法授权该路径');
+    }
     final store = _localAccess.putIfAbsent(taskId, LocalFileAccessStore.new);
     final grant = await store.add(canonical, canWrite: canWrite);
     _notify();
@@ -696,6 +702,15 @@ class AppController extends ChangeNotifier {
     if (_runningTasks.isNotEmpty) {
       await _taskService.setOverlayScale(value);
     }
+    _notify();
+  }
+
+  Future<void> setDocumentModuleEnabled(bool enabled) async {
+    await _database.writeSetting(
+      _documentModuleSetting,
+      enabled ? 'true' : 'false',
+    );
+    _documentModuleEnabled = enabled;
     _notify();
   }
 
@@ -1194,16 +1209,15 @@ class AppController extends ChangeNotifier {
       final workMode = task.effectiveWorkMode;
       final useLocalTools = workModeUsesLocal(workMode);
       final useServerTools = workModeUsesServer(workMode);
+      final localAccess = useLocalTools || useServerTools
+          ? _localAccess.putIfAbsent(task.id, LocalFileAccessStore.new)
+          : null;
 
       if (task.mode == 'agent') {
         Project? project;
         String? workingDirectory;
         if (useLocalTools) {
-          final access = _localAccess.putIfAbsent(
-            task.id,
-            LocalFileAccessStore.new,
-          );
-          tools.addAll(LocalAgentTools(access).tools);
+          tools.addAll(LocalAgentTools(localAccess!).tools);
           project = projectFor(task.projectId);
           taskProject = project;
           if (task.projectId != null && project == null) {
@@ -1216,6 +1230,7 @@ class AppController extends ChangeNotifier {
               project,
               _projectFiles,
               preview: _localPreview,
+              documentModuleEnabled: _documentModuleEnabled,
             );
             tools.addAll(
               _serializeRemoteWrites(
@@ -1253,11 +1268,17 @@ class AppController extends ChangeNotifier {
               workingDirectory: workingDirectory,
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
+              localAccess: localAccess,
             );
             temporaryRemoteTools = remoteTools;
           } else {
             workingDirectory =
                 task.workingDirectory ?? server.defaultWorkingDirectory;
+            remoteTools.configureContext(
+              project: useLocalTools ? project : null,
+              projectFiles: useLocalTools ? _projectFiles : null,
+              localAccess: localAccess,
+            );
           }
           tools.addAll(
             _serializeRemoteWrites(
@@ -1579,15 +1600,14 @@ class AppController extends ChangeNotifier {
       );
       final tools = <AgentTool>[];
       var systemPrompt = _systemPrompt(task);
+      final localAccess = useLocalTools || useServerTools
+          ? _localAccess.putIfAbsent(task.id, LocalFileAccessStore.new)
+          : null;
       if (task.mode == 'agent') {
         Project? project;
         String? workingDirectory;
         if (useLocalTools) {
-          final access = _localAccess.putIfAbsent(
-            task.id,
-            LocalFileAccessStore.new,
-          );
-          localTools = LocalAgentTools(access);
+          localTools = LocalAgentTools(localAccess!);
           tools.addAll(localTools.tools);
           project = projectFor(task.projectId);
           taskProject = project;
@@ -1601,6 +1621,7 @@ class AppController extends ChangeNotifier {
               project,
               _projectFiles,
               preview: _localPreview,
+              documentModuleEnabled: _documentModuleEnabled,
             );
             tools.addAll(
               _serializeRemoteWrites(
@@ -1637,13 +1658,17 @@ class AppController extends ChangeNotifier {
             remoteTools = RemoteAgentTools(
               connection,
               workingDirectory: workingDirectory,
-              // Server-only mode must not expose a local project download
-              // tool even when the conversation still carries a project
-              // binding for its sidebar placement.
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
+              localAccess: localAccess,
             );
             _phoneTools[task.id] = remoteTools;
+          } else {
+            remoteTools.configureContext(
+              project: useLocalTools ? project : null,
+              projectFiles: useLocalTools ? _projectFiles : null,
+              localAccess: localAccess,
+            );
           }
           tools.addAll(
             _serializeRemoteWrites(
@@ -1888,6 +1913,7 @@ class AppController extends ChangeNotifier {
             definition: tool.definition,
             requiresConfirmation: tool.requiresConfirmation,
             requiresUserApproval: tool.requiresUserApproval,
+            userApprovalRequired: tool.userApprovalRequired,
             isRemote: tool.isRemote,
             writesRemoteState: tool.writesRemoteState,
             call: (arguments) => _remoteWriteQueue.run(
@@ -2177,6 +2203,20 @@ class AppController extends ChangeNotifier {
       project,
       _normalizeProjectUiPath(relativePath),
       content,
+    );
+    _invalidateProjectDirectoryCache(project.id);
+  }
+
+  Future<void> writeProjectBytes(
+    Project project,
+    String relativePath,
+    Uint8List bytes,
+  ) async {
+    await _ensureProjectStoragePath(project.localPath);
+    await _projectFiles.writeBytes(
+      project,
+      _normalizeProjectUiPath(relativePath),
+      bytes,
     );
     _invalidateProjectDirectoryCache(project.id);
   }
@@ -3360,6 +3400,14 @@ class AppController extends ChangeNotifier {
         'console or JavaScript errors. A preview is only for web assets; it '
         'does not run Node, Python, Flutter, or other phone runtimes.',
       );
+      if (_documentModuleEnabled) {
+        scopes.add(
+          'The built-in document module is enabled. For a Word deliverable, '
+          'write or edit a Markdown, HTML, or UTF-8 text source in the project '
+          'and call document.export_docx; it writes a real .docx beside the '
+          'source unless output_path is provided.',
+        );
+      }
     }
     if (workModeUsesLocal(workMode)) {
       scopes.add(
@@ -3372,14 +3420,25 @@ class AppController extends ChangeNotifier {
     }
     if (workModeUsesServer(workMode)) {
       final directory = workingDirectory ?? task.workingDirectory ?? 'not set';
+      final phoneDownloadRule = project == null
+          ? 'The phone destination requires user approval.'
+          : 'A destination outside the current phone project requires user '
+                'approval; in free execution mode, a destination inside that '
+                'project does not. Other execution modes keep their existing '
+                'approval flow.';
       scopes.add(
         'The selected server working directory is $directory. Use '
         'terminal.exec for short commands; use terminal.start, terminal.poll, '
         'terminal.write, and terminal.stop for long-running commands. Use '
         'file tools for UTF-8 server files. Use server.upload_from_project to '
         'send a phone project file to the server and server.download_to_project '
-        'to bring a server file into the project; both operations can resume '
-        'after an interrupted transfer.',
+        'to bring a server file into the project; use '
+        'server.download_to_phone to transfer a binary or text file directly '
+        'to an absolute phone path such as '
+        '/storage/emulated/0/Download/name.docx. These transfers are binary-safe '
+        'and can resume after interruption. $phoneDownloadRule Never use '
+        'file.read, project.write, or local.write to '
+        'copy a binary file.',
       );
     }
     return 'You are an autonomous coding and operations agent running on a '
@@ -4636,6 +4695,7 @@ const _agentAutoExecuteSetting = 'agent_auto_execute';
 const _betaUpdatesSetting = 'beta_updates_enabled';
 const _floatingCapsuleSetting = 'floating_capsule_enabled';
 const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
+const _documentModuleSetting = 'document_module_enabled';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';

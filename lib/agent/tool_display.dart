@@ -26,6 +26,14 @@ String toolArgumentSummary(Object? name, Object? arguments) {
     }
     return _compactLine(remote ?? project);
   }
+  if (toolName == 'server.download_to_phone') {
+    final remote = value('remote_path');
+    final local = value('local_path');
+    if (remote != null && local != null) {
+      return _compactLine('$remote -> $local');
+    }
+    return _compactLine(remote ?? local);
+  }
   if (toolName == 'server.upload_from_project') {
     final project = value('project_path');
     final remote = value('remote_path');
@@ -75,6 +83,7 @@ String toolActionSummary(Object? name, Object? arguments) {
       value('entrypoint');
   final target = path == null ? '文件' : _lastPathPart(path);
   if (toolName == 'server.download_to_project') return '下载 $target';
+  if (toolName == 'server.download_to_phone') return '下载到手机 $target';
   if (toolName == 'server.upload_from_project') return '上传 $target';
   if (toolName.endsWith('.read')) return '查看 $target';
   if (toolName.endsWith('.list')) return '浏览 $target';
