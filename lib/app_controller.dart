@@ -752,13 +752,22 @@ class AppController extends ChangeNotifier {
         _providerTransportIdentity(nextProvider);
     final compHashChanged =
         previousMetadata?.compHash != nextMetadata?.compHash;
-    final historyBoundaryChanged =
-        current.mode != normalizedMode ||
-        current.effectiveWorkMode != normalizedWorkMode ||
+    final modeChanged = current.mode != normalizedMode;
+    final workModeChanged = current.effectiveWorkMode != normalizedWorkMode;
+    final targetChanged =
         current.projectId != normalizedProjectId ||
         current.serverId != normalizedServerId ||
         current.workingDirectory != normalizedWorkingDirectory;
     final modelChanged = previousModel != nextModel;
+    final configurationChanged =
+        modeChanged || workModeChanged || targetChanged;
+    final contextChanged =
+        configurationChanged || providerContextChanged || modelChanged;
+    final remoteTargetChanged =
+        current.serverId != normalizedServerId ||
+        current.workingDirectory != normalizedWorkingDirectory ||
+        workModeUsesServer(current.effectiveWorkMode) !=
+            workModeUsesServer(normalizedWorkMode);
     final now = DateTime.now().toUtc();
     final updated = Task(
       id: current.id,
@@ -778,11 +787,11 @@ class AppController extends ChangeNotifier {
       createdAt: current.createdAt,
       updatedAt: now,
     );
-    if (historyBoundaryChanged) {
+    if (remoteTargetChanged) {
       try {
         await _releasePhoneTask(taskId);
       } catch (_) {
-        // A changed task can reconnect with the new boundary even if closing
+        // A changed task can reconnect with the new target even if closing
         // the old channel reports an error.
       }
     }
@@ -791,40 +800,40 @@ class AppController extends ChangeNotifier {
       for (final task in _tasks) task.id == updated.id ? updated : task,
     ];
 
-    if (historyBoundaryChanged) {
-      _localAccess.remove(taskId);
+    if (contextChanged) {
+      if (current.projectId != normalizedProjectId) {
+        _localAccess.remove(taskId);
+      }
       _invalidateTaskContextUsage(taskId);
-      await appendTaskEvent(
-        taskId: taskId,
-        type: 'task.context_changed',
-        payload: {
-          'history_boundary': true,
-          'mode': normalizedMode,
-          'work_mode': normalizedWorkMode,
-          'project_id': normalizedProjectId,
-          'server_id': normalizedServerId,
-          'provider_id': providerId,
-          'model_override': normalizedModelOverride,
-          'previous_provider_id': previousProvider?.id,
-          'previous_model': previousModel,
-          if (compHashChanged) 'comp_hash_changed': true,
-        },
-      );
-    } else if (providerContextChanged || modelChanged) {
-      // Codex keeps the transcript when the model changes and appends a
-      // model-switch context item. A provider/transport switch uses the same
-      // boundary-free event, but history reconstruction drops opaque provider
-      // state before the next request.
-      _invalidateTaskContextUsage(taskId);
+      final historyProjection = providerTransportChanged
+          ? 'provider'
+          : configurationChanged
+          ? 'configuration'
+          : 'model';
+      final reason = configurationChanged
+          ? 'configuration_changed'
+          : providerContextChanged
+          ? 'provider_changed'
+          : 'model_changed';
       await appendTaskEvent(
         taskId: taskId,
         type: 'task.context_changed',
         payload: {
           'history_boundary': false,
-          'history_projection': providerTransportChanged ? 'provider' : 'model',
-          'reason': providerTransportChanged
-              ? 'provider_changed'
-              : 'model_changed',
+          'history_projection': historyProjection,
+          'reason': reason,
+          if (configurationChanged) ...{
+            'previous_mode': current.mode,
+            'mode': normalizedMode,
+            'previous_work_mode': current.effectiveWorkMode,
+            'work_mode': normalizedWorkMode,
+            'previous_project_id': current.projectId,
+            'project_id': normalizedProjectId,
+            'previous_server_id': current.serverId,
+            'server_id': normalizedServerId,
+            'previous_working_directory': current.workingDirectory,
+            'working_directory': normalizedWorkingDirectory,
+          },
           'previous_provider_id': previousProvider?.id,
           'provider_id': nextProvider?.id,
           'previous_model': previousModel,
@@ -833,6 +842,7 @@ class AppController extends ChangeNotifier {
           'model_changed': modelChanged,
           'previous_model_override': current.modelOverride,
           'model_override': normalizedModelOverride,
+          if (compHashChanged) 'comp_hash_changed': true,
         },
       );
     }
@@ -3354,8 +3364,9 @@ class AppController extends ChangeNotifier {
             _appendPendingToolResults(
               messages,
               activeToolCallIds,
-              'The previous AI context was interrupted during a provider '
-              'change. Inspect the current state before continuing.',
+              'The previous tool call was interrupted by a configuration '
+              'change. Do not replay it; inspect the current target before '
+              'continuing.',
             );
             messages.add(
               AiMessage(
@@ -3440,9 +3451,9 @@ class AppController extends ChangeNotifier {
   }
 
   static bool _isHistoryBoundary(Map<String, Object?> payload) {
-    // Missing history_boundary is treated as a boundary for events written by
-    // older app versions.
-    return payload['history_boundary'] != false;
+    // Configuration changes are context notes, never a request to discard the
+    // transcript. Compaction has its own boundary and is handled separately.
+    return false;
   }
 
   static bool _requiresProviderProjection(Map<String, Object?> payload) {
@@ -3451,6 +3462,67 @@ class AppController extends ChangeNotifier {
   }
 
   static String _contextChangeMessage(Map<String, Object?> payload) {
+    final reason = payload['reason'];
+    final hasConfigurationFields =
+        reason == 'configuration_changed' ||
+        payload.containsKey('previous_work_mode') ||
+        (payload.containsKey('work_mode') &&
+            (payload.containsKey('project_id') ||
+                payload.containsKey('server_id')));
+    if (hasConfigurationFields) {
+      String value(Object? item) {
+        if (item == null) return 'none';
+        if (item is String && item.isEmpty) return 'none';
+        return '$item';
+      }
+
+      final details = <String>[];
+      final previousWorkMode = payload['previous_work_mode'];
+      final workMode = payload['work_mode'];
+      if (previousWorkMode != null || workMode != null) {
+        details.add(
+          'Work mode: ${value(previousWorkMode)} -> ${value(workMode)}.',
+        );
+      }
+      final previousProject = payload['previous_project_id'];
+      final project = payload['project_id'];
+      if (previousProject != null || project != null) {
+        details.add('Project: ${value(previousProject)} -> ${value(project)}.');
+      }
+      final previousServer = payload['previous_server_id'];
+      final server = payload['server_id'];
+      if (previousServer != null || server != null) {
+        details.add('Server: ${value(previousServer)} -> ${value(server)}.');
+      }
+      final previousDirectory = payload['previous_working_directory'];
+      final directory = payload['working_directory'];
+      if (previousDirectory != null || directory != null) {
+        details.add(
+          'Working directory: ${value(previousDirectory)} -> ${value(directory)}.',
+        );
+      }
+      final previousProvider = payload['previous_provider_id'];
+      final provider = payload['provider_id'];
+      if (previousProvider != provider &&
+          (previousProvider != null || provider != null)) {
+        details.add(
+          'AI provider: ${value(previousProvider)} -> ${value(provider)}.',
+        );
+      }
+      final previousModel = payload['previous_model'];
+      final model = payload['model'];
+      if (previousModel != model && (previousModel != null || model != null)) {
+        details.add('Model: ${value(previousModel)} -> ${value(model)}.');
+      }
+      return '<configuration_change>\n'
+          'The conversation configuration changed. Continue from the retained '
+          'transcript; do not restart or discard earlier context.\n'
+          '${details.join(' ')}\n'
+          'Treat observations from the previous target as historical only. '
+          'Do not replay old tool calls. Use only tools available in the '
+          'current mode and inspect the current target before acting.\n'
+          '</configuration_change>';
+    }
     if (payload['history_projection'] == 'provider') {
       return '<model_switch>\n'
           'The conversation is continuing with a different AI provider. '

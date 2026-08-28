@@ -367,9 +367,9 @@ class MemoryAppDatabase extends AppDatabase {
   }
 
   static bool _isHistoryBoundary(Map<String, Object?> payload) {
-    // Missing history_boundary is treated as a boundary for events written by
-    // older app versions.
-    return payload['history_boundary'] != false;
+    // Task configuration changes are context notes, never a request to discard
+    // the transcript. Compaction has its own boundary and is handled above.
+    return false;
   }
 
   static bool _requiresProviderProjection(Map<String, Object?> payload) {

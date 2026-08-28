@@ -728,6 +728,23 @@
   `context usage follows the provider window mode` 和供应商保存恢复测试。
 - 修复 commit：当前工作树未提交。
 
+### 2026-08-28：配置切换保留模型上下文
+
+- 复核发现 Mobile 原先把工作模式、项目、服务器和工作目录变化写成
+  `history_boundary: true`，导致下一轮模型只能看到新的 system/developer 内容，虽不删除
+  UI 历史，却丢失了可复用的对话上下文。这不是 Codex 压缩要求，而是本项目过度保守的
+  配置边界。
+- 调整：所有对话配置变化统一写入 `history_boundary: false`，保留普通消息、附件、工具
+  结果和可复用的 Responses 历史；同时追加配置变更 developer 提示，要求 AI 把旧目标
+  状态当作历史参考、不得重放旧工具调用，并先检查当前目标。跨供应商仍只移除不能复用
+  的 provider-owned opaque 状态。
+- 兼容：SQLite 和内存数据库不再把旧版本配置事件中的 `history_boundary: true` 当作硬
+  边界，因此已有对话不会因升级后继续丢上下文。真正的 compaction 仍按其自身压缩边界
+  使用摘要和近期用户消息；新建对话只是创建新的空任务，不清理旧任务。
+- 定向测试：`work mode changes retain history and add a configuration note`、
+  `legacy configuration boundary does not discard history`，以及原有 app controller
+  测试均通过。
+
 ## 8. 当前封存快照（2026-08-27）
 
 | 范围 | 条目 | 最终状态 | 入口 |

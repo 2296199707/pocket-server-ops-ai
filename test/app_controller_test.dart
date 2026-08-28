@@ -595,7 +595,111 @@ void main() {
     expect(updated.providerId, isNull);
     expect(updated.executionMode, 'auto');
     expect(controller.eventsFor(task.id).last.type, 'task.context_changed');
+    expect(
+      controller.eventsFor(task.id).last.payload['history_boundary'],
+      false,
+    );
     controller.dispose();
+  });
+
+  test(
+    'work mode changes retain history and add a configuration note',
+    () async {
+      final database = MemoryAppDatabase(demoData: true);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        previewMode: true,
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      final task = await controller.createTask(
+        workMode: 'collaborative',
+        projectId: 'project-1',
+        serverId: 'demo-server',
+        providerId: 'demo-provider',
+        title: '协同切换本地',
+      );
+      await controller.runTask(task, prompt: '先检查服务器和项目状态');
+
+      final updated = await controller.updateTaskConfiguration(
+        taskId: task.id,
+        mode: 'agent',
+        workMode: 'local',
+        projectId: task.projectId,
+        serverId: task.serverId,
+        providerId: task.providerId,
+        workingDirectory: task.workingDirectory,
+        executionMode: task.executionMode,
+      );
+      final change = controller.eventsFor(task.id).last;
+      expect(change.type, 'task.context_changed');
+      expect(change.payload['history_boundary'], false);
+      expect(change.payload['reason'], 'configuration_changed');
+      expect(change.payload['previous_work_mode'], 'collaborative');
+      expect(change.payload['work_mode'], 'local');
+
+      final history = await database.loadModelEvents(task.id);
+      expect(
+        history.any(
+          (event) =>
+              event.type == 'user.message' &&
+              event.payload['text'] == '先检查服务器和项目状态',
+        ),
+        isTrue,
+      );
+
+      final result = await controller.runTask(updated, prompt: '继续检查本地项目');
+      expect(
+        result.messages.any(
+          (message) =>
+              message.role == 'user' && message.content == '先检查服务器和项目状态',
+        ),
+        isTrue,
+      );
+      expect(
+        result.messages.any(
+          (message) =>
+              message.role == 'developer' &&
+              message.content?.contains('retained transcript') == true,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test('legacy configuration boundary does not discard history', () async {
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    final task = await controller.createTask(title: '旧边界历史');
+    await controller.appendTaskEvent(
+      taskId: task.id,
+      type: 'user.message',
+      payload: const {'text': '旧对话上下文'},
+    );
+    await controller.appendTaskEvent(
+      taskId: task.id,
+      type: 'task.context_changed',
+      payload: const {
+        'history_boundary': true,
+        'mode': 'agent',
+        'work_mode': 'local',
+      },
+    );
+
+    final history = await database.loadModelEvents(task.id);
+    expect(
+      history.any(
+        (event) =>
+            event.type == 'user.message' && event.payload['text'] == '旧对话上下文',
+      ),
+      isTrue,
+    );
   });
 
   test(

@@ -1013,7 +1013,7 @@ class ChatPageState extends State<ChatPage> {
                       updated.serverId != task.serverId ||
                       updated.mode != task.mode ||
                       updated.effectiveWorkMode != task.effectiveWorkMode
-                  ? '对话配置已更新，后续任务将使用新的上下文'
+                  ? '对话配置已更新，AI 将收到变更提示并保留已有上下文'
                   : '对话配置已更新',
             ),
           ),
