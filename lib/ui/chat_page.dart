@@ -324,14 +324,21 @@ class ChatPageState extends State<ChatPage> {
                   ),
                 Container(
                   decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest
-                        .withValues(alpha: 0.48),
-                    borderRadius: BorderRadius.circular(20),
+                    color: Theme.of(context).colorScheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(18),
                     border: Border.all(
-                      color: Theme.of(context).colorScheme.outlineVariant,
+                      color: Theme.of(context).colorScheme.outlineVariant
+                          .withValues(alpha: 0.45),
                     ),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x12000000),
+                        blurRadius: 10,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
                   ),
-                  padding: const EdgeInsets.fromLTRB(12, 8, 6, 4),
+                  padding: const EdgeInsets.fromLTRB(12, 8, 6, 5),
                   child: Column(
                     children: [
                       TextField(
@@ -346,8 +353,15 @@ class ChatPageState extends State<ChatPage> {
                           hintText: task?.mode == 'agent' || _mode == 'agent'
                               ? '告诉手机 Agent 要完成什么'
                               : '发消息',
+                          filled: false,
                           border: InputBorder.none,
                           isDense: true,
+                          hintStyle: TextStyle(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurfaceVariant,
+                            fontSize: 13,
+                          ),
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 2,
                             vertical: 4,
@@ -1733,68 +1747,78 @@ class _ContextBar extends StatelessWidget {
         ? contextName
         : '$contextName · ${project!.name}';
     final usageText = _providerCompactUsageText(usage);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final providerWidth = constraints.maxWidth < 380 ? 108.0 : 148.0;
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(10, 2, 6, 2),
-          child: Row(
-            children: [
-              Expanded(
-                child: Row(
-                  children: [
-                    Icon(
-                      _workModeIcon(workMode),
-                      size: 16,
-                      color: colors.primary,
-                    ),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        contextLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall
-                            ?.copyWith(fontSize: 11),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow.withValues(alpha: 0.42),
+        border: Border(
+          bottom: BorderSide(
+            color: colors.outlineVariant.withValues(alpha: 0.6),
+          ),
+        ),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final providerWidth = constraints.maxWidth < 380 ? 108.0 : 148.0;
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(10, 2, 6, 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      Icon(
+                        _workModeIcon(workMode),
+                        size: 16,
+                        color: colors.primary,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          contextLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(fontSize: 11),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: 4),
-              ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: providerWidth),
-                child: _ContextPill(
-                  icon: Icons.hub_outlined,
-                  label: provider?.name ?? '配置供应商',
-                  onTap: onProviderTap,
-                ),
-              ),
-              if (usageText.isNotEmpty) ...[
                 const SizedBox(width: 4),
-                Text(
-                  usageText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall
-                      ?.copyWith(fontSize: 10),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: providerWidth),
+                  child: _ContextPill(
+                    icon: Icons.hub_outlined,
+                    label: provider?.name ?? '配置供应商',
+                    onTap: onProviderTap,
+                  ),
+                ),
+                if (usageText.isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    usageText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall
+                        ?.copyWith(fontSize: 10),
+                  ),
+                ],
+                IconButton(
+                  tooltip: '对话设置',
+                  onPressed: onEdit,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 30,
+                    height: 30,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.tune_outlined, size: 16),
                 ),
               ],
-              IconButton(
-                tooltip: '对话设置',
-                onPressed: onEdit,
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints.tightFor(
-                  width: 30,
-                  height: 30,
-                ),
-                padding: EdgeInsets.zero,
-                icon: const Icon(Icons.tune_outlined, size: 16),
-              ),
-            ],
-          ),
-        );
-      },
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -1812,8 +1836,9 @@ class _ContextPill extends StatelessWidget {
     final content = Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHighest,
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.72),
         borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.7)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1868,7 +1893,11 @@ class _ModelReasoningPill extends StatelessWidget {
         : reasoningEffort;
     return Material(
       color: colors.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(8),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.7)),
+      ),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
@@ -2273,13 +2302,29 @@ class _EmptyConversation extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
+    final colors = Theme.of(context).colorScheme;
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.smart_toy_outlined, size: 46),
-          SizedBox(height: 12),
-          Text('从这里开始对话，或选择手机 Agent 运维服务器'),
+          Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: colors.primaryContainer,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Icon(
+              Icons.smart_toy_outlined,
+              size: 34,
+              color: colors.primary,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            '从这里开始对话，或选择手机 Agent 运维服务器',
+            style: TextStyle(color: colors.onSurfaceVariant),
+          ),
         ],
       ),
     );
@@ -3021,7 +3066,7 @@ class _MessageBubble extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     final avatarColor = isUser ? colors.primary : colors.tertiary;
     final content = isUser
-        ? SelectableText(text)
+        ? SelectableText(text, style: TextStyle(color: colors.onPrimary))
         : MarkdownBody(
             data: text,
             selectable: true,
@@ -3032,14 +3077,17 @@ class _MessageBubble extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
         decoration: BoxDecoration(
-          color: isUser
-              ? colors.primaryContainer
-              : colors.surfaceContainerHighest,
+          color: isUser ? colors.primary : colors.surfaceContainerHighest,
+          border: isUser
+              ? null
+              : Border.all(
+                  color: colors.outlineVariant.withValues(alpha: 0.55),
+                ),
           borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isUser ? 18 : 5),
-            bottomRight: Radius.circular(isUser ? 5 : 18),
+            topLeft: const Radius.circular(14),
+            topRight: const Radius.circular(14),
+            bottomLeft: Radius.circular(isUser ? 14 : 5),
+            bottomRight: Radius.circular(isUser ? 5 : 14),
           ),
         ),
         child: Column(

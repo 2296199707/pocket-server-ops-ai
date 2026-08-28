@@ -17,7 +17,8 @@
         android:name=".MobileAgentApplication"
         android:allowBackup="false"
             android:usesCleartextTraffic="true"
-            android:icon="@mipmap/ic_launcher">
+            android:icon="@drawable/pocket_server_ops_ai_icon"
+            android:roundIcon="@drawable/pocket_server_ops_ai_icon">
         <service
             android:name=".AgentForegroundService"
             android:exported="false"

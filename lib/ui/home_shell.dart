@@ -31,8 +31,8 @@ class _HomeShellState extends State<HomeShell> {
     horizontal: -1,
     vertical: -2,
   );
-  static const _drawerTitleStyle = TextStyle(fontSize: 13, height: 1.1);
-  static const _drawerSubtitleStyle = TextStyle(fontSize: 10, height: 1.05);
+  static const _drawerTitleStyle = TextStyle(fontSize: 13, height: 1.15);
+  static const _drawerSubtitleStyle = TextStyle(fontSize: 11, height: 1.1);
 
   final _chatKey = GlobalKey<ChatPageState>();
   int _selectedIndex = 0;
@@ -1154,10 +1154,13 @@ class _DrawerActionButton extends StatelessWidget {
       child: OutlinedButton(
         onPressed: onPressed,
         style: OutlinedButton.styleFrom(
-          minimumSize: const Size(0, 40),
+          minimumSize: const Size(0, 42),
           padding: const EdgeInsets.symmetric(horizontal: 5),
           visualDensity: VisualDensity.compact,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          foregroundColor: Theme.of(context).colorScheme.onSurface,
+          backgroundColor: Theme.of(context).colorScheme.surfaceContainerLow
+              .withValues(alpha: 0.7),
           side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
