@@ -129,6 +129,22 @@ class SshFileChunk {
   final int? totalBytes;
 }
 
+class SshFileBytesChunk {
+  const SshFileBytesChunk({
+    required this.offset,
+    required this.nextOffset,
+    required this.bytes,
+    required this.eof,
+    this.totalBytes,
+  });
+
+  final int offset;
+  final int nextOffset;
+  final Uint8List bytes;
+  final bool eof;
+  final int? totalBytes;
+}
+
 class SshCommandStream {
   SshCommandStream(this._session) {
     unawaited(
@@ -261,6 +277,31 @@ abstract class SshConnection {
   /// Read a remote file as bytes for a direct download. The caller does not
   /// place these bytes in the AI context.
   Future<Uint8List> readFileBytes(String remotePath);
+
+  /// Read a binary page for resumable downloads. Offsets and lengths are
+  /// measured in bytes, and the returned page is safe to append to a local
+  /// partial file.
+  Future<SshFileBytesChunk> readFileBytesChunk(
+    String remotePath, {
+    int offset = 0,
+    int? length,
+  }) async {
+    if (offset < 0) throw ArgumentError.value(offset, 'offset');
+    final requestedLength = length ?? _defaultFileDownloadChunkBytes;
+    if (requestedLength <= 0) {
+      throw ArgumentError.value(length, 'length', 'must be positive');
+    }
+    final source = await readFileBytes(remotePath);
+    final start = offset.clamp(0, source.length).toInt();
+    final end = (start + requestedLength).clamp(start, source.length).toInt();
+    return SshFileBytesChunk(
+      offset: offset,
+      nextOffset: end,
+      bytes: Uint8List.fromList(source.sublist(start, end)),
+      eof: end >= source.length,
+      totalBytes: source.length,
+    );
+  }
 
   /// Read a UTF-8 page. Offsets and lengths are bytes, so callers can fetch
   /// arbitrarily large files without putting the whole file in one tool
@@ -540,6 +581,50 @@ class DartSshConnection implements SshConnection {
   }
 
   @override
+  Future<SshFileBytesChunk> readFileBytesChunk(
+    String remotePath, {
+    int offset = 0,
+    int? length,
+  }) async {
+    if (offset < 0) throw ArgumentError.value(offset, 'offset');
+    final requestedLength = length ?? _defaultFileDownloadChunkBytes;
+    if (requestedLength <= 0) {
+      throw ArgumentError.value(length, 'length', 'must be positive');
+    }
+    return _withSftp((sftp) async {
+      final file = await sftp.open(remotePath);
+      try {
+        final size = (await file.stat()).size;
+        if (size != null && offset >= size) {
+          return SshFileBytesChunk(
+            offset: offset,
+            nextOffset: offset,
+            bytes: Uint8List(0),
+            eof: true,
+            totalBytes: size,
+          );
+        }
+        final bytes = await file.readBytes(
+          length: requestedLength,
+          offset: offset,
+        );
+        final nextOffset = offset + bytes.length;
+        return SshFileBytesChunk(
+          offset: offset,
+          nextOffset: nextOffset,
+          bytes: bytes,
+          eof: size != null
+              ? nextOffset >= size
+              : bytes.length < requestedLength,
+          totalBytes: size,
+        );
+      } finally {
+        await file.close();
+      }
+    });
+  }
+
+  @override
   Future<SshFileChunk> readFileChunk(
     String remotePath, {
     int offset = 0,
@@ -726,6 +811,7 @@ class DartSshConnection implements SshConnection {
 }
 
 const _defaultFileChunkBytes = 64 * 1024;
+const _defaultFileDownloadChunkBytes = 512 * 1024;
 const _maxSymlinkDepth = 16;
 const _sftpTimeout = Duration(minutes: 2);
 

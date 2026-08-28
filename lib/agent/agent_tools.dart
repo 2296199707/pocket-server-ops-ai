@@ -9,6 +9,7 @@ import '../domain/models.dart';
 import '../local/local_file_access.dart';
 import '../local/local_preview.dart';
 import '../local/project_files.dart';
+import '../ssh/resumable_file_download.dart';
 import '../ssh/ssh_connection.dart';
 import 'ai_protocol.dart';
 
@@ -390,14 +391,19 @@ class RemoteAgentTools {
     if (!overwrite && await files.exists(targetProject, projectPath)) {
       throw StateError('项目目标文件已存在：$projectPath');
     }
-    final bytes = await _connection.readFileBytes(
-      _resolveRemotePath(remotePath),
+    final sourcePath = _resolveRemotePath(remotePath);
+    final target = File(await files.resolveForIo(targetProject, projectPath));
+    final downloaded = await const ResumableFileDownloader().download(
+      target: target,
+      sourceKey: sourcePath,
+      readChunk: (offset) =>
+          _connection.readFileBytesChunk(sourcePath, offset: offset),
+      overwrite: overwrite,
     );
-    await files.writeBytes(targetProject, projectPath, bytes);
     return {
       'remote_path': remotePath,
       'project_path': projectPath,
-      'bytes': bytes.length,
+      'bytes': await downloaded.length(),
       'written': true,
     };
   }

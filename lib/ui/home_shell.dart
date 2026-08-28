@@ -1364,7 +1364,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 5,
+              itemCount: 6,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1379,17 +1379,47 @@ class SettingsPage extends StatelessWidget {
                   );
                 }
                 if (index == 1) {
-                  return _VersionSettingsTile(controller: controller);
+                  return _FloatingCapsuleSettingsTile(controller: controller);
                 }
                 if (index == 2) {
-                  return _FontScaleSettingsTile(controller: controller);
+                  return _VersionSettingsTile(controller: controller);
                 }
                 if (index == 3) {
+                  return _FontScaleSettingsTile(controller: controller);
+                }
+                if (index == 4) {
                   return _StorageSettingsTile(controller: controller);
                 }
                 return _DeveloperSettingsTile(controller: controller);
               },
             ),
+    );
+  }
+}
+
+class _FloatingCapsuleSettingsTile extends StatelessWidget {
+  const _FloatingCapsuleSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  Future<void> _toggle(BuildContext context, bool enabled) async {
+    final changed = await controller.setFloatingCapsuleEnabled(enabled);
+    if (!changed && enabled && context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请在系统设置中允许悬浮窗权限，再重新打开此开关')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SwitchListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      secondary: const Icon(Icons.picture_in_picture_alt_outlined),
+      title: const Text('后台悬浮胶囊'),
+      subtitle: const Text('在其他 App 上显示当前任务状态，可拖到屏幕边缘半隐藏'),
+      value: controller.floatingCapsuleEnabled,
+      onChanged: (value) => unawaited(_toggle(context, value)),
     );
   }
 }

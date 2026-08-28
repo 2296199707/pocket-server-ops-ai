@@ -318,6 +318,25 @@ class _FakeConnection implements SshConnection {
   }
 
   @override
+  Future<SshFileBytesChunk> readFileBytesChunk(
+    String remotePath, {
+    int offset = 0,
+    int? length,
+  }) async {
+    final bytes = await readFileBytes(remotePath);
+    final start = offset.clamp(0, bytes.length).toInt();
+    final requested = length ?? bytes.length;
+    final end = (start + requested).clamp(start, bytes.length).toInt();
+    return SshFileBytesChunk(
+      offset: offset,
+      nextOffset: end,
+      bytes: Uint8List.fromList(bytes.sublist(start, end)),
+      eof: end >= bytes.length,
+      totalBytes: bytes.length,
+    );
+  }
+
+  @override
   Future<SshFileChunk> readFileChunk(
     String remotePath, {
     int offset = 0,

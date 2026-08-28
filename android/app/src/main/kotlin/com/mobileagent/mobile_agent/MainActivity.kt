@@ -39,6 +39,10 @@ class MainActivity : FlutterActivity() {
                         val intent = Intent(this, AgentForegroundService::class.java)
                             .setAction(AgentForegroundService.ACTION_START_TASK)
                             .putExtra(AgentForegroundService.EXTRA_TASK_ID, call.argument<String>("taskId"))
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_ENABLED,
+                                call.argument<Boolean>("overlayEnabled") ?: false,
+                            )
                         startTaskService(intent)
                         result.success(null)
                     }
@@ -49,6 +53,29 @@ class MainActivity : FlutterActivity() {
                         sendTaskServiceCommand(intent)
                         result.success(null)
                     }
+                    "updateProgress" -> {
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .setAction(AgentForegroundService.ACTION_UPDATE_PROGRESS)
+                            .putExtra(AgentForegroundService.EXTRA_TASK_ID, call.argument<String>("taskId"))
+                            .putExtra(
+                                AgentForegroundService.EXTRA_PROGRESS_LABEL,
+                                call.argument<String>("label"),
+                            )
+                        sendTaskServiceCommand(intent)
+                        result.success(null)
+                    }
+                    "setOverlayEnabled" -> {
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .setAction(AgentForegroundService.ACTION_SET_OVERLAY)
+                            .putExtra(
+                                AgentForegroundService.EXTRA_OVERLAY_ENABLED,
+                                call.argument<Boolean>("enabled") ?: false,
+                            )
+                        sendTaskServiceCommand(intent)
+                        result.success(null)
+                    }
+                    "canDrawOverlays" -> result.success(canDrawOverlays())
+                    "requestOverlayPermission" -> requestOverlayPermission(result)
                     else -> result.notImplemented()
                 }
             }
@@ -145,6 +172,33 @@ class MainActivity : FlutterActivity() {
         // its command channel avoids a second foreground-service start when
         // the Dart isolate finishes after the Activity is backgrounded.
         startService(intent)
+    }
+
+    private fun canDrawOverlays(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            Settings.canDrawOverlays(this)
+    }
+
+    private fun requestOverlayPermission(result: MethodChannel.Result) {
+        if (canDrawOverlays()) {
+            result.success(true)
+            return
+        }
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
+            result.success(false)
+        } catch (error: Exception) {
+            result.error(
+                "overlay_permission_unavailable",
+                error.message ?: "无法打开悬浮窗权限设置",
+                null,
+            )
+        }
     }
 
     private fun installApk(path: String?, result: MethodChannel.Result) {

@@ -7,14 +7,67 @@ class AndroidTaskService {
 
   final MethodChannel _channel;
 
-  Future<void> start(String taskId) async {
+  Future<void> start(String taskId, {bool overlayEnabled = false}) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
     try {
-      await _channel.invokeMethod<void>('start', {'taskId': taskId});
-    } on MissingPluginException {
-      // Keep local development and tests usable without the Android channel.
+      await _channel.invokeMethod<void>('start', {
+        'taskId': taskId,
+        'overlayEnabled': overlayEnabled,
+      });
+    } catch (_) {
+      // The foreground service is optional and must not fail the AI task.
+    }
+  }
+
+  Future<void> updateProgress(String taskId, String label) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('updateProgress', {
+        'taskId': taskId,
+        'label': label,
+      });
+    } catch (_) {
+      // Progress is best effort and must not interrupt a running task.
+    }
+  }
+
+  Future<void> setOverlayEnabled(bool enabled) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('setOverlayEnabled', {
+        'enabled': enabled,
+      });
+    } catch (_) {
+      // The task can continue without the optional overlay.
+    }
+  }
+
+  Future<bool> canDrawOverlays() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('canDrawOverlays') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestOverlayPermission() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      return await _channel.invokeMethod<bool>('requestOverlayPermission') ??
+          false;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -24,8 +77,8 @@ class AndroidTaskService {
     }
     try {
       await _channel.invokeMethod<void>('stop', {'taskId': taskId});
-    } on MissingPluginException {
-      // Keep local development and tests usable without the Android channel.
+    } catch (_) {
+      // The foreground service may already have been stopped by Android.
     }
   }
 }

@@ -28,6 +28,7 @@ import 'providers/provider_connection_tester.dart';
 import 'providers/image_generation_client.dart';
 import 'providers/provider_usage_client.dart';
 import 'server_status_script.dart';
+import 'ssh/resumable_file_download.dart';
 import 'ssh/ssh_connection.dart';
 import 'storage/app_database.dart';
 import 'storage/attachment_store.dart';
@@ -101,6 +102,8 @@ class AppController extends ChangeNotifier {
   final Map<String, Future<TaskContextUsage>> _taskContextLoads = {};
   final Map<String, Future<TaskContextUsage>> _taskCompactions = {};
   final Map<String, int> _taskContextGenerations = {};
+  final Map<String, String> _taskProgressLabels = {};
+  final Set<String> _foregroundServiceTasks = {};
   Future<void> _loadTail = Future<void>.value();
   int _idSequence = 0;
 
@@ -111,6 +114,7 @@ class AppController extends ChangeNotifier {
   Map<String, List<TaskEvent>> _events = const {};
   bool _agentAutoExecute = false;
   bool _betaUpdatesEnabled = false;
+  bool _floatingCapsuleEnabled = false;
   String? _imageProviderId;
   String? _lastDashboardServerId;
   String? _lastConversationTaskId;
@@ -125,6 +129,7 @@ class AppController extends ChangeNotifier {
   List<Task> get tasks => List.unmodifiable(_tasks);
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
+  bool get floatingCapsuleEnabled => _floatingCapsuleEnabled;
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
@@ -313,6 +318,8 @@ class AppController extends ChangeNotifier {
         await _database.readSetting(_agentAutoExecuteSetting) == 'true';
     _betaUpdatesEnabled =
         await _database.readSetting(_betaUpdatesSetting) == 'true';
+    _floatingCapsuleEnabled =
+        await _database.readSetting(_floatingCapsuleSetting) == 'true';
     final savedImageProviderId = await _database.readSetting(
       _imageProviderSetting,
     );
@@ -634,6 +641,25 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
+  /// Enables the optional cross-app status overlay. The Android permission is
+  /// requested here so the setting never appears enabled without permission.
+  Future<bool> setFloatingCapsuleEnabled(bool enabled) async {
+    if (enabled && !await _taskService.canDrawOverlays()) {
+      await _taskService.requestOverlayPermission();
+      return false;
+    }
+    await _database.writeSetting(
+      _floatingCapsuleSetting,
+      enabled ? 'true' : 'false',
+    );
+    _floatingCapsuleEnabled = enabled;
+    if (_runningTasks.isNotEmpty) {
+      await _taskService.setOverlayEnabled(enabled);
+    }
+    _notify();
+    return true;
+  }
+
   Future<void> setFontScale(double scale) async {
     final value = scale.clamp(0.85, 1.15).toDouble();
     await _database.writeSetting(_fontScaleSetting, '$value');
@@ -907,6 +933,7 @@ class AppController extends ChangeNotifier {
     _tasks = [
       for (final item in _tasks) item.id == updated.id ? updated : item,
     ];
+    _publishTaskProgress(taskId, _taskProgressForStatus(status));
     _notify();
   }
 
@@ -961,6 +988,8 @@ class AppController extends ChangeNotifier {
     _tasks = [
       for (final item in _tasks) item.id == updatedTask.id ? updatedTask : item,
     ];
+    final progress = _taskProgressForEvent(type, payload);
+    if (progress != null) _publishTaskProgress(taskId, progress);
     _notify();
     return event;
   }
@@ -1455,11 +1484,14 @@ class AppController extends ChangeNotifier {
         );
       }
       await updateTaskStatus(task.id, 'running', turnId: turnId);
+      await _taskService.start(
+        task.id,
+        overlayEnabled: _floatingCapsuleEnabled,
+      );
+      serviceStarted = true;
+      _foregroundServiceTasks.add(task.id);
+      _publishTaskProgress(task.id, '分析中');
       await appendTurnEvent('task.started', {'mode': task.mode});
-      if (task.mode == 'agent') {
-        await _taskService.start(task.id);
-        serviceStarted = true;
-      }
 
       final activeProvider = provider!;
       final apiKey = await _readCredential(
@@ -1627,6 +1659,7 @@ class AppController extends ChangeNotifier {
         onEvent: (type, payload) {
           if (type == 'assistant.delta') {
             final delta = payload['text'];
+            _publishTaskProgress(task.id, '生成回复');
             if (_taskRunIds[task.id] == turnId &&
                 delta is String &&
                 delta.isNotEmpty) {
@@ -1725,7 +1758,7 @@ class AppController extends ChangeNotifier {
         _streamingAssistantText.remove(task.id);
       }
       if (client != null) closeAiClient(client);
-      if (task.mode == 'agent' && serviceStarted) {
+      if (task.mode == 'agent') {
         final keepRemoteTools = remoteTools?.hasRunningProcesses ?? false;
         if (connection == null && cancellation.isCancelled) {
           _sshPool.abort(task.id);
@@ -1737,11 +1770,14 @@ class AppController extends ChangeNotifier {
             // Cleanup must not replace a task result.
           }
         }
+      }
+      if (serviceStarted) {
         try {
           await _taskService.stop(task.id);
         } catch (_) {
           // The foreground service may already have been stopped by Android.
         }
+        _foregroundServiceTasks.remove(task.id);
       }
     }
   }
@@ -1754,6 +1790,7 @@ class AppController extends ChangeNotifier {
     _taskRuns.remove(taskId);
     _taskRunIds.remove(taskId);
     _runningTasks.remove(taskId);
+    _taskProgressLabels.remove(taskId);
     _notify();
   }
 
@@ -1785,6 +1822,88 @@ class AppController extends ChangeNotifier {
                 }, cancellation: cancellation),
           ),
     ];
+  }
+
+  void _publishTaskProgress(String taskId, String label) {
+    if (!_foregroundServiceTasks.contains(taskId) ||
+        label.isEmpty ||
+        _taskProgressLabels[taskId] == label) {
+      return;
+    }
+    _taskProgressLabels[taskId] = label;
+    unawaited(_taskService.updateProgress(taskId, label));
+  }
+
+  static String _taskProgressForStatus(String status) {
+    return switch (status) {
+      'queued' => '排队中',
+      'running' => '分析中',
+      'waiting' => '等待确认',
+      'stopping' => '正在停止',
+      'completed' => '已完成',
+      'failed' => '执行失败',
+      'cancelled' || 'canceled' => '已停止',
+      'unknown' => '状态未知',
+      _ => '处理中',
+    };
+  }
+
+  static String? _taskProgressForEvent(
+    String type,
+    Map<String, Object?> payload,
+  ) {
+    switch (type) {
+      case 'assistant.completed':
+        final calls = payload['tool_calls'];
+        return calls is List && calls.isNotEmpty ? '准备执行' : '整理回复';
+      case 'tool.started':
+      case 'review.started':
+        if (type == 'review.started') return '安全审查';
+        return _taskProgressForTool(payload['name']);
+      case 'tool.completed':
+      case 'tool.failed':
+        return '继续处理';
+      case 'task.context_changed':
+        return '更新上下文';
+      case 'task.started':
+        return '分析中';
+      case 'task.completed':
+        return '已完成';
+      case 'task.failed':
+        return '执行失败';
+      case 'task.cancelled':
+        return '已停止';
+      case 'task.unknown':
+        return '状态未知';
+      default:
+        return null;
+    }
+  }
+
+  static String _taskProgressForTool(Object? value) {
+    final name = value is String ? value : '';
+    if (name.startsWith('terminal.')) return '执行命令';
+    if (name == 'image.generate') return '生成图片';
+    if (name.startsWith('preview.') || name == 'local.test_web') {
+      return '测试预览';
+    }
+    if (name == 'file.read' ||
+        name == 'project.read' ||
+        name == 'local.read' ||
+        name == 'local.list' ||
+        name == 'project.list') {
+      return '读取文件';
+    }
+    if (name == 'file.write' ||
+        name == 'file.replace' ||
+        name == 'project.write' ||
+        name == 'project.replace' ||
+        name == 'local.write' ||
+        name == 'local.replace' ||
+        name == 'server.download_to_project') {
+      return '修改文件';
+    }
+    return '调用工具';
   }
 
   void _notify() {
@@ -2142,6 +2261,98 @@ class AppController extends ChangeNotifier {
       (connection) => connection.readFile(remotePath.trim()),
       onFirstHostKey: onFirstHostKey,
     );
+  }
+
+  Future<File> downloadServerFileToProject(
+    ServerProfile profile,
+    Project project,
+    String remotePath,
+    String projectPath, {
+    bool overwrite = false,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FileDownloadProgress? onProgress,
+  }) async {
+    final sourcePath = remotePath.trim();
+    if (sourcePath.isEmpty) throw ArgumentError('文件路径不能为空');
+    final destinationPath = projectPath.trim();
+    if (destinationPath.isEmpty) throw ArgumentError('项目文件路径不能为空');
+    if (previewMode) throw StateError('预览模式不会下载真实服务器文件');
+
+    await _ensureProjectStoragePath(project.localPath);
+    await _projectFiles.ensureRoot(project);
+    final target = File(
+      await _projectFiles.resolveForIo(project, destinationPath),
+    );
+    final downloadId = _newId('download');
+    final sourceKey =
+        '${profile.id}\u0000${profile.host}\u0000${profile.port}\u0000$sourcePath';
+    SshConnection? connection;
+    var serviceStarted = false;
+    var lastProgressLabel = '';
+
+    void publishProgress(int received, int? total) {
+      onProgress?.call(received, total);
+      final label = total != null && total > 0
+          ? '下载 ${(received * 100 / total).round()}%'
+          : '下载中';
+      if (label == lastProgressLabel) return;
+      lastProgressLabel = label;
+      unawaited(_taskService.updateProgress(downloadId, label));
+    }
+
+    Future<SshFileBytesChunk> readChunk(int offset) async {
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (connection == null || connection!.isClosed) {
+            await connection?.close();
+            connection = await _connectServer(
+              profile,
+              onFirstHostKey: onFirstHostKey,
+            );
+            await _saveObservedHostKey(profile, connection!.hostKey);
+          }
+          return await connection!.readFileBytesChunk(
+            sourcePath,
+            offset: offset,
+          );
+        } catch (_) {
+          final failed = connection;
+          connection = null;
+          try {
+            await failed?.close();
+          } catch (_) {
+            // The connection may already be broken.
+          }
+          if (attempt == 2) rethrow;
+          await Future<void>.delayed(
+            Duration(milliseconds: 250 * (attempt + 1)),
+          );
+        }
+      }
+      throw StateError('无法读取远程文件');
+    }
+
+    try {
+      await _taskService.start(
+        downloadId,
+        overlayEnabled: _floatingCapsuleEnabled,
+      );
+      serviceStarted = true;
+      publishProgress(0, null);
+      return await const ResumableFileDownloader().download(
+        target: target,
+        sourceKey: sourceKey,
+        readChunk: readChunk,
+        overwrite: overwrite,
+        onProgress: publishProgress,
+      );
+    } finally {
+      try {
+        await connection?.close();
+      } finally {
+        if (serviceStarted) await _taskService.stop(downloadId);
+      }
+    }
   }
 
   Future<void> writeServerFile(
@@ -4217,6 +4428,7 @@ class _ContextUsageEvent {
 
 const _agentAutoExecuteSetting = 'agent_auto_execute';
 const _betaUpdatesSetting = 'beta_updates_enabled';
+const _floatingCapsuleSetting = 'floating_capsule_enabled';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';

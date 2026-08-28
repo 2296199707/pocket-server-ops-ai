@@ -22,6 +22,25 @@ void main() {
     expect(find.textContaining('未被对话引用'), findsOneWidget);
   });
 
+  testWidgets('settings exposes the cross-app floating capsule switch', (
+    tester,
+  ) async {
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(home: SettingsPage(controller: controller)),
+    );
+
+    expect(find.text('后台悬浮胶囊'), findsOneWidget);
+    expect(find.textContaining('其他 App'), findsOneWidget);
+    expect(controller.floatingCapsuleEnabled, isFalse);
+  });
+
   testWidgets('developer beta update switch can be changed', (tester) async {
     final controller = AppController(
       database: MemoryAppDatabase(),

@@ -28,6 +28,10 @@ class _FileManagerPageState extends State<FileManagerPage> {
   late final TextEditingController _path;
   List<SshDirectoryEntry> _entries = const [];
   bool _loading = false;
+  bool _downloading = false;
+  String? _downloadName;
+  int _downloadedBytes = 0;
+  int? _downloadTotalBytes;
   String? _error;
 
   @override
@@ -140,6 +144,30 @@ class _FileManagerPageState extends State<FileManagerPage> {
               padding: const EdgeInsets.all(12),
               child: Text(_error!),
             ),
+          if (_downloading)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '下载 ${_downloadName ?? ''}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(_downloadProgressLabel),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  LinearProgressIndicator(value: _downloadProgress),
+                ],
+              ),
+            ),
           Expanded(
             child: _loading && _entries.isEmpty
                 ? const Center(child: CircularProgressIndicator())
@@ -164,7 +192,21 @@ class _FileManagerPageState extends State<FileManagerPage> {
                         subtitle: entry.isDirectory
                             ? const Text('目录')
                             : Text(_formatSize(entry.size)),
-                        trailing: const Icon(Icons.chevron_right),
+                        trailing: entry.isDirectory
+                            ? const Icon(Icons.chevron_right)
+                            : Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: '下载到手机项目',
+                                    onPressed: _downloading
+                                        ? null
+                                        : () => _download(entry),
+                                    icon: const Icon(Icons.download_outlined),
+                                  ),
+                                  const Icon(Icons.chevron_right),
+                                ],
+                              ),
                         onTap: () => _open(entry),
                       );
                     },
@@ -240,6 +282,137 @@ class _FileManagerPageState extends State<FileManagerPage> {
       ),
     );
     if (mounted) unawaited(_load(forceRefresh: true));
+  }
+
+  double? get _downloadProgress {
+    final total = _downloadTotalBytes;
+    if (total == null || total <= 0) return null;
+    return (_downloadedBytes / total).clamp(0, 1).toDouble();
+  }
+
+  String get _downloadProgressLabel {
+    final progress = _downloadProgress;
+    if (progress == null) return '下载中';
+    return '${(progress * 100).round()}%';
+  }
+
+  Future<void> _download(SshDirectoryEntry entry) async {
+    final projects = widget.controller.projects;
+    if (projects.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先创建手机项目，再下载服务器文件')));
+      return;
+    }
+    final project = projects.length == 1
+        ? projects.single
+        : await _chooseProject(projects);
+    if (!mounted || project == null) return;
+    final projectPath = await _askProjectPath(entry.name);
+    if (!mounted || projectPath == null || projectPath.trim().isEmpty) return;
+
+    setState(() {
+      _downloading = true;
+      _downloadName = entry.name;
+      _downloadedBytes = 0;
+      _downloadTotalBytes = entry.size;
+      _error = null;
+    });
+    try {
+      await widget.controller.downloadServerFileToProject(
+        widget.server,
+        project,
+        entry.path,
+        projectPath,
+        onFirstHostKey: _confirmHostKey,
+        onProgress: (received, total) {
+          if (!mounted) return;
+          setState(() {
+            _downloadedBytes = received;
+            _downloadTotalBytes = total;
+          });
+        },
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已下载到 ${project.name}/$projectPath')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '下载失败，已保留临时文件，重试将继续：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _downloading = false;
+          _downloadName = null;
+        });
+      }
+    }
+  }
+
+  Future<Project?> _chooseProject(List<Project> projects) {
+    return showDialog<Project>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('选择手机项目'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 320),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final project in projects)
+                  ListTile(
+                    title: Text(project.name),
+                    subtitle: Text(
+                      project.localPath,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => Navigator.pop(context, project),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<String?> _askProjectPath(String name) {
+    final controller = TextEditingController(text: name);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('保存到项目'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '项目内相对路径',
+            hintText: '例如 assets/data.bin',
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('下载'),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
   }
 
   void _goParent() {
