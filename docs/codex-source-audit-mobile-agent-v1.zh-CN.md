@@ -26,8 +26,8 @@
 ### 2.2 当前应用
 
 - canonical app：`/www/server-agent/workspace/apps/mobile-agent-v1`；
-- 当前 beta：`1.0.3-beta.18`；
-- 当前基线 commit：`1f999ba`（版本提交：`fc73378`）；
+- 当前 beta：`1.0.3-beta.19`；
+- 当前基线 commit：`8cc8e0a`（版本提交：`96856a8`）；
 - legacy app `/www/server-agent/workspace/apps/mobile` 不属于审查和修改范围；
 - 构建、缓存和 APK 继续使用 `/www` 数据盘路径。
 
@@ -131,7 +131,7 @@
 
 - 已固定 Codex 源码 commit `f5420174dafba153913a3e697f89002c338dfd7e`；
 - 已确认源码快照 checkout 不完整，后续使用 Git object 读取，不把工作区缺失误判为源码缺失；
-- 当前 beta 基线为 `1.0.3-beta.18`，功能 commit `1f999ba`，版本 commit `fc73378`；
+- 当前 beta 基线为 `1.0.3-beta.19`，功能 commit `8cc8e0a`，版本 commit `96856a8`；
 - 上一轮调查中的结论只作为待复核线索，不直接作为本轮最终证据；
 - 建立基线时尚未修改业务代码；后续条目按表格顺序更新状态和结论。
 
@@ -951,6 +951,43 @@
 - APK 校验：`76,511,035` bytes；SHA-256
   `943dfcc08bc890855bcdcffdfb040dd5bfec91e8c50d35c3bdc86c0aa429b39b`。
 - 发布前验证：`flutter analyze` 通过；`flutter test` 全量 163 项通过；
+  `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
+
+### 2026-08-28：Agent 工具调用前置说明与流式消息时序
+
+- Codex 源码证据：固定 commit `f5420174dafba153913a3e697f89002c338dfd7e` 的
+  `codex-rs/core/gpt_5_1_prompt.md:37-49,186-193` 要求长时间工具调用期间持续让用户知道进展，
+  并在第一次工具调用前先发送简短计划；`codex-rs/core/src/stream_events_utils.rs` 的
+  `realtime_text_for_event` 将模型真实输出作为实时消息交付，`turn.rs` 在输出 item 完成后再
+  排队工具执行。Codex 的 `MessagePhase::Commentary` 是供应商/模型返回的阶段信息，不能由
+  客户端伪造成 AI 回复。
+- Mobile 原问题：`lib/app_controller.dart` 的 Agent system prompt 只要求持续完成任务，
+  没有前置计划和阶段进度约定；收到 `assistant.completed` 时先清除临时流式文本，再异步写入
+  事件库。模型若直接返回工具调用，用户会看到命令连续执行，前置说明即使真实返回也可能短暂
+  消失。
+- 复现输入：假 Responses 服务首轮返回一条 assistant 文本“我先检查当前状态，再继续。”和
+  一个 `local.list` function call，第二轮返回“检查完成。”；监听控制器通知，检查前置说明、
+  `tool.started` 和最终回复的顺序。
+- 修复：`lib/app_controller.dart:_systemPrompt` 增加 Codex 同语义的首次计划和阶段进度要求，
+  明确这是简短 commentary，不要求叙述每条命令；流式文本在对应 `assistant.completed`、工具
+  失败或任务终态事件完成持久化后才清除。没有生成虚假 AI 消息，也没有减少工具能力或改变审批策略。
+- 定向测试：`test/app_controller_test.dart` 的
+  `agent persists its streamed preamble before starting a tool call`，使用本地假 Responses
+  服务覆盖真实请求、首轮工具调用、事件持久化和终态回复；`test/agent_loop_test.dart` 与该
+  控制器测试共 71 项通过。
+- 结论：此前属于 `需修复`；现已处理。Responses 未暴露 phase 时仍按普通 assistant 文本
+  兼容，只有模型真实返回的文本会显示为前置说明；功能修复已提交为 `8cc8e0a`。
+
+### 2026-08-28：Beta 1.0.3-beta.19 发布记录
+
+- 发布内容：修复手机 Agent 在首轮工具调用前没有稳定显示模型进度的问题；保留真实流式
+  commentary，先持久化 assistant 事件再清理临时文本，避免命令执行期间前置说明消失。
+- 功能修复提交：`8cc8e0a`；版本提交：`96856a8`。
+- 版本：`1.0.3-beta.19+28`；GitHub 标签：`v1.0.3-beta.19`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.19-release.apk`。
+- APK 校验：`76,511,035` bytes；SHA-256
+  `92c45c1f3d41d3e2ff9e5e310deb7b59c6f703296b59f32fa3fa16969298547e`。
+- 发布前验证：`flutter analyze` 通过；Agent 控制器和循环定向测试 71 项通过；
   `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
 
 ## 9. 发现记录模板
