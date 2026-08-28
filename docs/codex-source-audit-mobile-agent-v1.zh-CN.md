@@ -26,8 +26,8 @@
 ### 2.2 当前应用
 
 - canonical app：`/www/server-agent/workspace/apps/mobile-agent-v1`；
-- 当前 beta：`1.0.3-beta.17`；
-- 当前基线 commit：`a7cc134`（版本提交：`50efe3d`）；
+- 当前 beta：`1.0.3-beta.18`；
+- 当前基线 commit：`1f999ba`（版本提交：`fc73378`）；
 - legacy app `/www/server-agent/workspace/apps/mobile` 不属于审查和修改范围；
 - 构建、缓存和 APK 继续使用 `/www` 数据盘路径。
 
@@ -131,7 +131,7 @@
 
 - 已固定 Codex 源码 commit `f5420174dafba153913a3e697f89002c338dfd7e`；
 - 已确认源码快照 checkout 不完整，后续使用 Git object 读取，不把工作区缺失误判为源码缺失；
-- 当前 beta 基线为 `1.0.3-beta.17`，功能 commit `a7cc134`，版本 commit `50efe3d`；
+- 当前 beta 基线为 `1.0.3-beta.18`，功能 commit `1f999ba`，版本 commit `fc73378`；
 - 上一轮调查中的结论只作为待复核线索，不直接作为本轮最终证据；
 - 建立基线时尚未修改业务代码；后续条目按表格顺序更新状态和结论。
 
@@ -938,6 +938,19 @@
 - APK 校验：`76,493,799` bytes；SHA-256
   `11b4eb1dcf45a48bdfac63741a376144f27687d67186de341be123a507da2aff`。
 - 发布前验证：`flutter analyze` 通过；`flutter test` 全量 161 项通过；
+  `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
+
+### 2026-08-28：Beta 1.0.3-beta.18 发布记录
+
+- 发布内容：更新页支持 APP 内下载 APK、显示进度并调用 Android 系统安装器；保留浏览器打开
+  和复制下载链接；已下载 APK 缓存到 APP 私有目录，安装权限不足时可直接重试。平板对话框
+  底部操作组右对齐，窄屏模型按钮可收缩或换行；平板侧栏适度放大并扩展为 360dp。
+- 功能修复提交：`1f999ba`；版本提交：`fc73378`。
+- 版本：`1.0.3-beta.18+27`；GitHub 标签：`v1.0.3-beta.18`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.18-release.apk`。
+- APK 校验：`76,511,035` bytes；SHA-256
+  `943dfcc08bc890855bcdcffdfb040dd5bfec91e8c50d35c3bdc86c0aa429b39b`。
+- 发布前验证：`flutter analyze` 通过；`flutter test` 全量 163 项通过；
   `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
 
 ## 9. 发现记录模板
