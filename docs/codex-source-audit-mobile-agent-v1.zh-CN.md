@@ -1095,8 +1095,9 @@
 - 内容：每个供应商可独立配置图片模型，支持从供应商 `/models` 列表发现图片模型，
   `image.generate` 使用该配置而不接受模型参数；更新检查新增 GitHub Raw 和 jsDelivr CDN
   渠道，同时保留 GitHub API。静态更新清单位于 `updates/releases.json`。
-- 范围：本次只提交并推送 `beta` 分支，未创建 GitHub Release 或推送 `main`；清单中的 beta.24
-  Release/APK 地址待后续正式创建 Release 后可用。
+- 发布结果：已创建 GitHub Pre-release `v1.0.3-beta.24`，tag 指向 `beta` 分支提交
+  `a8946f0`，并上传上述 APK；未推送 `main`。Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.24`。
 
 ## 9. 发现记录模板
 
