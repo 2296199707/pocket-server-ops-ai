@@ -245,6 +245,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   late final TextEditingController _name;
   late final TextEditingController _baseUrl;
   late final TextEditingController _model;
+  late final TextEditingController _imageModel;
   late final TextEditingController _secret;
   String _reasoningEffort = 'default';
   String _wireApi = 'responses';
@@ -252,7 +253,9 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   bool _isDefault = false;
   bool _saving = false;
   bool _loadingModels = false;
+  bool _loadingImageModels = false;
   List<String> _models = const [];
+  List<String> _imageModels = const [];
   Map<String, ProviderModelMetadata> _modelMetadata = const {};
   String? _error;
 
@@ -263,6 +266,11 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _name = TextEditingController(text: profile?.name);
     _baseUrl = TextEditingController(text: profile?.baseUrl);
     _model = TextEditingController(text: profile?.model);
+    _imageModel = TextEditingController(
+      text: profile == null
+          ? defaultImageModel
+          : widget.controller.imageModelFor(profile.id),
+    );
     _secret = TextEditingController();
     _reasoningEffort = profile?.reasoningEffort ?? 'default';
     _wireApi = profile?.wireApi ?? 'responses';
@@ -276,6 +284,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _name.dispose();
     _baseUrl.dispose();
     _model.dispose();
+    _imageModel.dispose();
     _secret.dispose();
     super.dispose();
   }
@@ -373,6 +382,45 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 ],
                 onChanged: (value) {
                   if (value != null) setState(() => _model.text = value);
+                },
+              ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _imageModel,
+                    decoration: const InputDecoration(
+                      labelText: '图片模型',
+                      helperText: 'image.generate 使用的模型，默认 gpt-image-2',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  tooltip: '获取图片模型',
+                  onPressed: _loadingImageModels ? null : _loadImageModels,
+                  icon: _loadingImageModels
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.image_search_outlined),
+                ),
+              ],
+            ),
+            if (_imageModels.isNotEmpty)
+              DropdownButtonFormField<String>(
+                initialValue: _imageModels.contains(_imageModel.text)
+                    ? _imageModel.text
+                    : null,
+                decoration: const InputDecoration(labelText: '已发现图片模型'),
+                items: [
+                  for (final model in _imageModels)
+                    DropdownMenuItem(value: model, child: Text(model)),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => _imageModel.text = value);
                 },
               ),
             DropdownButtonFormField<String>(
@@ -485,6 +533,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         secret: _secret.text,
         isDefault: _isDefault,
         modelMetadata: _modelMetadata,
+        imageModel: _imageModel.text,
       );
       if (mounted) Navigator.pop(context);
     } catch (error) {
@@ -532,6 +581,35 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       if (mounted) setState(() => _error = '读取模型失败：$error');
     } finally {
       if (mounted) setState(() => _loadingModels = false);
+    }
+  }
+
+  Future<void> _loadImageModels() async {
+    final profile = ProviderProfile(
+      id: widget.existing?.id ?? 'image-model-test',
+      name: _name.text.trim().isEmpty ? '图片模型测试' : _name.text.trim(),
+      baseUrl: _baseUrl.text.trim(),
+      model: _model.text.trim().isEmpty ? 'unknown' : _model.text.trim(),
+      reasoningEffort: _reasoningEffort,
+      wireApi: _wireApi,
+      contextWindowMode: _contextWindowMode,
+      apiKeyRef: widget.existing?.apiKeyRef,
+      isDefault: _isDefault,
+    );
+    setState(() {
+      _loadingImageModels = true;
+      _error = null;
+    });
+    try {
+      final models = await widget.controller.loadProviderImageModels(
+        profile,
+        secret: _secret.text.isEmpty ? null : _secret.text,
+      );
+      if (mounted) setState(() => _imageModels = models);
+    } catch (error) {
+      if (mounted) setState(() => _error = '读取图片模型失败：$error');
+    } finally {
+      if (mounted) setState(() => _loadingImageModels = false);
     }
   }
 

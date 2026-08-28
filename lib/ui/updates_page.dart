@@ -14,9 +14,20 @@ import '../platform/app_update_installer.dart';
 
 const _repositoryOwner = '2296199707';
 const _repositoryName = 'pocket-server-ops-ai';
-const _fallbackVersion = '1.0.3-beta.17';
+const _fallbackVersion = '1.0.3-beta.24';
 
 typedef UpdateDownloadProgress = void Function(int received, int? total);
+
+enum UpdateSource {
+  githubApi('GitHub API', 'api.github.com'),
+  githubRaw('GitHub Raw', 'raw.githubusercontent.com'),
+  jsDelivr('jsDelivr CDN', 'cdn.jsdelivr.net');
+
+  const UpdateSource(this.label, this.host);
+
+  final String label;
+  final String host;
+}
 
 class AppRelease {
   const AppRelease({
@@ -45,6 +56,19 @@ class UpdateService {
 
   Future<List<AppRelease>> fetchReleases({
     bool includePrereleases = false,
+    UpdateSource source = UpdateSource.githubApi,
+  }) async {
+    if (source == UpdateSource.githubApi) {
+      return _fetchApiReleases(includePrereleases: includePrereleases);
+    }
+    return _fetchManifestReleases(
+      includePrereleases: includePrereleases,
+      source: source,
+    );
+  }
+
+  Future<List<AppRelease>> _fetchApiReleases({
+    required bool includePrereleases,
   }) async {
     final uri = Uri.https(
       'api.github.com',
@@ -116,6 +140,91 @@ class UpdateService {
           .compareTo(a.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0));
     });
     return releases;
+  }
+
+  Future<List<AppRelease>> _fetchManifestReleases({
+    required bool includePrereleases,
+    required UpdateSource source,
+  }) async {
+    final response = await _client
+        .get(
+          _manifestUri(source),
+          headers: const {
+            'Accept': 'application/json',
+            'User-Agent': 'PocketServerOps-AI',
+          },
+        )
+        .timeout(const Duration(seconds: 10));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('${source.label} 返回 HTTP ${response.statusCode}');
+    }
+
+    final decoded = jsonDecode(response.body);
+    final entries = decoded is Map && decoded['releases'] is List
+        ? decoded['releases'] as List
+        : decoded is Map
+        ? [decoded]
+        : const <Object?>[];
+    if (entries.isEmpty) {
+      throw const FormatException('更新清单为空或格式无效');
+    }
+
+    final releases = <AppRelease>[];
+    for (final entry in entries) {
+      if (entry is! Map ||
+          (!includePrereleases && entry['prerelease'] == true)) {
+        continue;
+      }
+      final release = _releaseFromManifest(entry);
+      if (release != null) releases.add(release);
+    }
+    _sortReleases(releases);
+    return releases;
+  }
+
+  AppRelease? _releaseFromManifest(Map<Object?, Object?> entry) {
+    final version = _normalizeVersion(entry['version'] ?? entry['tag_name']);
+    final releaseUrl = _uriFrom(entry['release_url'] ?? entry['html_url']);
+    if (version == null || releaseUrl == null) return null;
+    return AppRelease(
+      version: version,
+      title: _stringValue(entry['title'] ?? entry['name']),
+      notes: _stringValue(entry['notes'] ?? entry['body']),
+      releaseUrl: releaseUrl,
+      isPrerelease: entry['prerelease'] == true,
+      apkUrl: _uriFrom(entry['apk_url'] ?? entry['browser_download_url']),
+      publishedAt: DateTime.tryParse(
+        entry['published_at'] is String ? entry['published_at'] as String : '',
+      ),
+    );
+  }
+
+  static Uri _manifestUri(UpdateSource source) {
+    switch (source) {
+      case UpdateSource.githubApi:
+        throw ArgumentError.value(source, 'source', 'API has no manifest URL');
+      case UpdateSource.githubRaw:
+        return Uri.https(
+          'raw.githubusercontent.com',
+          '/$_repositoryOwner/$_repositoryName/beta/updates/releases.json',
+        );
+      case UpdateSource.jsDelivr:
+        return Uri.https(
+          'cdn.jsdelivr.net',
+          '/gh/$_repositoryOwner/$_repositoryName@beta/updates/releases.json',
+        );
+    }
+  }
+
+  static String _stringValue(Object? value) => value is String ? value : '';
+
+  static void _sortReleases(List<AppRelease> releases) {
+    releases.sort((a, b) {
+      final versionOrder = compareVersions(b.version, a.version);
+      if (versionOrder != 0) return versionOrder;
+      return (b.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+          .compareTo(a.publishedAt ?? DateTime.fromMillisecondsSinceEpoch(0));
+    });
   }
 
   static String apkFileName(String version) =>
@@ -277,6 +386,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
   int _downloadedBytes = 0;
   int? _downloadTotal;
   String? _error;
+  UpdateSource _source = UpdateSource.githubApi;
 
   @override
   void initState() {
@@ -311,6 +421,34 @@ class _UpdatesPageState extends State<UpdatesPage> {
             ),
           ),
           const SizedBox(height: 12),
+          Text('检查渠道', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: UpdateSource.values
+                .map((source) {
+                  return ChoiceChip(
+                    label: Text(source.label),
+                    selected: _source == source,
+                    onSelected: _loading
+                        ? null
+                        : (selected) {
+                            if (!selected) return;
+                            setState(() {
+                              _source = source;
+                              _checked = false;
+                              _error = null;
+                              _releases = const [];
+                            });
+                          },
+                  );
+                })
+                .toList(growable: false),
+          ),
+          const SizedBox(height: 4),
+          Text(_source.host, style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 12),
           FilledButton.icon(
             onPressed: _loading ? null : _checkForUpdates,
             icon: const Icon(Icons.refresh),
@@ -335,7 +473,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
           ],
           const SizedBox(height: 16),
           Text(
-            '更新来源：GitHub Releases。APK 默认在 APP 内下载并交给 Android 安装；也可从版本菜单打开浏览器或复制链接。',
+            '检查渠道可切换 GitHub API、GitHub Raw 或 jsDelivr CDN。APK 默认在 APP 内下载并交给 Android 安装；也可从版本菜单打开浏览器或复制链接。',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
@@ -459,6 +597,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
     try {
       final releases = await _service.fetchReleases(
         includePrereleases: widget.includePrereleases,
+        source: _source,
       );
       if (!mounted) return;
       setState(() {

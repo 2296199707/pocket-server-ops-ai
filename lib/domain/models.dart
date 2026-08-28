@@ -18,6 +18,7 @@ const wireApiOptions = <String>['responses', 'chat-completions'];
 
 const defaultContextWindowMode = 'default';
 const maximumContextWindowMode = 'maximum';
+const defaultImageModel = 'gpt-image-2';
 const contextWindowModeOptions = <String>[
   defaultContextWindowMode,
   maximumContextWindowMode,
@@ -868,7 +869,8 @@ class Task {
 
   factory Task.fromMap(Map<String, Object?> map) {
     final serverId = map['serverId'] as String?;
-    final mode = map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent');
+    final mode =
+        map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent');
     return Task(
       id: map['id'] as String,
       mode: mode,

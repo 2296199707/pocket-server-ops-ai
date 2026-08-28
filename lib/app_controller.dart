@@ -102,6 +102,7 @@ class AppController extends ChangeNotifier {
   final Map<String, String> _streamingAssistantText = {};
   final Map<String, ProviderUsageSnapshot> _providerUsages = {};
   final Map<String, Future<ProviderUsageSnapshot>> _providerUsageLoads = {};
+  final Map<String, String> _imageModels = {};
   final Map<String, TaskContextUsage> _taskContextUsages = {};
   final Map<String, Future<TaskContextUsage>> _taskContextLoads = {};
   final Map<String, Future<TaskContextUsage>> _taskCompactions = {};
@@ -144,6 +145,8 @@ class AppController extends ChangeNotifier {
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
   String? get imageProviderId => _imageProviderId;
+  String imageModelFor(String providerId) =>
+      _imageModels[providerId] ?? defaultImageModel;
   bool get isLoading => _loading;
   String? get loadError => _loadError;
 
@@ -359,6 +362,15 @@ class AppController extends ChangeNotifier {
     _imageProviderId = savedImageProviderId?.isEmpty == true
         ? null
         : savedImageProviderId;
+    _imageModels.clear();
+    for (final provider in _providers) {
+      final savedImageModel = await _database.readSetting(
+        _imageModelSettingKey(provider.id),
+      );
+      if (savedImageModel != null && savedImageModel.trim().isNotEmpty) {
+        _imageModels[provider.id] = savedImageModel.trim();
+      }
+    }
     final savedDashboardServerId = await _database.readSetting(
       _lastDashboardServerSetting,
     );
@@ -769,6 +781,24 @@ class AppController extends ChangeNotifier {
     await _database.writeSetting(_imageProviderSetting, value ?? '');
     _imageProviderId = value == null || value.isEmpty ? null : value;
     _notify();
+  }
+
+  Future<void> setImageModel(String providerId, String? model) async {
+    if (!_providers.any((provider) => provider.id == providerId)) {
+      throw StateError('图片供应商不存在');
+    }
+    await _saveImageModel(providerId, model);
+    _notify();
+  }
+
+  Future<void> _saveImageModel(String providerId, String? model) async {
+    final value = model?.trim() ?? '';
+    await _database.writeSetting(_imageModelSettingKey(providerId), value);
+    if (value.isEmpty) {
+      _imageModels.remove(providerId);
+    } else {
+      _imageModels[providerId] = value;
+    }
   }
 
   Future<void> setLastDashboardServer(String? serverId) async {
@@ -2832,6 +2862,7 @@ class AppController extends ChangeNotifier {
     required String secret,
     required bool isDefault,
     Map<String, ProviderModelMetadata>? modelMetadata,
+    String? imageModel,
   }) async {
     final previousProviders = List<ProviderProfile>.unmodifiable(_providers);
     final id = existing?.id ?? _newId('provider');
@@ -2857,6 +2888,7 @@ class AppController extends ChangeNotifier {
       modelMetadata: modelMetadata ?? existing?.modelMetadata ?? const {},
     );
     await _database.saveProvider(saved);
+    if (imageModel != null) await _saveImageModel(id, imageModel);
     final providers = [
       for (final provider in _providers)
         if (provider.id != id)
@@ -2889,6 +2921,8 @@ class AppController extends ChangeNotifier {
       await _database.writeSetting(_imageProviderSetting, '');
       _imageProviderId = null;
     }
+    await _database.writeSetting(_imageModelSettingKey(profile.id), '');
+    _imageModels.remove(profile.id);
     _notify();
   }
 
@@ -2966,6 +3000,16 @@ class AppController extends ChangeNotifier {
     if (previewMode) return const ['demo-model', 'demo-coder'];
     final models = await loadProviderModelMetadata(profile, secret: secret);
     return [for (final model in models) model.model];
+  }
+
+  Future<List<String>> loadProviderImageModels(
+    ProviderProfile profile, {
+    String? secret,
+  }) async {
+    if (previewMode) return const [defaultImageModel];
+    final apiKey =
+        secret ?? await _readCredential(profile.apiKeyRef, 'API Key 不可用');
+    return _providerTester.listImageModels(profile, apiKey);
   }
 
   Future<List<ProviderModelMetadata>> loadProviderModelMetadata(
@@ -4399,14 +4443,15 @@ class AppController extends ChangeNotifier {
       definition: const AiToolDefinition(
         name: 'image.generate',
         description:
-            'Generate one image from a text prompt. If a phone project is '
-            'bound, save the result there and return its relative path.',
+            'Generate one image from a text prompt using the image model '
+            'configured for this provider. If a phone project is bound, save '
+            'the result there and return its relative path. Do not choose a '
+            'model in the tool arguments.',
         parameters: {
           'type': 'object',
           'required': ['prompt'],
           'properties': {
             'prompt': {'type': 'string'},
-            'model': {'type': 'string'},
             'size': {
               'type': 'string',
               'description': 'Provider-supported size, for example 1024x1024',
@@ -4437,11 +4482,7 @@ class AppController extends ChangeNotifier {
     if (prompt is! String || prompt.trim().isEmpty) {
       throw ArgumentError('prompt is required');
     }
-    final model =
-        arguments['model'] is String &&
-            (arguments['model'] as String).trim().isNotEmpty
-        ? (arguments['model'] as String).trim()
-        : provider.model;
+    final model = imageModelFor(provider.id);
     final size =
         arguments['size'] is String &&
             (arguments['size'] as String).trim().isNotEmpty
@@ -4698,11 +4739,15 @@ const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
 const _documentModuleSetting = 'document_module_enabled';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';
+const _imageModelSettingPrefix = 'image_model:';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';
 const _lastConversationTaskSetting = 'last_conversation_task_id';
 
 String _sidebarExpandedSettingKey(String sectionId) =>
     'sidebar_expanded:$sectionId';
+
+String _imageModelSettingKey(String providerId) =>
+    '$_imageModelSettingPrefix$providerId';
 
 String _normalizeRemotePath(String value) {
   final path = value.trim();

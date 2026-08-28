@@ -127,10 +127,19 @@ class _ImageProviderTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final selected = controller.imageProviderId ?? 'follow-default';
+    final selectedProvider = selected == 'follow-default'
+        ? null
+        : controller.providers
+              .where((provider) => provider.id == selected)
+              .firstOrNull;
     return ListTile(
       leading: const CircleAvatar(child: Icon(Icons.image_outlined)),
       title: const Text('生图供应商'),
-      subtitle: const Text('Agent 调用 image.generate 时使用，可跟随默认供应商'),
+      subtitle: Text(
+        selectedProvider == null
+            ? 'Agent 调用 image.generate 时使用，可跟随默认供应商'
+            : '图片模型：${controller.imageModelFor(selectedProvider.id)}',
+      ),
       trailing: DropdownButton<String>(
         value: selected,
         underline: const SizedBox.shrink(),

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "version": "1.0.3-beta.24",
+      "title": "PocketServerOps AI v1.0.3-beta.24",
+      "notes": "Add image model discovery and per-provider image model settings. Add GitHub Raw and jsDelivr update channels.",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.24",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.3-beta.24/pocket-server-ops-ai-v1.0.3-beta.24-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-28T00:00:00Z"
+    },
+    {
+      "version": "1.0.3-beta.23",
+      "title": "PocketServerOps AI v1.0.3-beta.23",
+      "notes": "Built-in document preview and OOXML DOCX export.",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.23",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.3-beta.23/pocket-server-ops-ai-v1.0.3-beta.23-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-28T18:23:06Z"
+    },
+    {
+      "version": "1.0.2",
+      "title": "PocketServerOps AI v1.0.2",
+      "notes": "Phone agent, SSH operations, file management, and update history.",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.2",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.2/pocket-server-ops-ai-v1.0.2-release.apk",
+      "prerelease": false,
+      "published_at": "2026-08-25T16:59:41Z"
+    }
+  ]
+}

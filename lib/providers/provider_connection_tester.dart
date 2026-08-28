@@ -45,6 +45,26 @@ class ProviderConnectionTester {
     return [for (final model in models) model.model];
   }
 
+  Future<List<String>> listImageModels(
+    ProviderProfile profile,
+    String secret,
+  ) async {
+    final models = await listModels(profile, secret);
+    final imageModels = <String>{
+      for (final model in models)
+        if (_looksLikeImageModel(model)) model,
+    }.toList()..sort((left, right) => right.compareTo(left));
+    return imageModels;
+  }
+
+  // Standard /models responses expose ids but usually no output capability.
+  static bool _looksLikeImageModel(String model) {
+    final normalized = model.toLowerCase();
+    return normalized.contains('image') ||
+        normalized.contains('dall-e') ||
+        normalized.contains('dalle');
+  }
+
   /// Reads model ids and the optional Codex-compatible metadata exposed by a
   /// provider. Standard OpenAI-compatible model lists usually expose only
   /// ids, so missing metadata remains unknown instead of being inferred.

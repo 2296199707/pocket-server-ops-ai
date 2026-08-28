@@ -356,6 +356,36 @@ void main() {
     restored.dispose();
   });
 
+  test('image model setting is saved per provider and restored', () async {
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+    await controller.saveProvider(
+      name: '图片供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'gpt-5.6-luna',
+      secret: 'secret',
+      isDefault: true,
+      imageModel: 'gpt-image-2',
+    );
+    final provider = controller.providers.single;
+    expect(controller.imageModelFor(provider.id), 'gpt-image-2');
+    controller.dispose();
+
+    final restored = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await restored.load();
+    expect(restored.imageModelFor(provider.id), 'gpt-image-2');
+    await restored.setImageModel(provider.id, 'gpt-image-1.5');
+    expect(restored.imageModelFor(provider.id), 'gpt-image-1.5');
+    restored.dispose();
+  });
+
   test(
     'context usage resolves Codex fallback for id-only provider metadata',
     () async {
