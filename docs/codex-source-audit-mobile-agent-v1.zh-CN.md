@@ -1108,8 +1108,10 @@
   人工文件操作使用绝对路径，不与 AI 项目文件边界或审批逻辑混用。
 - 验证：`flutter analyze --no-pub` 通过；定向测试 86 项通过；debug APK 和 release APK
   均构建通过；`git diff --check` 通过。构建输出、Gradle 缓存和 APK 均位于 `/www` 数据盘。
-- 发布结果：待创建 GitHub Pre-release `v1.0.3-beta.25`，tag 应指向本次 `beta` 提交并上传
-  `pocket-server-ops-ai-v1.0.3-beta.25-release.apk`。
+- 发布结果：已创建 GitHub Pre-release `v1.0.3-beta.25`，tag 指向 `beta` 分支提交
+  `d966ca1`，并上传 `pocket-server-ops-ai-v1.0.3-beta.25-release.apk`。APK 大小：
+  `78,095,407` bytes；SHA-256 `226695a90f8f52fb28c6bda078d82e759a0840a5ce8ac3833897475550fecd2a`。
+  Release 地址：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.25`。
 
 ## 9. 发现记录模板
 
