@@ -26,8 +26,8 @@
 ### 2.2 当前应用
 
 - canonical app：`/www/server-agent/workspace/apps/mobile-agent-v1`；
-- 当前 beta：`1.0.3-beta.11`；
-- 当前基线 commit：`71a93618ff03620e0082cd61a81f64e3c79059a9`；
+- 当前 beta：`1.0.3-beta.17`；
+- 当前基线 commit：`a7cc134`（版本提交：`50efe3d`）；
 - legacy app `/www/server-agent/workspace/apps/mobile` 不属于审查和修改范围；
 - 构建、缓存和 APK 继续使用 `/www` 数据盘路径。
 
@@ -131,7 +131,7 @@
 
 - 已固定 Codex 源码 commit `f5420174dafba153913a3e697f89002c338dfd7e`；
 - 已确认源码快照 checkout 不完整，后续使用 Git object 读取，不把工作区缺失误判为源码缺失；
-- 当前 beta 基线为 `1.0.3-beta.11`，commit `71a93618ff03620e0082cd61a81f64e3c79059a9`；
+- 当前 beta 基线为 `1.0.3-beta.17`，功能 commit `a7cc134`，版本 commit `50efe3d`；
 - 上一轮调查中的结论只作为待复核线索，不直接作为本轮最终证据；
 - 建立基线时尚未修改业务代码；后续条目按表格顺序更新状态和结论。
 
@@ -165,7 +165,7 @@
   `test/agent_loop_test.dart` 的
   `Codex fallback policy bounds results without catalog fields`。
 - 结论：`需修复`，已处理。修复仅补齐模型-facing 的 Codex fallback，stdout/stderr
-  分流是 Mobile 保留终端交互语义的架构差异。修复 commit：当前工作树未提交。
+  分流是 Mobile 保留终端交互语义的架构差异。修复 commit：`a7cc134`。
 
 ### 2026-08-27：EXEC-02 长命令进程生命周期
 
@@ -286,7 +286,7 @@
   同时以原始 UTF-8 字节接收输出，避免流监听器先解码导致偏移和异常丢失。
 - 期望不变量：远端命令只有明确退出状态才可作为完成；断链、停止超时和读取失败不能
   伪装成功；旧任务不能自动重放有副作用命令；任务关闭后本地订阅和 channel 必须释放。
-- 结论：`需修复`，已处理。修复未提交，当前工作树包含修改。
+- 结论：`需修复`，已处理。修复 commit：`a7cc134`。
 - 定向测试：
   `env PUB_CACHE=/www/mobile-agent-tooling/pub-cache /www/mobile-agent-tooling/flutter/bin/flutter test test/ssh_connection_test.dart`，11 项通过，
   覆盖 channel 销毁且无退出状态的回归路径。
@@ -314,7 +314,7 @@
   用户事件，避免内存历史丢失该事件。
 - 期望不变量：初始化失败或取消不能静默丢掉已接受的用户输入；同一 `turn_id` 不重复
   写用户事件；事件日志不保存附件 Base64；未确认的附件写入不伪造为可恢复附件。
-- 结论：`需修复`，已处理。修复未提交，当前工作树包含修改。
+- 结论：`需修复`，已处理。修复 commit：`a7cc134`。
 - 定向测试：`test/app_controller_test.dart` 的
   `setup failure still persists the current user message`，覆盖历史读取失败、附件
   独立存储、事件无 Base64 和后续按任务读取附件。
@@ -383,7 +383,7 @@
   从项目根到 cwd 合并，override 优先且预算有限。
 - 结论：`需修复`，已处理。Codex 的服务器文件系统支持显式 follow-symlinks 和更大分块，
   Mobile 的项目目录采用更严格的符号链接边界，这是本地项目安全边界而不是不兼容回退。
-  修复 commit：当前工作树未提交。
+  修复 commit：`a7cc134`。
 - 定向测试：
   `env PUB_CACHE=/www/mobile-agent-tooling/pub-cache /www/mobile-agent-tooling/flutter/bin/flutter test test/local_file_access_test.dart test/project_files_test.dart`，3 项全部通过，覆盖父目录/根目录/相似前缀范围判断、授权符号链接逃逸、项目文件读写和原子替换路径。
 
@@ -417,7 +417,7 @@
   无意释放或重放。
 - 结论：`架构差异`。Codex 的 session worker、rollout flush 和活动 turn 生命周期比
   Mobile 的 Future/SQLite/SSH 组合更细，但上述稳定性不变量已满足；没有发现需要修改的
-  业务缺口。本条只补充旧 turn 状态回归测试。修复 commit：当前工作树未提交。
+  业务缺口。本条只补充旧 turn 状态回归测试。修复 commit：`a7cc134`。
 - 定向测试：
   `env PUB_CACHE=/www/mobile-agent-tooling/pub-cache /www/mobile-agent-tooling/flutter/bin/flutter test test/agent_loop_test.dart test/app_controller_test.dart`，58 项全部通过，覆盖取消、远程未知、事件顺序、连续 turn 和旧 turn 状态隔离。
 
@@ -488,7 +488,7 @@
   采用 `unknown` + 人工检查的更保守产品契约。真实缺口是旧版
   `_terminalEventMatchesLatestEvent` 对任意同轮迟到事件放行，可能把不完整尾部误报为
   terminal；修复后只有同序列终止事件，或同轮取消请求尾部，才能恢复明确状态，不会启动
-  新 turn 或重放远程操作。修复 commit：当前工作树未提交。
+  新 turn 或重放远程操作。修复 commit：`a7cc134`。
 - 定向测试：`test/app_controller_test.dart` 的启动中断恢复、持久化终止事件恢复和
   `a task with only a partially persisted nonterminal event is recovered as unknown`、
   `a late nonterminal event cannot make a terminal event authoritative`；
@@ -543,7 +543,7 @@
   后来的新 turn。
 - 期望不变量：同一服务器的应用写操作按顺序执行；队列中已取消的 Agent 写操作不会
   迟到启动；读取不被无必要的全局串行化；停止请求不能跨 turn 取消。
-- 结论：`需修复`，已处理。修复未提交，当前工作树包含修改。
+- 结论：`需修复`，已处理。修复 commit：`a7cc134`。
 - 定向测试：`test/app_controller_test.dart` 的
   `a stale stop request cannot cancel the active turn`；
   `test/agent_loop_test.dart` 的
@@ -634,7 +634,7 @@
 - 结论：`需修复已处理`。本次修复与 Codex 自定义供应商能力判断一致，解决“Codex 可压缩而
   APP 失败”的真实缺口；压缩仍由同一供应商和同一模型完成，图片/文件仍属于输入上下文，
   但不把物理附件内容复制进事件。
-- 修复 commit：当前工作树未提交。
+- 修复 commit：`a7cc134`。
 
 ### 2026-08-27：CTX-04 / PRO-05 ID-only 模型元数据缺口
 
@@ -669,7 +669,7 @@
 - 结论：`需修复已处理`。这是上一版审查把“没有覆盖 ID-only 条目”误判为已等价的真实
   缺口；本记录取代该结论，后续不再重复查询同一问题，除非固定 Codex commit、元数据
   解析实现或上述定向测试再次发生变化。
-- 修复 commit：当前工作树未提交。
+- 修复 commit：`a7cc134`。
 
 ### 2026-08-27：CTX-04 通用模型默认窗口
 
@@ -691,7 +691,7 @@
   ID-only Luna 和上下文控制器测试。
 - 结论：`需修复已处理`。后续只有 Codex fallback 规则、供应商明确元数据或对应实现
   发生变化时才重新审查。
-- 修复 commit：当前工作树未提交。
+- 修复 commit：`a7cc134`。
 
 ### 2026-08-27：CTX-04 默认窗口与最大窗口可切换
 
@@ -726,7 +726,7 @@
   `provider context window mode survives round-trip and invalid values use default`；
   `test/app_controller_test.dart` 的
   `context usage follows the provider window mode` 和供应商保存恢复测试。
-- 修复 commit：当前工作树未提交。
+- 修复 commit：`a7cc134`。
 
 ### 2026-08-28：配置切换保留模型上下文
 
@@ -873,7 +873,7 @@
   `flutter analyze` 均通过；真实请求返回 `HTTP 200`。
 - 结论：`需修复已处理`。后续只有官方字段、固定 Codex 源码、供应商协议或上述测试发生变化
   时重新审查，不再重复把 `/responses/compact` 的失败当作普通服务端压缩失败。
-- 修复 commit：当前工作树未提交。
+- 修复 commit：`a7cc134`。
 
 ### 2026-08-28：手动压缩接口再次真实验证
 
@@ -927,6 +927,18 @@
   问题，不是“没有路由”。在供应商明确配置并真实验证 standalone 返回合法 compact 输出前，
   APP 手动压缩继续使用普通 `/responses` 的 Codex 本地摘要路径；普通请求的服务端压缩继续使用
   `context_management`。本次没有改代码、没有保存临时 API Key、没有重新构建发布。
+
+### 2026-08-28：Beta 1.0.3-beta.17 发布记录
+
+- 发布内容：侧栏下半部分紧凑化；顶部增加 HTML 预览入口；启动时恢复上次打开的对话；
+  Responses 服务端自动压缩与手动压缩兼容路径稳定化。
+- 功能修复提交：`a7cc134`；版本提交：`50efe3d`。
+- 版本：`1.0.3-beta.17+26`；GitHub 标签：`v1.0.3-beta.17`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.17-release.apk`。
+- APK 校验：`76,493,799` bytes；SHA-256
+  `11b4eb1dcf45a48bdfac63741a376144f27687d67186de341be123a507da2aff`。
+- 发布前验证：`flutter analyze` 通过；`flutter test` 全量 161 项通过；
+  `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
 
 ## 9. 发现记录模板
 
