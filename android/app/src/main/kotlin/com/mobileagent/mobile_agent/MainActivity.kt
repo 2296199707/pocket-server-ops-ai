@@ -43,6 +43,10 @@ class MainActivity : FlutterActivity() {
                                 AgentForegroundService.EXTRA_OVERLAY_ENABLED,
                                 call.argument<Boolean>("overlayEnabled") ?: false,
                             )
+                            .putExtra(
+                                AgentForegroundService.EXTRA_TASK_TITLE,
+                                call.argument<String>("title"),
+                            )
                         startTaskService(intent)
                         result.success(null)
                     }

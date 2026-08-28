@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path_util;
 
 import '../app_controller.dart';
 import '../domain/models.dart';
@@ -32,6 +35,10 @@ class _FileManagerPageState extends State<FileManagerPage> {
   String? _downloadName;
   int _downloadedBytes = 0;
   int? _downloadTotalBytes;
+  bool _uploading = false;
+  String? _uploadName;
+  int _uploadedBytes = 0;
+  int? _uploadTotalBytes;
   String? _error;
 
   @override
@@ -71,19 +78,26 @@ class _FileManagerPageState extends State<FileManagerPage> {
         title: Text('${widget.server.name} · 文件'),
         actions: [
           IconButton(
+            tooltip: '上传文件',
+            onPressed: _loading || _transferInProgress ? null : _upload,
+            icon: const Icon(Icons.upload_file_outlined),
+          ),
+          IconButton(
             tooltip: '新建文件',
-            onPressed: _loading ? null : _createFile,
+            onPressed: _loading || _transferInProgress ? null : _createFile,
             icon: const Icon(Icons.note_add_outlined),
           ),
           if (widget.onCdToDirectory != null)
             IconButton(
               tooltip: 'cd 到当前位置',
-              onPressed: _loading ? null : _cdToCurrentDirectory,
+              onPressed: _loading || _transferInProgress
+                  ? null
+                  : _cdToCurrentDirectory,
               icon: const Icon(Icons.subdirectory_arrow_right),
             ),
           IconButton(
             tooltip: '刷新目录',
-            onPressed: _loading ? null : _load,
+            onPressed: _loading || _transferInProgress ? null : _load,
             icon: _loading
                 ? const SizedBox.square(
                     dimension: 20,
@@ -144,7 +158,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
               padding: const EdgeInsets.all(12),
               child: Text(_error!),
             ),
-          if (_downloading)
+          if (_transferInProgress)
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
               child: Column(
@@ -154,17 +168,17 @@ class _FileManagerPageState extends State<FileManagerPage> {
                     children: [
                       Expanded(
                         child: Text(
-                          '下载 ${_downloadName ?? ''}',
+                          '${_uploading ? '上传' : '下载'} ${_transferName ?? ''}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Text(_downloadProgressLabel),
+                      Text(_transferProgressLabel),
                     ],
                   ),
                   const SizedBox(height: 4),
-                  LinearProgressIndicator(value: _downloadProgress),
+                  LinearProgressIndicator(value: _transferProgress),
                 ],
               ),
             ),
@@ -199,7 +213,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
                                 children: [
                                   IconButton(
                                     tooltip: '下载到手机项目',
-                                    onPressed: _downloading
+                                    onPressed: _transferInProgress
                                         ? null
                                         : () => _download(entry),
                                     icon: const Icon(Icons.download_outlined),
@@ -290,9 +304,22 @@ class _FileManagerPageState extends State<FileManagerPage> {
     return (_downloadedBytes / total).clamp(0, 1).toDouble();
   }
 
-  String get _downloadProgressLabel {
-    final progress = _downloadProgress;
-    if (progress == null) return '下载中';
+  bool get _transferInProgress => _downloading || _uploading;
+
+  String? get _transferName => _uploading ? _uploadName : _downloadName;
+
+  double? get _transferProgress {
+    if (_uploading) {
+      final total = _uploadTotalBytes;
+      if (total == null || total <= 0) return null;
+      return (_uploadedBytes / total).clamp(0, 1).toDouble();
+    }
+    return _downloadProgress;
+  }
+
+  String get _transferProgressLabel {
+    final progress = _transferProgress;
+    if (progress == null) return _uploading ? '上传中' : '下载中';
     return '${(progress * 100).round()}%';
   }
 
@@ -349,6 +376,99 @@ class _FileManagerPageState extends State<FileManagerPage> {
         });
       }
     }
+  }
+
+  Future<void> _upload() async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: false,
+      withData: false,
+      withReadStream: false,
+      type: FileType.any,
+    );
+    if (result == null || !mounted) return;
+    final picked = result.files.single;
+    final sourcePath = picked.path;
+    if (sourcePath == null || sourcePath.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('无法读取手机文件：${picked.name}')));
+      return;
+    }
+    final remotePath = await _askRemotePath(picked.name);
+    if (!mounted || remotePath == null || remotePath.trim().isEmpty) return;
+
+    setState(() {
+      _uploading = true;
+      _uploadName = picked.name;
+      _uploadedBytes = 0;
+      _uploadTotalBytes = picked.size;
+      _error = null;
+    });
+    try {
+      final uploaded = await widget.controller.uploadFileToServer(
+        widget.server,
+        File(sourcePath),
+        remotePath,
+        onFirstHostKey: _confirmHostKey,
+        onProgress: (sent, total) {
+          if (!mounted) return;
+          setState(() {
+            _uploadedBytes = sent;
+            _uploadTotalBytes = total;
+          });
+        },
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已上传 ${_formatSize(uploaded)} 到 $remotePath')),
+        );
+        unawaited(_load(forceRefresh: true));
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '上传失败，服务器临时文件已保留，重试将继续：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _uploading = false;
+          _uploadName = null;
+        });
+      }
+    }
+  }
+
+  Future<String?> _askRemotePath(String name) {
+    final directory = _path.text.trim();
+    final initial = path_util.posix.join(
+      directory.isEmpty ? '/' : directory,
+      name,
+    );
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('上传到服务器'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '远程文件路径',
+            hintText: '/var/www/app/file.bin',
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('上传'),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
   }
 
   Future<Project?> _chooseProject(List<Project> projects) {

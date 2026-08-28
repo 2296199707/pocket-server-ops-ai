@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_agent/agent/remote_instructions.dart';
+import 'package:mobile_agent/ssh/resumable_file_upload.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 
 void main() {
@@ -211,6 +212,25 @@ class _InstructionsConnection implements SshConnection {
       totalBytes: utf8.encode(content).length,
     );
   }
+
+  @override
+  Future<SshFileUploadSession> prepareFileUpload(
+    String remotePath, {
+    required String sourceKey,
+    required int totalBytes,
+    bool overwrite = true,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> writeFileBytesChunk(
+    String remotePath,
+    Uint8List contents, {
+    required int offset,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> completeFileUpload(SshFileUploadSession session) =>
+      throw UnimplementedError();
 
   @override
   Future<void> writeFile(String remotePath, Uint8List contents) =>

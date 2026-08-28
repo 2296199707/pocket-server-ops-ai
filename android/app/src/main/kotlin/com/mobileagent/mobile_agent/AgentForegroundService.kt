@@ -8,16 +8,21 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
+import android.widget.LinearLayout
 import android.widget.TextView
 
 import kotlin.math.abs
@@ -25,6 +30,7 @@ import kotlin.math.abs
 class AgentForegroundService : Service() {
     companion object {
         const val EXTRA_TASK_ID = "taskId"
+        const val EXTRA_TASK_TITLE = "taskTitle"
         const val EXTRA_OVERLAY_ENABLED = "overlayEnabled"
         const val EXTRA_PROGRESS_LABEL = "progressLabel"
         const val ACTION_START_TASK = "mobile_agent.action.START_TASK"
@@ -39,6 +45,8 @@ class AgentForegroundService : Service() {
 
     private val taskIds = linkedSetOf<String>()
     private val taskLabels = linkedMapOf<String, String>()
+    private val taskTitles = linkedMapOf<String, String>()
+    private val taskStartedAt = linkedMapOf<String, Long>()
     private val preferences by lazy {
         getSharedPreferences(preferencesName, MODE_PRIVATE)
     }
@@ -48,6 +56,17 @@ class AgentForegroundService : Service() {
     private val notificationManager by lazy {
         getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     }
+    private val overlayHandler = Handler(Looper.getMainLooper())
+    private var overlayRefreshScheduled = false
+    private val overlayRefreshRunnable = object : Runnable {
+        override fun run() {
+            overlayRefreshScheduled = false
+            if (overlayView != null && taskIds.isNotEmpty()) {
+                refreshOverlayText()
+                scheduleOverlayRefresh()
+            }
+        }
+    }
     private val wakeLock by lazy {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         powerManager.newWakeLock(
@@ -56,7 +75,9 @@ class AgentForegroundService : Service() {
         ).apply { setReferenceCounted(false) }
     }
     private var overlayEnabled = false
-    private var overlayView: TextView? = null
+    private var overlayView: LinearLayout? = null
+    private var overlayTitleView: TextView? = null
+    private var overlayActionView: TextView? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var lastTaskId: String? = null
     private var touchStartX = 0f
@@ -108,12 +129,16 @@ class AgentForegroundService : Service() {
                 if (taskId != null) {
                     taskIds.add(taskId)
                     taskLabels.putIfAbsent(taskId, "启动中")
+                    taskTitles[taskId] = taskTitle(intent, taskId)
+                    taskStartedAt.putIfAbsent(taskId, System.currentTimeMillis())
                     lastTaskId = taskId
                 }
             }
             else -> if (taskId != null) {
                 taskIds.add(taskId)
                 taskLabels.putIfAbsent(taskId, "启动中")
+                taskTitles[taskId] = taskTitle(intent, taskId)
+                taskStartedAt.putIfAbsent(taskId, System.currentTimeMillis())
                 lastTaskId = taskId
             }
         }
@@ -142,6 +167,8 @@ class AgentForegroundService : Service() {
         if (taskId != null) {
             taskIds.remove(taskId)
             taskLabels.remove(taskId)
+            taskTitles.remove(taskId)
+            taskStartedAt.remove(taskId)
             if (lastTaskId == taskId) lastTaskId = taskIds.lastOrNull()
         }
         if (taskIds.isEmpty()) {
@@ -222,6 +249,33 @@ class AgentForegroundService : Service() {
         return taskLabels[taskId] ?: "处理中"
     }
 
+    private fun activeTitle(): String {
+        val taskId = lastTaskId ?: taskIds.lastOrNull()
+        return taskTitles[taskId]?.takeIf { it.isNotBlank() } ?: "后台任务"
+    }
+
+    private fun activeRuntime(): String {
+        val taskId = lastTaskId ?: taskIds.lastOrNull()
+        val started = taskStartedAt[taskId] ?: System.currentTimeMillis()
+        val seconds = ((System.currentTimeMillis() - started) / 1000L)
+            .coerceAtLeast(0L)
+        val hours = seconds / 3600L
+        val minutes = (seconds % 3600L) / 60L
+        val remaining = seconds % 60L
+        return if (hours > 0) {
+            "%02d:%02d:%02d".format(hours, minutes, remaining)
+        } else {
+            "%02d:%02d".format(minutes, remaining)
+        }
+    }
+
+    private fun taskTitle(intent: Intent, taskId: String): String {
+        return intent.getStringExtra(EXTRA_TASK_TITLE)?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: taskTitles[taskId]
+            ?: "后台任务"
+    }
+
     private fun acquireWakeLock() {
         if (!wakeLock.isHeld) wakeLock.acquire()
     }
@@ -251,24 +305,56 @@ class AgentForegroundService : Service() {
         }
         val existing = overlayView
         if (existing != null) {
-            existing.text = activeLabel()
+            refreshOverlayText()
+            scheduleOverlayRefresh()
             return
         }
-        val view = TextView(this).apply {
-            setTextColor(Color.WHITE)
+        val titleView = TextView(this).apply {
+            setTextColor(Color.argb(245, 255, 255, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(220)
+        }
+        val actionView = TextView(this).apply {
+            setTextColor(Color.argb(232, 214, 226, 255))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(220)
+        }
+        val view = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.START
+            setPadding(dp(12), dp(8), dp(12), dp(9))
             background = GradientDrawable().apply {
-                setColor(Color.argb(222, 30, 30, 34))
+                colors = intArrayOf(
+                    Color.argb(198, 57, 67, 88),
+                    Color.argb(158, 28, 35, 51),
+                )
+                orientation = GradientDrawable.Orientation.TL_BR
                 cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), Color.argb(110, 255, 255, 255))
+                setStroke(dp(1), Color.argb(150, 232, 240, 255))
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                elevation = dp(5).toFloat()
+                elevation = dp(8).toFloat()
             }
-            text = activeLabel()
             setOnTouchListener { _, event -> handleOverlayTouch(event) }
+            addView(
+                titleView,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                actionView,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = dp(2) },
+            )
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -285,7 +371,11 @@ class AgentForegroundService : Service() {
         try {
             windowManager.addView(view, params)
             overlayView = view
+            overlayTitleView = titleView
+            overlayActionView = actionView
             overlayParams = params
+            refreshOverlayText()
+            scheduleOverlayRefresh()
             view.post {
                 if (!preferences.contains("overlay_x")) snapToEdge()
             }
@@ -296,7 +386,20 @@ class AgentForegroundService : Service() {
         }
     }
 
+    private fun refreshOverlayText() {
+        overlayTitleView?.text = "${activeTitle()}  ·  运行 ${activeRuntime()}"
+        overlayActionView?.text = activeLabel()
+    }
+
+    private fun scheduleOverlayRefresh() {
+        if (overlayRefreshScheduled || overlayView == null) return
+        overlayRefreshScheduled = true
+        overlayHandler.postDelayed(overlayRefreshRunnable, 1000L)
+    }
+
     private fun removeOverlay() {
+        overlayRefreshScheduled = false
+        overlayHandler.removeCallbacks(overlayRefreshRunnable)
         val view = overlayView ?: return
         try {
             windowManager.removeView(view)
@@ -304,6 +407,8 @@ class AgentForegroundService : Service() {
             // The system may have removed the window already.
         }
         overlayView = null
+        overlayTitleView = null
+        overlayActionView = null
         overlayParams = null
     }
 

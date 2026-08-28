@@ -10,6 +10,7 @@ import '../local/local_file_access.dart';
 import '../local/local_preview.dart';
 import '../local/project_files.dart';
 import '../ssh/resumable_file_download.dart';
+import '../ssh/resumable_file_upload.dart';
 import '../ssh/ssh_connection.dart';
 import 'ai_protocol.dart';
 
@@ -243,6 +244,28 @@ class RemoteAgentTools {
         call: _downloadToProject,
         isRemote: true,
       ),
+    if (project != null && projectFiles != null)
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'server.upload_from_project',
+          description:
+              'Upload one file from the current phone project to the selected '
+              'server. The source path is relative to the phone project '
+              'folder. Interrupted uploads can resume on the next attempt.',
+          parameters: {
+            'type': 'object',
+            'required': ['project_path', 'remote_path'],
+            'properties': {
+              'project_path': {'type': 'string'},
+              'remote_path': {'type': 'string'},
+              'overwrite': {'type': 'boolean'},
+            },
+          },
+        ),
+        call: _uploadFromProject,
+        isRemote: true,
+        writesRemoteState: true,
+      ),
   ];
 
   Future<Object?> _exec(Map<String, Object?> arguments) async {
@@ -406,6 +429,59 @@ class RemoteAgentTools {
       'bytes': await downloaded.length(),
       'written': true,
     };
+  }
+
+  Future<Object?> _uploadFromProject(Map<String, Object?> arguments) async {
+    final sourceProject = project;
+    final files = projectFiles;
+    if (sourceProject == null || files == null) {
+      throw StateError('当前对话没有绑定手机项目');
+    }
+    final projectPath = _requiredString(arguments, 'project_path');
+    final remotePath = _requiredString(arguments, 'remote_path');
+    final overwrite = arguments['overwrite'] != false;
+    final source = File(await files.resolveForIo(sourceProject, projectPath));
+    final totalBytes = await source.length();
+    final modified = await source.lastModified();
+    final sourceKey =
+        '${source.path}\u0000$totalBytes\u0000${modified.microsecondsSinceEpoch}';
+    final localFile = await source.open();
+    try {
+      final uploaded = await const ResumableFileUploader().upload(
+        totalBytes: totalBytes,
+        prepare: () => _connection.prepareFileUpload(
+          _resolveRemotePath(remotePath),
+          sourceKey: sourceKey,
+          totalBytes: totalBytes,
+          overwrite: overwrite,
+        ),
+        readChunk: (offset, length) async {
+          await localFile.setPosition(offset);
+          return localFile.read(length);
+        },
+        writeChunk: (session, bytes, offset) => _connection.writeFileBytesChunk(
+          session.temporaryPath,
+          bytes,
+          offset: offset,
+        ),
+        commit: (session) async {
+          final currentLength = await source.length();
+          final currentModified = await source.lastModified();
+          if (currentLength != totalBytes || currentModified != modified) {
+            throw StateError('手机文件在上传期间发生变化，请重新上传');
+          }
+          await _connection.completeFileUpload(session);
+        },
+      );
+      return {
+        'project_path': projectPath,
+        'remote_path': remotePath,
+        'bytes': uploaded,
+        'written': true,
+      };
+    } finally {
+      await localFile.close();
+    }
   }
 
   String _resolveRemotePath(String filePath) {

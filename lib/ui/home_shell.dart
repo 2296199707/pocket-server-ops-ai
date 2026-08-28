@@ -118,6 +118,25 @@ class _HomeShellState extends State<HomeShell> {
             actions: [
               if (_selectedIndex == 0)
                 IconButton(
+                  tooltip: widget.controller.floatingCapsuleEnabled
+                      ? '关闭悬浮窗'
+                      : '开启悬浮窗',
+                  onPressed: _toggleFloatingCapsule,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: Icon(
+                    widget.controller.floatingCapsuleEnabled
+                        ? Icons.picture_in_picture_alt
+                        : Icons.picture_in_picture_alt_outlined,
+                    size: 18,
+                  ),
+                ),
+              if (_selectedIndex == 0)
+                IconButton(
                   tooltip: 'HTML预览',
                   onPressed: _hasPreviewProject
                       ? _openLocalPreviewFromAppBar
@@ -499,6 +518,15 @@ class _HomeShellState extends State<HomeShell> {
   void _openWorkModeFromAppBar() {
     final chat = _chatKey.currentState;
     if (chat != null) unawaited(chat.openWorkModePicker());
+  }
+
+  Future<void> _toggleFloatingCapsule() async {
+    final enabled = !widget.controller.floatingCapsuleEnabled;
+    final changed = await widget.controller.setFloatingCapsuleEnabled(enabled);
+    if (!changed && enabled && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请允许悬浮窗权限后再开启')));
+    }
   }
 
   bool get _hasPreviewProject =>

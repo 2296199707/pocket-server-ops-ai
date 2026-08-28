@@ -9,6 +9,7 @@ import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
 import 'package:mobile_agent/domain/models.dart';
 import 'package:mobile_agent/platform/android_task_service.dart';
+import 'package:mobile_agent/ssh/resumable_file_upload.dart';
 import 'package:mobile_agent/ssh/ssh_connection.dart';
 import 'package:mobile_agent/storage/app_database.dart';
 import 'package:mobile_agent/storage/memory_app_database.dart';
@@ -2897,6 +2898,25 @@ class _FakeConnection implements SshConnection {
   }
 
   @override
+  Future<SshFileUploadSession> prepareFileUpload(
+    String remotePath, {
+    required String sourceKey,
+    required int totalBytes,
+    bool overwrite = true,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> writeFileBytesChunk(
+    String remotePath,
+    Uint8List contents, {
+    required int offset,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<void> completeFileUpload(SshFileUploadSession session) =>
+      throw UnimplementedError();
+
+  @override
   Future<void> writeFile(String remotePath, Uint8List contents) async {
     writes.add((path: remotePath, contents: contents));
   }
@@ -2918,7 +2938,11 @@ class _NoopAndroidTaskService extends AndroidTaskService {
   const _NoopAndroidTaskService();
 
   @override
-  Future<void> start(String taskId, {bool overlayEnabled = false}) async {}
+  Future<void> start(
+    String taskId, {
+    bool overlayEnabled = false,
+    String? title,
+  }) async {}
 
   @override
   Future<void> stop(String taskId) async {}

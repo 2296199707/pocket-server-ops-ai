@@ -7,7 +7,11 @@ class AndroidTaskService {
 
   final MethodChannel _channel;
 
-  Future<void> start(String taskId, {bool overlayEnabled = false}) async {
+  Future<void> start(
+    String taskId, {
+    bool overlayEnabled = false,
+    String? title,
+  }) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
@@ -15,6 +19,7 @@ class AndroidTaskService {
       await _channel.invokeMethod<void>('start', {
         'taskId': taskId,
         'overlayEnabled': overlayEnabled,
+        if (title != null && title.trim().isNotEmpty) 'title': title.trim(),
       });
     } catch (_) {
       // The foreground service is optional and must not fail the AI task.

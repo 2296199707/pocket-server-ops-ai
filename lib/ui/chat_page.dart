@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import '../agent/agent_tools.dart';
 import '../agent/context_usage.dart';
 import '../agent/ai_protocol.dart';
+import '../agent/tool_display.dart';
 import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
@@ -3248,7 +3249,13 @@ class _ToolEventTile extends StatelessWidget {
         : finished
         ? colors.primary
         : colors.secondary;
-    final arguments = started?.payload['arguments'];
+    final arguments =
+        started?.payload['arguments'] ?? result?.payload['arguments'];
+    final argumentSummary = toolArgumentSummary(name, arguments);
+    final detailTitle = [
+      '$name',
+      if (argumentSummary.isNotEmpty) argumentSummary,
+    ].join(' · ');
     final resultValue = result?.type == 'tool.failed'
         ? result?.payload['error'] ?? '执行失败'
         : result?.payload['result'];
@@ -3268,11 +3275,22 @@ class _ToolEventTile extends StatelessWidget {
           tilePadding: const EdgeInsets.symmetric(horizontal: 6),
           childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 5),
           leading: Icon(icon, color: iconColor, size: 17),
-          title: Text(
-            '$name · $status',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 11, height: 1),
+          title: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  detailTitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, height: 1),
+                ),
+              ),
+              const SizedBox(width: 5),
+              Text(
+                status,
+                style: TextStyle(fontSize: 10, height: 1, color: iconColor),
+              ),
+            ],
           ),
           children: [
             if (arguments != null)

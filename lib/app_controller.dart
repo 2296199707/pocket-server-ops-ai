@@ -17,6 +17,7 @@ import 'agent/auto_review.dart';
 import 'agent/openai_compatible_client.dart';
 import 'agent/remote_instructions.dart';
 import 'agent/remote_write_queue.dart';
+import 'agent/tool_display.dart';
 import 'credentials/credential_store.dart';
 import 'domain/models.dart';
 import 'local/local_preview.dart';
@@ -29,6 +30,7 @@ import 'providers/image_generation_client.dart';
 import 'providers/provider_usage_client.dart';
 import 'server_status_script.dart';
 import 'ssh/resumable_file_download.dart';
+import 'ssh/resumable_file_upload.dart';
 import 'ssh/ssh_connection.dart';
 import 'storage/app_database.dart';
 import 'storage/attachment_store.dart';
@@ -1486,6 +1488,7 @@ class AppController extends ChangeNotifier {
       await updateTaskStatus(task.id, 'running', turnId: turnId);
       await _taskService.start(
         task.id,
+        title: task.title,
         overlayEnabled: _floatingCapsuleEnabled,
       );
       serviceStarted = true;
@@ -1859,7 +1862,7 @@ class AppController extends ChangeNotifier {
       case 'tool.started':
       case 'review.started':
         if (type == 'review.started') return '安全审查';
-        return _taskProgressForTool(payload['name']);
+        return _taskProgressForTool(payload['name'], payload['arguments']);
       case 'tool.completed':
       case 'tool.failed':
         return '继续处理';
@@ -1880,31 +1883,8 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  static String _taskProgressForTool(Object? value) {
-    final name = value is String ? value : '';
-    if (name.startsWith('terminal.')) return '执行命令';
-    if (name == 'image.generate') return '生成图片';
-    if (name.startsWith('preview.') || name == 'local.test_web') {
-      return '测试预览';
-    }
-    if (name == 'file.read' ||
-        name == 'project.read' ||
-        name == 'local.read' ||
-        name == 'local.list' ||
-        name == 'project.list') {
-      return '读取文件';
-    }
-    if (name == 'file.write' ||
-        name == 'file.replace' ||
-        name == 'project.write' ||
-        name == 'project.replace' ||
-        name == 'local.write' ||
-        name == 'local.replace' ||
-        name == 'server.download_to_project') {
-      return '修改文件';
-    }
-    return '调用工具';
-  }
+  static String _taskProgressForTool(Object? name, Object? arguments) =>
+      toolActionSummary(name, arguments);
 
   void _notify() {
     if (!_disposed) notifyListeners();
@@ -2335,6 +2315,7 @@ class AppController extends ChangeNotifier {
     try {
       await _taskService.start(
         downloadId,
+        title: '文件下载',
         overlayEnabled: _floatingCapsuleEnabled,
       );
       serviceStarted = true;
@@ -2353,6 +2334,122 @@ class AppController extends ChangeNotifier {
         if (serviceStarted) await _taskService.stop(downloadId);
       }
     }
+  }
+
+  Future<int> uploadFileToServer(
+    ServerProfile profile,
+    File source,
+    String remotePath, {
+    bool overwrite = true,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FileUploadProgress? onProgress,
+  }) async {
+    final sourcePath = source.path.trim();
+    final destinationPath = remotePath.trim();
+    if (sourcePath.isEmpty) throw ArgumentError('手机文件路径不能为空');
+    if (destinationPath.isEmpty) throw ArgumentError('服务器文件路径不能为空');
+    if (previewMode) return await source.length();
+
+    return _remoteWriteQueue.run<int>(profile.id, () async {
+      final totalBytes = await source.length();
+      final modified = await source.lastModified();
+      final sourceKey =
+          '$sourcePath\u0000$totalBytes\u0000${modified.microsecondsSinceEpoch}';
+      final uploadId = _newId('upload');
+      SshConnection? connection;
+      var serviceStarted = false;
+
+      Future<T> withConnection<T>(
+        Future<T> Function(SshConnection connection) action,
+      ) async {
+        for (var attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (connection == null || connection!.isClosed) {
+              await connection?.close();
+              connection = await _connectServer(
+                profile,
+                onFirstHostKey: onFirstHostKey,
+              );
+              await _saveObservedHostKey(profile, connection!.hostKey);
+            }
+            return await action(connection!);
+          } catch (_) {
+            final failed = connection;
+            connection = null;
+            try {
+              await failed?.close();
+            } catch (_) {
+              // The connection may already be broken.
+            }
+            if (attempt == 2) rethrow;
+            await Future<void>.delayed(
+              Duration(milliseconds: 250 * (attempt + 1)),
+            );
+          }
+        }
+        throw StateError('无法连接服务器');
+      }
+
+      void publishProgress(int uploaded, int total) {
+        onProgress?.call(uploaded, total);
+        final label = total > 0
+            ? '上传 ${(uploaded * 100 / total).round()}%'
+            : '上传中';
+        unawaited(_taskService.updateProgress(uploadId, label));
+      }
+
+      final localFile = await source.open();
+      try {
+        await _taskService.start(
+          uploadId,
+          title: '文件上传',
+          overlayEnabled: _floatingCapsuleEnabled,
+        );
+        serviceStarted = true;
+        final uploaded = await const ResumableFileUploader().upload(
+          totalBytes: totalBytes,
+          prepare: () => withConnection(
+            (connection) => connection.prepareFileUpload(
+              destinationPath,
+              sourceKey: sourceKey,
+              totalBytes: totalBytes,
+              overwrite: overwrite,
+            ),
+          ),
+          readChunk: (offset, length) async {
+            await localFile.setPosition(offset);
+            return localFile.read(length);
+          },
+          writeChunk: (session, bytes, offset) => withConnection(
+            (connection) => connection.writeFileBytesChunk(
+              session.temporaryPath,
+              bytes,
+              offset: offset,
+            ),
+          ),
+          commit: (session) async {
+            final currentLength = await source.length();
+            final currentModified = await source.lastModified();
+            if (currentLength != totalBytes || currentModified != modified) {
+              throw StateError('手机文件在上传期间发生变化，请重新上传');
+            }
+            await withConnection(
+              (connection) => connection.completeFileUpload(session),
+            );
+          },
+          onProgress: publishProgress,
+        );
+        _invalidateServerDirectoryCache(profile);
+        return uploaded;
+      } finally {
+        await localFile.close();
+        try {
+          await connection?.close();
+        } finally {
+          if (serviceStarted) await _taskService.stop(uploadId);
+        }
+      }
+    }, cancellation: AgentCancellation());
   }
 
   Future<void> writeServerFile(
@@ -3179,7 +3276,10 @@ class AppController extends ChangeNotifier {
         'The selected server working directory is $directory. Use '
         'terminal.exec for short commands; use terminal.start, terminal.poll, '
         'terminal.write, and terminal.stop for long-running commands. Use '
-        'file tools for UTF-8 server files.',
+        'file tools for UTF-8 server files. Use server.upload_from_project to '
+        'send a phone project file to the server and server.download_to_project '
+        'to bring a server file into the project; both operations can resume '
+        'after an interrupted transfer.',
       );
     }
     return 'You are an autonomous coding and operations agent running on a '

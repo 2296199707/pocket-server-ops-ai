@@ -5,6 +5,8 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:path/path.dart' as path_util;
 
+import 'resumable_file_upload.dart';
+
 class SshHostKey {
   const SshHostKey({required this.type, required this.fingerprint});
 
@@ -301,6 +303,27 @@ abstract class SshConnection {
       eof: end >= source.length,
       totalBytes: source.length,
     );
+  }
+
+  Future<SshFileUploadSession> prepareFileUpload(
+    String remotePath, {
+    required String sourceKey,
+    required int totalBytes,
+    bool overwrite = true,
+  }) async {
+    throw UnsupportedError('当前 SSH 连接不支持分块上传');
+  }
+
+  Future<void> writeFileBytesChunk(
+    String remotePath,
+    Uint8List contents, {
+    required int offset,
+  }) async {
+    throw UnsupportedError('当前 SSH 连接不支持分块上传');
+  }
+
+  Future<void> completeFileUpload(SshFileUploadSession session) async {
+    throw UnsupportedError('当前 SSH 连接不支持分块上传');
   }
 
   /// Read a UTF-8 page. Offsets and lengths are bytes, so callers can fetch
@@ -625,6 +648,147 @@ class DartSshConnection implements SshConnection {
   }
 
   @override
+  Future<SshFileUploadSession> prepareFileUpload(
+    String remotePath, {
+    required String sourceKey,
+    required int totalBytes,
+    bool overwrite = true,
+  }) async {
+    final requestedPath = remotePath.trim();
+    final normalizedSource = sourceKey.trim();
+    if (requestedPath.isEmpty) {
+      throw ArgumentError.value(remotePath, 'remotePath');
+    }
+    if (normalizedSource.isEmpty) {
+      throw ArgumentError.value(sourceKey, 'sourceKey');
+    }
+    if (totalBytes < 0) {
+      throw ArgumentError.value(totalBytes, 'totalBytes');
+    }
+    return _withSftp((sftp) async {
+      var writePath = requestedPath;
+      SftpFileMode? existingMode;
+      for (var linkDepth = 0; ; linkDepth++) {
+        if (linkDepth >= _maxSymlinkDepth) {
+          throw StateError('Remote path contains too many symbolic links');
+        }
+        final attributes = await _tryStat(sftp, writePath, followLink: false);
+        if (attributes == null) break;
+        if (attributes.isSymbolicLink) {
+          writePath = _resolveSymlinkPath(
+            writePath,
+            await sftp.readlink(writePath),
+          );
+          continue;
+        }
+        if (!attributes.isFile) {
+          throw StateError('上传目标不是文件：$remotePath');
+        }
+        if (!overwrite) {
+          throw StateError('上传目标文件已存在：$remotePath');
+        }
+        existingMode = attributes.mode;
+        break;
+      }
+
+      final temporaryPath = '$writePath.mobile-agent.part';
+      final metadataPath = '$temporaryPath.json';
+      final metadata = await _readUploadMetadata(sftp, metadataPath);
+      final temporaryAttributes = await _tryStat(sftp, temporaryPath);
+      if (temporaryAttributes != null && !temporaryAttributes.isFile) {
+        throw StateError('上传临时路径不是文件：$temporaryPath');
+      }
+      final metadataMatches =
+          metadata != null &&
+          metadata.sourceKey == normalizedSource &&
+          metadata.totalBytes == totalBytes;
+      if (!metadataMatches) {
+        if (temporaryAttributes != null) {
+          await _removeFile(sftp, temporaryPath);
+        }
+        await _removeFile(sftp, metadataPath);
+      }
+
+      var offset = metadataMatches ? (temporaryAttributes?.size ?? 0) : 0;
+      if (offset > totalBytes) {
+        await _removeFile(sftp, temporaryPath);
+        await _removeFile(sftp, metadataPath);
+        offset = 0;
+      }
+
+      final temporaryFile = await sftp.open(
+        temporaryPath,
+        mode: SftpFileOpenMode.create | SftpFileOpenMode.write,
+      );
+      await temporaryFile.close();
+      await _writeUploadMetadata(
+        sftp,
+        metadataPath,
+        _RemoteUploadMetadata(
+          sourceKey: normalizedSource,
+          totalBytes: totalBytes,
+        ),
+      );
+      return SshFileUploadSession(
+        targetPath: writePath,
+        temporaryPath: temporaryPath,
+        metadataPath: metadataPath,
+        offset: offset,
+        totalBytes: totalBytes,
+        existingMode: existingMode?.value,
+      );
+    });
+  }
+
+  @override
+  Future<void> writeFileBytesChunk(
+    String remotePath,
+    Uint8List contents, {
+    required int offset,
+  }) async {
+    if (remotePath.trim().isEmpty) {
+      throw ArgumentError.value(remotePath, 'remotePath');
+    }
+    if (offset < 0) throw ArgumentError.value(offset, 'offset');
+    if (contents.isEmpty) return;
+    await _withSftp<void>((sftp) async {
+      final file = await sftp.open(
+        remotePath,
+        mode: SftpFileOpenMode.create | SftpFileOpenMode.write,
+      );
+      try {
+        await file.writeBytes(contents, offset: offset);
+      } finally {
+        await file.close();
+      }
+    });
+  }
+
+  @override
+  Future<void> completeFileUpload(SshFileUploadSession session) async {
+    await _withSftp<void>((sftp) async {
+      final attributes = await sftp.stat(session.temporaryPath);
+      if (!attributes.isFile || attributes.size != session.totalBytes) {
+        throw StateError('文件上传未完成');
+      }
+      final mode = session.existingMode;
+      if (mode != null) {
+        await sftp.setStat(
+          session.temporaryPath,
+          SftpFileAttrs(mode: SftpFileMode.value(mode)),
+        );
+      }
+      // Keep the original target untouched until every chunk is present.
+      await sftp.rename(session.temporaryPath, session.targetPath);
+      try {
+        await sftp.remove(session.metadataPath);
+      } catch (_) {
+        // The target is already complete; stale metadata is harmless.
+      }
+    });
+  }
+
+  @override
   Future<SshFileChunk> readFileChunk(
     String remotePath, {
     int offset = 0,
@@ -668,6 +832,81 @@ class DartSshConnection implements SshConnection {
         await file.close();
       }
     });
+  }
+
+  static Future<SftpFileAttrs?> _tryStat(
+    SftpClient sftp,
+    String path, {
+    bool followLink = true,
+  }) async {
+    try {
+      return await sftp.stat(path, followLink: followLink);
+    } on SftpStatusError catch (error) {
+      if (error.code == SftpStatusCode.noSuchFile) return null;
+      rethrow;
+    }
+  }
+
+  static Future<void> _removeFile(SftpClient sftp, String path) async {
+    try {
+      await sftp.remove(path);
+    } on SftpStatusError catch (error) {
+      if (error.code != SftpStatusCode.noSuchFile) rethrow;
+    }
+  }
+
+  static Future<_RemoteUploadMetadata?> _readUploadMetadata(
+    SftpClient sftp,
+    String path,
+  ) async {
+    try {
+      final file = await sftp.open(path);
+      try {
+        final decoded = jsonDecode(utf8.decode(await file.readBytes()));
+        if (decoded is! Map || decoded['source_key'] is! String) return null;
+        final totalBytes = decoded['total_bytes'];
+        if (totalBytes is! int) return null;
+        return _RemoteUploadMetadata(
+          sourceKey: decoded['source_key'] as String,
+          totalBytes: totalBytes,
+        );
+      } finally {
+        await file.close();
+      }
+    } on SftpStatusError catch (error) {
+      if (error.code == SftpStatusCode.noSuchFile) return null;
+      rethrow;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  static Future<void> _writeUploadMetadata(
+    SftpClient sftp,
+    String path,
+    _RemoteUploadMetadata metadata,
+  ) async {
+    final file = await sftp.open(
+      path,
+      mode:
+          SftpFileOpenMode.create |
+          SftpFileOpenMode.write |
+          SftpFileOpenMode.truncate,
+    );
+    try {
+      await file.writeBytes(
+        Uint8List.fromList(
+          utf8.encode(
+            jsonEncode({
+              'source_key': metadata.sourceKey,
+              'total_bytes': metadata.totalBytes,
+            }),
+          ),
+        ),
+      );
+    } finally {
+      await file.close();
+    }
   }
 
   @override
@@ -808,6 +1047,16 @@ class DartSshConnection implements SshConnection {
       path_util.posix.join(path_util.posix.dirname(linkPath), target),
     );
   }
+}
+
+class _RemoteUploadMetadata {
+  const _RemoteUploadMetadata({
+    required this.sourceKey,
+    required this.totalBytes,
+  });
+
+  final String sourceKey;
+  final int totalBytes;
 }
 
 const _defaultFileChunkBytes = 64 * 1024;
