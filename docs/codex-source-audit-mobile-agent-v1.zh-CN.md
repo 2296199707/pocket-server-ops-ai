@@ -1072,6 +1072,17 @@
   `test/agent_loop_test.dart` 验证 AgentLoop 使用参数感知的授权结果。
 - 结论：此前属于 `需修复`；已按现有 SFTP 传输设计补齐 Agent 到手机的二进制桥接。
 
+### 2026-08-29：内置文档模块 Beta 1.0.3-beta.23 发布记录
+
+- 功能提交：`f42c920`；版本提交：`1dc7fb2`；版本：`1.0.3-beta.23+32`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.23-release.apk`。
+- APK 大小：`77,685,407` bytes；SHA-256
+  `ad68e44aeedf5139e88b06f5f97e3c0fafb68b2a62e5890d732d8286f8c554c1`。
+- 发布前验证：全量测试 184 项通过；`flutter analyze --no-pub` 通过；`git diff --check`
+  通过；release APK 构建通过。构建输出、Gradle 缓存和 APK 均位于 `/www` 数据盘。
+- 内容：内置文档模块支持开关、Markdown/HTML/TXT 预览和真实 OOXML `.docx` 导出，支持标题、
+  段落、列表、表格、粗体、斜体、代码及基础字体颜色；关闭模块不影响普通项目文件读写。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
