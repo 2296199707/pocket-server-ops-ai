@@ -1016,6 +1016,20 @@
 - 发布前验证：`flutter analyze` 通过；续传、SSH、Agent、远程工具和设置页聚焦测试 89 项
   全部通过；`git diff --check` 通过；release APK 构建通过。构建输出和 APK 均位于 `/www` 数据盘。
 
+### 2026-08-28：Beta 1.0.3-beta.22 发布记录
+
+- 发布内容：增加手机文件上传的 512KB 分块续传、服务器临时文件原子提交和断线重连；工具
+  卡片及后台悬浮窗显示真实命令或文件路径摘要；悬浮窗显示对话名称、运行时间和当前动作，
+  并优化为半透明 iOS 风格玻璃质感；对话顶部增加悬浮窗图标开关。
+- 功能提交：`32c314c`；版本提交：`0c59063`。
+- 版本：`1.0.3-beta.22+31`；GitHub 标签：`v1.0.3-beta.22`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.22-release.apk`。
+- APK 校验：`77,455,419` bytes；SHA-256
+  `53ddff8f84491747f197e6b982437a272af2ed4e33a1c8471431278a8e4d4bcf`。
+- 发布前验证：`flutter analyze` 通过；控制器、工具摘要、上传续传、SSH 和远程指令定向测试
+  65 项全部通过；`git diff --check` 通过；release APK 构建通过。构建输出和 APK 均位于 `/www`
+  数据盘。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
