@@ -55,6 +55,15 @@ void main() {
     expect(resolveWorkMode(mode: 'chat', serverId: 'server-1'), 'chat');
     expect(
       resolveWorkMode(
+        workMode: 'collaborative',
+        mode: 'chat',
+        projectId: 'project-1',
+        serverId: 'server-1',
+      ),
+      'collaborative',
+    );
+    expect(
+      resolveWorkMode(
         workMode: 'local',
         mode: 'agent',
         projectId: 'project-1',
@@ -62,6 +71,26 @@ void main() {
       ),
       'local',
     );
+  });
+
+  test('chat tasks normalize stale persisted agent work modes', () {
+    final task = Task.fromMap({
+      'id': 'chat-task',
+      'mode': 'chat',
+      'workMode': 'collaborative',
+      'projectId': 'project-1',
+      'serverId': 'server-1',
+      'providerId': null,
+      'title': '普通对话',
+      'workingDirectory': null,
+      'executionMode': 'confirm',
+      'status': 'completed',
+      'createdAt': DateTime.utc(2026, 8, 24).toIso8601String(),
+      'updatedAt': DateTime.utc(2026, 8, 24).toIso8601String(),
+    });
+
+    expect(task.effectiveWorkMode, 'chat');
+    expect(task.toMap()['workMode'], 'chat');
   });
 
   test('unknown stored execution modes fall back to confirmation', () {

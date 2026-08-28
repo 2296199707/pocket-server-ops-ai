@@ -868,10 +868,14 @@ class Task {
 
   factory Task.fromMap(Map<String, Object?> map) {
     final serverId = map['serverId'] as String?;
+    final mode = map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent');
     return Task(
       id: map['id'] as String,
-      mode: map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent'),
-      workMode: map['workMode'] as String?,
+      mode: mode,
+      // Older builds could persist a stale Agent work mode on a chat task.
+      // Chat mode has no tools, so normalize that inconsistent record while
+      // loading it instead of changing the explicit work-mode API semantics.
+      workMode: mode == 'chat' ? 'chat' : map['workMode'] as String?,
       projectId: map['projectId'] as String?,
       serverId: serverId,
       providerId: map['providerId'] as String?,

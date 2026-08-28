@@ -23,6 +23,10 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: HomeShell(controller: controller)),
     );
+    expect(
+      find.descendant(of: find.byTooltip('切换工作模式'), matching: find.text('对话')),
+      findsOneWidget,
+    );
 
     await tester.enterText(find.byType(TextField), '你好');
     await tester.tap(find.byTooltip('发送'));

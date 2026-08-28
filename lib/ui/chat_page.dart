@@ -25,6 +25,7 @@ class ChatPage extends StatefulWidget {
     required this.taskId,
     this.initialProjectId,
     required this.onTaskActivated,
+    this.onWorkModeChanged,
     required this.onOpenSettings,
     required this.onConfirmTool,
     required this.onConfirmHostKey,
@@ -37,6 +38,7 @@ class ChatPage extends StatefulWidget {
   final String? taskId;
   final String? initialProjectId;
   final ValueChanged<String> onTaskActivated;
+  final ValueChanged<String>? onWorkModeChanged;
   final VoidCallback onOpenSettings;
   final Future<bool> Function(
     Task task,
@@ -908,6 +910,7 @@ class ChatPageState extends State<ChatPage> {
         _workMode = selected;
         _mode = taskModeForWorkMode(selected);
       });
+      widget.onWorkModeChanged?.call(selected);
       return;
     }
 
@@ -932,6 +935,7 @@ class ChatPageState extends State<ChatPage> {
         _executionMode = updated.executionMode;
         _workingDirectory = updated.workingDirectory;
       });
+      widget.onWorkModeChanged?.call(updated.effectiveWorkMode);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -1006,6 +1010,7 @@ class ChatPageState extends State<ChatPage> {
           _modelOverride = null;
           _reasoningEffortOverride = null;
         });
+        widget.onWorkModeChanged?.call(updated.effectiveWorkMode);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -1042,6 +1047,7 @@ class ChatPageState extends State<ChatPage> {
         _reasoningEffortOverride = null;
       }
     });
+    widget.onWorkModeChanged?.call(result.workMode);
   }
 
   Future<void> _selectModelAndReasoning() async {

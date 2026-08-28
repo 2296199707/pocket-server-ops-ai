@@ -31,6 +31,7 @@ class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
   String? _activeTaskId;
   String? _pendingProjectId;
+  String _draftWorkMode = 'chat';
   Future<void> _agentConfirmationQueue = Future<void>.value();
 
   Task? get _activeTask {
@@ -46,52 +47,58 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.controller,
-      builder: (context, _) => Scaffold(
-        appBar: AppBar(
-          title: Text(
-            _selectedIndex == 0
-                ? (_activeTask?.title ??
-                      (_pendingProjectId == null ? '其他对话' : '新对话'))
-                : _selectedIndex == 1
-                ? '服务器'
-                : '设置',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          actions: [
-            if (_selectedIndex == 0)
-              Tooltip(
-                message: '切换工作模式',
-                child: TextButton.icon(
-                  onPressed: _openWorkModeFromAppBar,
-                  icon: const Icon(Icons.sync_alt_rounded, size: 17),
-                  label: const Text('协同', style: TextStyle(fontSize: 12)),
-                  style: TextButton.styleFrom(
-                    minimumSize: Size.zero,
-                    padding: const EdgeInsets.symmetric(horizontal: 5),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact,
+      builder: (context, _) {
+        final workMode = _activeTask?.effectiveWorkMode ?? _draftWorkMode;
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(
+              _selectedIndex == 0
+                  ? (_activeTask?.title ??
+                        (_pendingProjectId == null ? '其他对话' : '新对话'))
+                  : _selectedIndex == 1
+                  ? '服务器'
+                  : '设置',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            actions: [
+              if (_selectedIndex == 0)
+                Tooltip(
+                  message: '切换工作模式',
+                  child: TextButton.icon(
+                    onPressed: _openWorkModeFromAppBar,
+                    icon: const Icon(Icons.sync_alt_rounded, size: 17),
+                    label: Text(
+                      workModeLabel(workMode),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    style: TextButton.styleFrom(
+                      minimumSize: Size.zero,
+                      padding: const EdgeInsets.symmetric(horizontal: 5),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    ),
                   ),
                 ),
-              ),
-            if (_selectedIndex == 0)
-              IconButton(
-                tooltip: _activeTask?.projectId == null
-                    ? '在其他对话中新建'
-                    : '在当前项目中新建对话',
-                onPressed: _startNewChatFromCurrent,
-                icon: const Icon(Icons.add_comment_outlined),
-              ),
-          ],
-        ),
-        drawer: _buildDrawer(context),
-        body: widget.controller.loadError == null
-            ? _buildPage()
-            : _LoadError(
-                message: widget.controller.loadError!,
-                onRetry: widget.controller.load,
-              ),
-      ),
+              if (_selectedIndex == 0)
+                IconButton(
+                  tooltip: _activeTask?.projectId == null
+                      ? '在其他对话中新建'
+                      : '在当前项目中新建对话',
+                  onPressed: _startNewChatFromCurrent,
+                  icon: const Icon(Icons.add_comment_outlined),
+                ),
+            ],
+          ),
+          drawer: _buildDrawer(context),
+          body: widget.controller.loadError == null
+              ? _buildPage()
+              : _LoadError(
+                  message: widget.controller.loadError!,
+                  onRetry: widget.controller.load,
+                ),
+        );
+      },
     );
   }
 
@@ -108,7 +115,15 @@ class _HomeShellState extends State<HomeShell> {
           agentAutoExecute: widget.controller.agentAutoExecute,
           taskId: _activeTaskId,
           initialProjectId: _pendingProjectId,
-          onTaskActivated: (taskId) => setState(() => _activeTaskId = taskId),
+          onTaskActivated: (taskId) => setState(() {
+            _activeTaskId = taskId;
+            _draftWorkMode = 'chat';
+          }),
+          onWorkModeChanged: (mode) {
+            if (_activeTaskId == null && _draftWorkMode != mode) {
+              setState(() => _draftWorkMode = mode);
+            }
+          },
           onOpenSettings: _openProviderSettings,
           onConfirmTool: _confirmAgentTool,
           onConfirmHostKey: _confirmAgentHostKey,
@@ -292,6 +307,7 @@ class _HomeShellState extends State<HomeShell> {
           _selectedIndex = 0;
           _activeTaskId = task.id;
           _pendingProjectId = task.projectId;
+          _draftWorkMode = 'chat';
         });
       },
       trailing: Row(
@@ -826,6 +842,7 @@ class _HomeShellState extends State<HomeShell> {
       _selectedIndex = 0;
       _activeTaskId = null;
       _pendingProjectId = projectId;
+      _draftWorkMode = 'chat';
     });
   }
 
