@@ -1567,6 +1567,9 @@ void main() {
     final result = await controller.runTask(task, prompt: '继续');
     expect(result.status, 'completed');
     expect(requestBodies, hasLength(2));
+    expect(requestBodies.last['context_management'], [
+      {'type': 'compaction', 'compact_threshold': 244800},
+    ]);
     final nextInput = requestBodies.last['input'] as List;
     expect(
       nextInput.any(

@@ -178,6 +178,7 @@ void main() {
         apiKey: 'test-key',
         model: 'gpt-5.6-luna',
         reasoningEffort: 'high',
+        autoCompactTokenLimit: 1000,
         client: MockClient((incoming) async {
           request = incoming;
           return http.Response(
@@ -226,6 +227,46 @@ void main() {
       );
       expect(summary, startsWith('Another language model started'));
       expect(summary, contains('压缩后的摘要'));
+    },
+  );
+
+  test(
+    'Responses sends the configured server-side compaction threshold',
+    () async {
+      late http.Request request;
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'gpt-5.6-luna',
+        autoCompactTokenLimit: 244800,
+        client: MockClient((incoming) async {
+          request = incoming;
+          return http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '继续'},
+                  ],
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      await client.complete(messages: [AiMessage.user('继续')], tools: const []);
+
+      final body = jsonDecode(request.body) as Map<String, Object?>;
+      expect(body['context_management'], [
+        {'type': 'compaction', 'compact_threshold': 244800},
+      ]);
     },
   );
 

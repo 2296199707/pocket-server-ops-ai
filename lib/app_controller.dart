@@ -113,6 +113,7 @@ class AppController extends ChangeNotifier {
   bool _betaUpdatesEnabled = false;
   String? _imageProviderId;
   String? _lastDashboardServerId;
+  String? _lastConversationTaskId;
   double _fontScale = 1.0;
   bool _loading = true;
   String? _loadError;
@@ -125,6 +126,7 @@ class AppController extends ChangeNotifier {
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
   String? get lastDashboardServerId => _lastDashboardServerId;
+  String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
   String? get imageProviderId => _imageProviderId;
   bool get isLoading => _loading;
@@ -323,6 +325,12 @@ class AppController extends ChangeNotifier {
     _lastDashboardServerId = savedDashboardServerId?.isEmpty == true
         ? null
         : savedDashboardServerId;
+    final savedConversationTaskId = await _database.readSetting(
+      _lastConversationTaskSetting,
+    );
+    _lastConversationTaskId = savedConversationTaskId?.isEmpty == true
+        ? null
+        : savedConversationTaskId;
     _fontScale =
         (double.tryParse(
                   await _database.readSetting(_fontScaleSetting) ?? '',
@@ -651,6 +659,12 @@ class AppController extends ChangeNotifier {
     _lastDashboardServerId = value == null || value.isEmpty ? null : value;
   }
 
+  Future<void> setLastConversationTask(String? taskId) async {
+    final value = taskId?.trim();
+    await _database.writeSetting(_lastConversationTaskSetting, value ?? '');
+    _lastConversationTaskId = value == null || value.isEmpty ? null : value;
+  }
+
   Future<void> renameTask(Task task, String title) async {
     final value = title.trim();
     if (value.isEmpty) throw ArgumentError('任务名称不能为空');
@@ -974,6 +988,9 @@ class AppController extends ChangeNotifier {
     _invalidateTaskContextUsage(task.id);
     _streamingAssistantText.remove(task.id);
     await _database.deleteTask(task.id);
+    if (_lastConversationTaskId == task.id) {
+      await setLastConversationTask(null);
+    }
     try {
       await _attachmentStore.deleteTask(task.id);
     } catch (_) {
@@ -1572,96 +1589,23 @@ class AppController extends ChangeNotifier {
         inputModalities: activeProvider.wireApi == 'responses'
             ? modelMetadata?.inputModalities
             : null,
+        autoCompactTokenLimit: activeProvider.wireApi == 'responses'
+            ? modelMetadata?.resolveAutoCompactTokenLimit(
+                contextWindowMode: activeProvider.contextWindowMode,
+              )
+            : null,
       );
       final truncationPolicy =
           modelMetadata?.resolvedTruncationPolicy ??
           ProviderTruncationPolicy.codexFallback;
       final loop = AgentLoop(client: client, tools: tools);
-      var initialMessages = await _localHistory(
+      final initialMessages = await _localHistory(
         task.id,
         systemPrompt,
         previousEvents,
         useResponsesCompaction: activeProvider.wireApi == 'responses',
         providerId: activeProvider.id,
       );
-      final compactedSummary = await _compactResponsesHistoryIfNeeded(
-        task: task,
-        provider: activeProvider,
-        client: client,
-        messages: initialMessages,
-        instructions: systemPrompt,
-        cancellation: cancellation.whenCancelled,
-        additionalTokenCount:
-            OpenAiCompatibleClient.estimateResponsesTailTokenCount(
-              initialMessages,
-              inputModalities: modelMetadata?.inputModalities,
-            ),
-      );
-      if (compactedSummary != null) {
-        final retainedUserMessages = _codexRetainedUserMessages(
-          initialMessages,
-        );
-        initialMessages = [
-          AiMessage(role: 'system', content: systemPrompt),
-          ...retainedUserMessages,
-          AiMessage.user(compactedSummary),
-        ];
-        await appendTurnEvent('context.compacted', {
-          'provider_id': activeProvider.id,
-          'wire_api': activeProvider.wireApi,
-          'model': model,
-          'compaction_mode': 'local',
-          'summary': compactedSummary,
-          'retained_user_messages': _serializeCodexRetainedUserMessages(
-            retainedUserMessages,
-          ),
-          'retained_current_turn_user': false,
-        });
-        _invalidateTaskContextUsage(task.id);
-      }
-      Future<List<AiMessage>?> compactHistory(List<AiMessage> messages) async {
-        if (activeProvider.wireApi != 'responses') return null;
-        TokenUsageSnapshot? latestUsage;
-        for (final message in messages.reversed) {
-          final rawUsage = message.usage;
-          if (rawUsage == null) continue;
-          latestUsage = TokenUsageSnapshot.fromProviderUsage(rawUsage);
-          if (latestUsage != null) break;
-        }
-        final compactedSummary = await _compactResponsesHistoryIfNeeded(
-          task: task,
-          provider: activeProvider,
-          client: client!,
-          messages: messages,
-          instructions: systemPrompt,
-          cancellation: cancellation.whenCancelled,
-          activeTokenCount: latestUsage?.totalTokens,
-          additionalTokenCount:
-              OpenAiCompatibleClient.estimateResponsesTailTokenCount(
-                messages,
-                inputModalities: modelMetadata?.inputModalities,
-              ),
-        );
-        if (compactedSummary == null) return null;
-        final retainedUserMessages = _codexRetainedUserMessages(messages);
-        await appendTurnEvent('context.compacted', {
-          'provider_id': activeProvider.id,
-          'wire_api': activeProvider.wireApi,
-          'model': model,
-          'compaction_mode': 'local',
-          'summary': compactedSummary,
-          'retained_user_messages': _serializeCodexRetainedUserMessages(
-            retainedUserMessages,
-          ),
-          'retained_current_turn_user': true,
-        });
-        _invalidateTaskContextUsage(task.id);
-        return [
-          AiMessage(role: 'system', content: systemPrompt),
-          ...retainedUserMessages,
-          AiMessage.user(compactedSummary),
-        ];
-      }
 
       var eventQueue = Future<void>.value();
       final result = await loop.run(
@@ -1677,7 +1621,6 @@ class AppController extends ChangeNotifier {
             ? (tool, arguments) =>
                   _reviewTool(task, tool, arguments, cancellation: cancellation)
             : null,
-        compactHistory: compactHistory,
         onRemoteOperationStarted: (tool) {
           if (tool.writesRemoteState) remoteOperationStarted = true;
         },
@@ -2811,51 +2754,6 @@ class AppController extends ChangeNotifier {
     final model = _modelForTask(task, provider);
     if (provider == null || model.isEmpty) return null;
     return resolveProviderModelMetadata(provider, model);
-  }
-
-  Future<String?> _compactResponsesHistoryIfNeeded({
-    required Task task,
-    required ProviderProfile provider,
-    required AiChatClient client,
-    required List<AiMessage> messages,
-    required String instructions,
-    required Future<void> cancellation,
-    int? activeTokenCount,
-    int additionalTokenCount = 0,
-  }) async {
-    if (provider.wireApi != 'responses') return null;
-    final metadata = _contextMetadataForTask(task, provider);
-    final threshold = metadata?.resolveAutoCompactTokenLimit(
-      contextWindowMode: provider.contextWindowMode,
-    );
-    if (threshold == null) return null;
-    final baseTokens =
-        activeTokenCount ??
-        (await loadTaskContextUsage(
-          task,
-          provider: provider,
-        )).last?.totalTokens;
-    final activeTokens = baseTokens == null
-        ? additionalTokenCount > 0
-              ? additionalTokenCount
-              : null
-        : baseTokens + additionalTokenCount;
-    if (activeTokens == null || activeTokens < threshold) return null;
-    final compactionClient = client is AiCompactionClient
-        ? client as AiCompactionClient
-        : null;
-    if (compactionClient == null) {
-      throw StateError('当前 Responses 客户端不支持本地压缩');
-    }
-    final summary = await compactionClient.compact(
-      messages: messages,
-      instructions: instructions,
-      cancellation: cancellation,
-    );
-    if (summary.trim().isEmpty) {
-      throw StateError('Responses 压缩返回了空摘要');
-    }
-    return summary;
   }
 
   Future<TaskContextUsage> _loadTaskContextUsage(
@@ -4314,6 +4212,7 @@ const _betaUpdatesSetting = 'beta_updates_enabled';
 const _fontScaleSetting = 'font_scale';
 const _imageProviderSetting = 'image_provider_id';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';
+const _lastConversationTaskSetting = 'last_conversation_task_id';
 
 String _normalizeRemotePath(String value) {
   final path = value.trim();

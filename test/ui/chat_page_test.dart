@@ -62,6 +62,77 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets('home restores the last opened conversation', (tester) async {
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    final first = await controller.createTask(title: '较早对话');
+    await controller.createTask(title: '较新对话');
+    await controller.setLastConversationTask(first.id);
+
+    await tester.pumpWidget(
+      MaterialApp(home: HomeShell(controller: controller)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('较早对话'), findsOneWidget);
+    expect(find.text('较新对话'), findsNothing);
+  });
+
+  testWidgets('compact drawer keeps its labels on a narrow screen', (
+    tester,
+  ) async {
+    tester.binding.setSurfaceSize(const Size(320, 720));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final database = MemoryAppDatabase();
+    await database.saveProject(
+      const Project(
+        id: 'drawer-project',
+        name: '测试项目',
+        localPath: '/tmp/drawer-project',
+      ),
+    );
+    await database.saveTask(
+      Task(
+        id: 'drawer-task',
+        mode: 'chat',
+        workMode: 'chat',
+        projectId: 'drawer-project',
+        serverId: null,
+        providerId: null,
+        title: '项目对话',
+        workingDirectory: null,
+        executionMode: 'confirm',
+        status: 'completed',
+        createdAt: DateTime.utc(2026, 8, 28),
+        updatedAt: DateTime.utc(2026, 8, 28),
+      ),
+    );
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await tester.pumpWidget(
+      MaterialApp(home: HomeShell(controller: controller)),
+    );
+    await tester.tap(find.byIcon(Icons.menu));
+    await tester.pumpAndSettle();
+
+    expect(find.text('服务器添加'), findsOneWidget);
+    expect(find.text('服务器仪表盘'), findsOneWidget);
+    expect(find.text('供应商设置'), findsOneWidget);
+    await tester.tap(find.text('测试项目'));
+    await tester.pumpAndSettle();
+    expect(find.text('项目对话'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('long user messages stay within a narrow phone layout', (
     tester,
   ) async {

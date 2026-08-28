@@ -78,6 +78,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     Duration timeout = const Duration(minutes: 5),
     int? maxResponseBytes,
     List<String>? inputModalities,
+    int? autoCompactTokenLimit,
   }) {
     return OpenAiCompatibleClient._(
       baseUrl: baseUrl.trim().replaceFirst(RegExp(r'/+$'), ''),
@@ -88,6 +89,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       client: client ?? http.Client(),
       maxResponseBytes: maxResponseBytes,
       inputModalities: inputModalities,
+      autoCompactTokenLimit: autoCompactTokenLimit,
     );
   }
 
@@ -100,6 +102,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required this._client,
     required this.maxResponseBytes,
     required this.inputModalities,
+    required this.autoCompactTokenLimit,
   });
 
   final String baseUrl;
@@ -110,15 +113,16 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   final http.Client _client;
   final int? maxResponseBytes;
   final List<String>? inputModalities;
+  final int? autoCompactTokenLimit;
 
   /// Estimates the model-visible items appended after the latest assistant
-  /// output. Codex adds this tail to the latest reported usage because local
-  /// user/tool items are not included in that response's usage snapshot.
+  /// output for diagnostics and focused tests. The production automatic
+  /// compaction trigger is sent as `context_management` and does not use this
+  /// estimate.
   ///
   /// This is intentionally the same coarse JSON-byte heuristic used by
   /// Codex's history estimator: serialized item bytes divided by four,
-  /// rounded up. It is only used to decide whether a Responses compaction is
-  /// due; provider-reported usage remains authoritative when available.
+  /// rounded up. Provider-reported usage remains authoritative when available.
   static int estimateResponsesTailTokenCount(
     List<AiMessage> messages, {
     List<String>? inputModalities,
@@ -174,6 +178,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required List<AiMessage> messages,
     required List<AiToolDefinition> tools,
     String? instructions,
+    bool useContextManagement = true,
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
   }) {
@@ -191,6 +196,14 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       // transcript on the phone while the provider processes the request.
       'store': false,
     };
+    final compactThreshold = autoCompactTokenLimit;
+    if (useContextManagement &&
+        compactThreshold != null &&
+        compactThreshold > 0) {
+      requestBody['context_management'] = [
+        {'type': 'compaction', 'compact_threshold': compactThreshold},
+      ];
+    }
     if (instructions != null && instructions.isNotEmpty) {
       requestBody['instructions'] = instructions;
     }
@@ -226,6 +239,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       ],
       tools: const [],
       instructions: instructions,
+      useContextManagement: false,
       cancellation: cancellation,
     );
     final summary = response.content?.trim() ?? '';

@@ -58,7 +58,7 @@
 | --- | --- | --- | --- | --- |
 | CTX-01 | `codex-rs/core/src/context_manager/normalize.rs`；`codex-rs/core/src/context_manager/history_tests.rs` | `lib/app_controller.dart` 的 `_localHistory`；`lib/agent/openai_compatible_client.dart` | function call/output 配对、孤立 output、取消后的未完成调用如何进入下一轮 | 已等价（应用支持的 function 工具子集） |
 | CTX-02 | `codex-rs/core/src/context/model_switch_instructions.rs`；`codex-rs/core/src/context/world_state/model.rs` | `lib/app_controller.dart` 的任务配置和 provider projection | 模型切换是否保留线程；切换消息如何加入；哪些状态不能跨供应商复用 | 架构差异（已记录切换消息；opaque 状态按供应商投影清除） |
-| CTX-03 | `codex-rs/core/src/context_manager/normalize.rs`；`codex-rs/core/src/context/compaction_summary.rs` | `lib/storage/app_database.dart`、`lib/storage/memory_app_database.dart`、`lib/app_controller.dart` | compaction 前后的历史起点、opaque item 保留范围、供应商切换后新 compaction 是否重新生效 | 需修复已处理（自定义供应商走 Codex 本地压缩；本地摘要成为新历史边界；有回归测试） |
+| CTX-03 | `codex-rs/core/src/context_manager/normalize.rs`；`codex-rs/core/src/context/compaction_summary.rs` | `lib/storage/app_database.dart`、`lib/storage/memory_app_database.dart`、`lib/app_controller.dart` | compaction 前后的历史起点、opaque item 保留范围、供应商切换后新 compaction 是否重新生效 | 需修复已处理（普通 Responses 使用服务端压缩 item；手动压缩保留 Codex 本地摘要边界；有回归测试） |
 | CTX-04 | `codex-rs/core/src/context/world_state/model.rs`；`codex-rs/core/src/context/world_state/model_tests.rs` | `lib/domain/models.dart`、`lib/agent/context_usage.dart` | `context_window`、`max_context_window`、有效窗口、自动压缩阈值和未知元数据的处理，不得用字符或字节猜 token | 需修复已处理（ID-only Codex 模型 fallback） |
 | CTX-05 | `codex-rs/tui/src/token_usage.rs` | `lib/agent/context_usage.dart`、`lib/ui/chat_page.dart` | 当前轮 usage、累计 usage、压缩后 usage 和 UI 百分比是否混为一谈 | 架构差异（同一计算规则；UI 只显示真实 usage） |
 | CTX-06 | `codex-rs/core/src/context/image_resize_notice.rs`；Responses 输入相关源码 | `lib/storage/attachment_store.dart`、`lib/app_controller.dart`、客户端附件转换 | 图片物理独立存储但仍作为上下文输入；模型不支持媒体时的明确处理；累计图片不会把 Base64 永久放入事件 | 架构差异（物理分离但仍恢复到请求） |
@@ -67,7 +67,7 @@
 
 | ID | Codex 源码和测试 | Mobile 对应位置 | 必须核对的行为 | 状态 |
 | --- | --- | --- | --- | --- |
-| PRO-01 | `codex-rs/codex-api/src/common.rs`；`codex-rs/codex-api/src/endpoint/compact.rs`；`codex-rs/core/src/client.rs` | `lib/agent/openai_compatible_client.dart` | 普通 Responses 与独立 compact 请求的字段边界、历史、工具和 reasoning | 需修复已处理（按 Codex 供应商能力选择本地压缩；本 APP 的兼容 Responses 使用普通 `/responses`） |
+| PRO-01 | `codex-rs/codex-api/src/common.rs`；`codex-rs/codex-api/src/endpoint/compact.rs`；`codex-rs/core/src/client.rs` | `lib/agent/openai_compatible_client.dart` | 普通 Responses 与独立 compact 请求的字段边界、历史、工具和 reasoning | 需修复已处理（普通请求按阈值发送 `context_management`；手动兼容路径关闭该字段；不做协议回退） |
 | PRO-02 | `codex-rs/codex-api/src/sse/responses.rs`；相关 Responses 测试 | `lib/agent/openai_compatible_client.dart` | `response.completed`、incomplete、failed、cancelled、断流和 multiline SSE 的终止与保存顺序 | 已等价（已覆盖关键事件） |
 | PRO-03 | `codex-rs/core/src/responses_retry.rs`；`codex-rs/core/src/responses_retry_tests.rs` | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | 仅模型请求按明确可重试错误退避；取消立即打断；不得重放远程工具副作用 | 架构差异（客户端不自动重试，工具副作用不会重放） |
 | PRO-04 | `codex-rs/core/src/context_manager/normalize.rs`；Responses 请求源码 | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | Responses 与 Chat Completions 是显式协议；不支持时直接报错，不自动 fallback；跨协议历史转换不伪造 opaque 状态 | 已等价 |
@@ -847,6 +847,86 @@
   `5de5242ed767ae1b4e6c7dc99364f1c355ef66d84ad78843bc34fd28414b56bb`。
 - 发布前验证：`flutter analyze` 通过；`flutter test` 全量 158 项通过；
   `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
+
+### 2026-08-28：PRO-01 普通 Responses 服务端压缩接入
+
+- 官方 OpenAI 压缩文档明确区分两条路径：普通 `POST /responses` 通过
+  `context_management: [{type: "compaction", compact_threshold: N}]` 启用服务端压缩；
+  独立 `POST /responses/compact` 用于显式生成新的压缩窗口。服务端压缩会在响应流中返回
+  opaque compaction item，后续 stateless 请求要原样追加该 item，并可丢弃它之前的输入。
+- 真实复现：用户提供的同一供应商 `gpt-5.6-luna` 对普通 `/v1/responses` 携带
+  `context_management` 返回 `HTTP 200`；独立 `/v1/responses/compact` 返回 `HTTP 502`。
+  因此此前把独立 endpoint 失败归因于供应商不支持压缩的结论不成立，问题是 APP 选择了
+  不适用的请求路径。进一步将阈值设为 `1000` 并发送约 25,000 字符的受控输入，响应
+  output 类型包含 `compaction`，确认服务端实际触发了压缩。
+- Mobile 修复：`OpenAiCompatibleClient` 增加可选的自动压缩阈值；普通 Responses 请求
+  发送官方 `context_management`，阈值由当前模型元数据和默认/扩展窗口模式解析得到。
+  `AppController` 不再在请求前或工具轮次后执行本地自动摘要，避免远程压缩和本地摘要重复。
+  Chat Completions 不发送该字段，也不自动切换协议。
+- 手动压缩仍保留兼容供应商的 Codex 本地摘要路径；该请求显式关闭
+  `context_management`，避免手动摘要请求再次触发服务端压缩。普通请求收到的 compaction
+  output item 继续由现有 Responses 历史持久化和边界裁剪逻辑处理。
+- 定向测试：`test/openai_compatible_client_test.dart` 的
+  `Responses sends the configured server-side compaction threshold`；
+  `test/app_controller_test.dart` 的 `manual Responses compaction stores the Codex local summary`
+  同时验证手动请求不带该字段、后续普通请求带 `244800` 阈值。`flutter test` 全量 160 项、
+  `flutter analyze` 均通过；真实请求返回 `HTTP 200`。
+- 结论：`需修复已处理`。后续只有官方字段、固定 Codex 源码、供应商协议或上述测试发生变化
+  时重新审查，不再重复把 `/responses/compact` 的失败当作普通服务端压缩失败。
+- 修复 commit：当前工作树未提交。
+
+### 2026-08-28：手动压缩接口再次真实验证
+
+- `/v1/models` 返回 `gpt-5.6-luna`，同一供应商的普通
+  `POST /v1/responses` 使用该模型返回 `HTTP 200`，所以模型名和基础鉴权不是
+  `/responses/compact` 失败原因。
+- 按官方文档和 Codex `CompactionInput` 分别发送了完整 Codex 字段、官方简化
+  `input` 数组、字符串 `input`，以及不带 `/v1` 的路由；`POST
+  /v1/responses/compact` 均返回 `HTTP 502 upstream_error`。使用
+  `previous_response_id` 则返回 `HTTP 400`，提示该字段仅支持 Responses WebSocket v2。
+- WFL 供应商真实测试使用普通 `POST /responses` 和最低合法阈值 `1000`，返回
+  `HTTP 200` 及两个真实 `compaction` output item。这证明该供应商的服务端自动压缩
+  已可用，但不能把它等同于 HTTP standalone compact endpoint 已可用。
+- 结论：当前 `OpenAiCompatibleClient.compact` 继续走普通 Responses 请求，关闭
+  `context_management` 并追加 Codex `SUMMARIZATION_PROMPT`，由同一 API 模型生成
+  手动摘要；这对应 Codex 的 `RemoteCompactionSupport::Unsupported` 分支。只有供应商
+  明确可用并通过真实验证后，才应增加独立 `/responses/compact` 路径；不做静默协议切换。
+- 本次仅更新审查记录，没有改动代码、没有保存临时 API Key，也没有重新构建发布。
+
+### 2026-08-28：Sub2API `/responses/compact` 路由与实际能力核查
+
+- 研究源码位于 `/www/mobile-agent-tooling/sub2api-research`，固定 commit 为
+  `e866ff6ec431816e8b9d4b81dc7b00122ca3f7f8`，与当前 `main` 一致。
+- Sub2API 确实开放了 compact 网关入口：
+  `backend/internal/server/routes/gateway.go:221-227` 注册 `/v1/responses/*subpath`，
+  `:361-362` 注册不带 `/v1` 的 `/responses/*subpath`，`:374-375` 注册
+  `/backend-api/codex/responses/*subpath`。`endpoint.go:108` 将 compact 单独归一化，
+  不是普通 Responses 根路径的误匹配。
+- 这只是网关入口，不代表所有后端账号都能执行。`openai_gateway_handler.go:350-360`
+  区分 legacy `/responses/compact` 与 native v2；legacy 路径在 `:524` 设置
+  `requireCompact=true`，并在 `:541-570` 要求 Responses 能力且按账号 compact 能力调度。
+  `openai_gateway_request_body.go:382-385` 识别 `/compact`，
+  `openai_gateway_forward.go:1311-1316` 将该后缀拼到实际上游 Responses URL。
+- 账号级 `compact_model_mapping` 只作用于 legacy compact，见
+  `account.go:934-955` 与 `openai_gateway_scheduling.go:796-845`。此外，若没有账号级匹配，
+  `openai_compact_fallback.go:52-71` 使用进程级配置；`config.go:1002-1004,2373`
+  和 `deploy/config.example.yaml:308-312` 的默认值是 `gpt-5.4`。在
+  `openai_gateway_forward.go:367-384` 中，这个“fallback”会在 legacy compact 的首次
+  转发前直接应用，因此没有覆盖配置时，`gpt-5.6-luna` 可能先被改写成 `gpt-5.4`。
+- Sub2API 自带的账号 compact 测试并不测试 legacy `/responses/compact`：
+  `account_test_service.go:2026-2083` 构造的是普通流式 `/responses` 加
+  `compaction_trigger`，`openai_compact_probe.go:27-30` 也明确注明 legacy unary
+  `/responses/compact` 已在其所针对的上游下线。因此“账号被标记支持 compact”可能只代表
+  native v2/普通 Responses 压缩链，不等于 standalone endpoint 已可用。
+- 真实验证使用同一供应商、同一 `gpt-5.6-luna`：普通 `/v1/responses` 返回 `200`；普通
+  `/v1/responses` 携带官方 `context_management` 字段返回 `200`（短输入，仅证明字段被接受，
+  不据此宣称已触发压缩）；直接 `/v1/responses/compact` 返回 `502 upstream_error`；
+  普通 `/v1/responses` 加 `compaction_trigger` 的 native v2 形态也返回 `502`。
+- 结论：用户记得的事实是对的，Sub2API 明确开放了 `/responses/compact` 网关路由；但当前
+  真实链路仍不能据此启用 APP 的 standalone compact。502 是入口之后的上游转发/能力或模型映射
+  问题，不是“没有路由”。在供应商明确配置并真实验证 standalone 返回合法 compact 输出前，
+  APP 手动压缩继续使用普通 `/responses` 的 Codex 本地摘要路径；普通请求的服务端压缩继续使用
+  `context_management`。本次没有改代码、没有保存临时 API Key、没有重新构建发布。
 
 ## 9. 发现记录模板
 

@@ -27,11 +27,19 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
+  static const _compactDrawerDensity = VisualDensity(
+    horizontal: -2,
+    vertical: -4,
+  );
+  static const _drawerTitleStyle = TextStyle(fontSize: 12, height: 1.05);
+  static const _drawerSubtitleStyle = TextStyle(fontSize: 9, height: 1.0);
+
   final _chatKey = GlobalKey<ChatPageState>();
   int _selectedIndex = 0;
   String? _activeTaskId;
   String? _pendingProjectId;
   String _draftWorkMode = 'chat';
+  bool _didRestoreLastConversation = false;
   Future<void> _agentConfirmationQueue = Future<void>.value();
 
   Task? get _activeTask {
@@ -41,6 +49,52 @@ class _HomeShellState extends State<HomeShell> {
       if (task.id == id) return task;
     }
     return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_restoreLastConversation);
+    if (!widget.controller.isLoading) _restoreLastConversation();
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_restoreLastConversation);
+    super.dispose();
+  }
+
+  void _restoreLastConversation() {
+    if (_didRestoreLastConversation ||
+        widget.controller.isLoading ||
+        widget.controller.loadError != null) {
+      return;
+    }
+    _didRestoreLastConversation = true;
+    final savedId = widget.controller.lastConversationTaskId;
+    Task? task;
+    if (savedId != null) {
+      for (final candidate in widget.controller.tasks) {
+        if (candidate.id == savedId) {
+          task = candidate;
+          break;
+        }
+      }
+    }
+    task ??= widget.controller.tasks.isEmpty
+        ? null
+        : widget.controller.tasks.first;
+    if (task == null) return;
+    final restoredTask = task;
+    if (savedId != restoredTask.id) {
+      unawaited(widget.controller.setLastConversationTask(restoredTask.id));
+    }
+    if (!mounted) return;
+    setState(() {
+      _activeTaskId = restoredTask.id;
+      _pendingProjectId = restoredTask.projectId;
+      _selectedIndex = 0;
+    });
   }
 
   @override
@@ -62,6 +116,20 @@ class _HomeShellState extends State<HomeShell> {
               overflow: TextOverflow.ellipsis,
             ),
             actions: [
+              if (_selectedIndex == 0)
+                IconButton(
+                  tooltip: 'HTML预览',
+                  onPressed: _hasPreviewProject
+                      ? _openLocalPreviewFromAppBar
+                      : null,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.preview_outlined, size: 18),
+                ),
               if (_selectedIndex == 0)
                 Tooltip(
                   message: '切换工作模式',
@@ -115,10 +183,13 @@ class _HomeShellState extends State<HomeShell> {
           agentAutoExecute: widget.controller.agentAutoExecute,
           taskId: _activeTaskId,
           initialProjectId: _pendingProjectId,
-          onTaskActivated: (taskId) => setState(() {
-            _activeTaskId = taskId;
-            _draftWorkMode = 'chat';
-          }),
+          onTaskActivated: (taskId) {
+            setState(() {
+              _activeTaskId = taskId;
+              _draftWorkMode = 'chat';
+            });
+            unawaited(widget.controller.setLastConversationTask(taskId));
+          },
           onWorkModeChanged: (mode) {
             if (_activeTaskId == null && _draftWorkMode != mode) {
               setState(() => _draftWorkMode = mode);
@@ -154,27 +225,42 @@ class _HomeShellState extends State<HomeShell> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  _DrawerActionButton(
-                    icon: Icons.add_circle_outline,
-                    label: '服务器添加',
-                    onPressed: _openServerManagerFromDrawer,
+                  Expanded(
+                    child: _DrawerActionButton(
+                      icon: Icons.add_circle_outline,
+                      label: '服务器添加',
+                      onPressed: _openServerManagerFromDrawer,
+                    ),
                   ),
-                  _DrawerActionButton(
-                    icon: Icons.dashboard_outlined,
-                    label: '服务器仪表盘',
-                    onPressed: _openDashboardFromDrawer,
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: _DrawerActionButton(
+                      icon: Icons.dashboard_outlined,
+                      label: '服务器仪表盘',
+                      onPressed: _openDashboardFromDrawer,
+                    ),
                   ),
-                  _DrawerActionButton(
-                    icon: Icons.smart_toy_outlined,
-                    label: '供应商设置',
-                    onPressed: _openProviderSettingsFromDrawer,
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: _DrawerActionButton(
+                      icon: Icons.smart_toy_outlined,
+                      label: '供应商设置',
+                      onPressed: _openProviderSettingsFromDrawer,
+                    ),
                   ),
                 ],
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.add_comment_outlined),
-              title: const Text('新对话'),
+              dense: true,
+              visualDensity: _compactDrawerDensity,
+              minTileHeight: 32,
+              minVerticalPadding: 0,
+              minLeadingWidth: 20,
+              horizontalTitleGap: 6,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+              leading: const Icon(Icons.add_comment_outlined, size: 18),
+              title: const Text('新对话', style: _drawerTitleStyle),
               selected: _selectedIndex == 0 && _activeTaskId == null,
               onTap: _openNewConversationPicker,
             ),
@@ -185,14 +271,22 @@ class _HomeShellState extends State<HomeShell> {
                 children: [
                   ExpansionTile(
                     key: const PageStorageKey<String>('other-conversations'),
-                    leading: const Icon(Icons.chat_bubble_outline),
-                    title: const Text('其他对话'),
+                    dense: true,
+                    visualDensity: _compactDrawerDensity,
+                    minTileHeight: 32,
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+                    childrenPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.chat_bubble_outline, size: 18),
+                    title: const Text('其他对话', style: _drawerTitleStyle),
                     children: [
                       if (otherTasks.isEmpty)
                         const ListTile(
                           dense: true,
-                          contentPadding: EdgeInsets.only(left: 56),
-                          title: Text('暂无对话'),
+                          visualDensity: _compactDrawerDensity,
+                          minTileHeight: 28,
+                          minVerticalPadding: 0,
+                          contentPadding: EdgeInsets.only(left: 40),
+                          title: Text('暂无对话', style: _drawerSubtitleStyle),
                         )
                       else
                         for (final task in otherTasks) _taskTile(context, task),
@@ -202,48 +296,56 @@ class _HomeShellState extends State<HomeShell> {
                   if (widget.controller.projects.isEmpty)
                     const ListTile(
                       dense: true,
-                      leading: Icon(Icons.folder_off_outlined),
-                      title: Text('暂无项目'),
+                      visualDensity: _compactDrawerDensity,
+                      minTileHeight: 28,
+                      minVerticalPadding: 0,
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12),
+                      leading: Icon(Icons.folder_off_outlined, size: 18),
+                      title: Text('暂无项目', style: _drawerSubtitleStyle),
                     )
                   else
                     for (final project in widget.controller.projects)
                       ExpansionTile(
                         key: PageStorageKey<String>('project-${project.id}'),
-                        leading: const Icon(Icons.folder_outlined),
+                        dense: true,
+                        visualDensity: _compactDrawerDensity,
+                        minTileHeight: 40,
+                        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+                        childrenPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.folder_outlined, size: 18),
                         title: Text(
                           project.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          style: _drawerTitleStyle,
                         ),
                         subtitle: Text(
                           project.localPath,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          style: _drawerSubtitleStyle,
                         ),
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            IconButton(
+                            _DrawerItemIconButton(
                               tooltip: '在项目中新建对话',
                               onPressed: () =>
                                   _startNewChatInDrawer(project.id),
-                              icon: const Icon(Icons.add, size: 20),
+                              icon: Icons.add,
                             ),
-                            IconButton(
+                            _DrawerItemIconButton(
                               tooltip: '项目设置',
                               onPressed: () =>
                                   _openProjectSettingsFromDrawer(project),
-                              icon: const Icon(
-                                Icons.settings_outlined,
-                                size: 20,
-                              ),
+                              icon: Icons.settings_outlined,
                             ),
-                            IconButton(
+                            _DrawerItemIconButton(
                               tooltip: '删除项目',
                               onPressed: () => _deleteProject(context, project),
-                              icon: const Icon(Icons.delete_outline, size: 20),
+                              icon: Icons.delete_outline,
                             ),
-                            const Icon(Icons.expand_more),
+                            const Icon(Icons.expand_more, size: 18),
                           ],
                         ),
                         children: [
@@ -256,8 +358,14 @@ class _HomeShellState extends State<HomeShell> {
                           ))
                             const ListTile(
                               dense: true,
-                              contentPadding: EdgeInsets.only(left: 56),
-                              title: Text('暂无项目对话'),
+                              visualDensity: _compactDrawerDensity,
+                              minTileHeight: 28,
+                              minVerticalPadding: 0,
+                              contentPadding: EdgeInsets.only(left: 40),
+                              title: Text(
+                                '暂无项目对话',
+                                style: _drawerSubtitleStyle,
+                              ),
                             ),
                         ],
                       ),
@@ -266,8 +374,15 @@ class _HomeShellState extends State<HomeShell> {
             ),
             const Divider(height: 1),
             ListTile(
-              leading: const Icon(Icons.tune_outlined),
-              title: const Text('设置'),
+              dense: true,
+              visualDensity: _compactDrawerDensity,
+              minTileHeight: 32,
+              minVerticalPadding: 0,
+              minLeadingWidth: 20,
+              horizontalTitleGap: 6,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+              leading: const Icon(Icons.tune_outlined, size: 18),
+              title: const Text('设置', style: _drawerTitleStyle),
               selected: _selectedIndex == 2,
               onTap: () {
                 Navigator.pop(context);
@@ -282,23 +397,38 @@ class _HomeShellState extends State<HomeShell> {
 
   Widget _drawerSectionTitle(String title) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+        child: Text(
+          title,
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+        ),
       ),
     );
   }
 
   Widget _taskTile(BuildContext context, Task task, {double indent = 0}) {
     return ListTile(
-      contentPadding: EdgeInsets.only(left: 16 + indent, right: 8),
-      leading: Icon(_statusIcon(task.status)),
-      title: Text(task.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      dense: true,
+      visualDensity: _compactDrawerDensity,
+      minTileHeight: 32,
+      minVerticalPadding: 0,
+      minLeadingWidth: 18,
+      horizontalTitleGap: 4,
+      contentPadding: EdgeInsets.only(left: 12 + indent, right: 4),
+      leading: Icon(_statusIcon(task.status), size: 15),
+      title: Text(
+        task.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: _drawerTitleStyle,
+      ),
       subtitle: Text(
         _taskLabel(task),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
+        style: _drawerSubtitleStyle,
       ),
       selected: _selectedIndex == 0 && _activeTaskId == task.id,
       onTap: () {
@@ -309,17 +439,22 @@ class _HomeShellState extends State<HomeShell> {
           _pendingProjectId = task.projectId;
           _draftWorkMode = 'chat';
         });
+        unawaited(widget.controller.setLastConversationTask(task.id));
       },
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          IconButton(
+          _DrawerItemIconButton(
             tooltip: '删除对话',
             onPressed: () => _deleteTask(context, task),
-            icon: const Icon(Icons.delete_outline, size: 20),
+            icon: Icons.delete_outline,
           ),
           PopupMenuButton<String>(
             tooltip: '对话操作',
+            constraints: const BoxConstraints.tightFor(width: 24, height: 24),
+            padding: EdgeInsets.zero,
+            iconSize: 14,
+            position: PopupMenuPosition.under,
             onSelected: (value) {
               if (value == 'rename') {
                 _renameTask(context, task);
@@ -362,6 +497,17 @@ class _HomeShellState extends State<HomeShell> {
   void _openWorkModeFromAppBar() {
     final chat = _chatKey.currentState;
     if (chat != null) unawaited(chat.openWorkModePicker());
+  }
+
+  bool get _hasPreviewProject =>
+      widget.controller.projectFor(
+        _activeTask?.projectId ?? _pendingProjectId,
+      ) !=
+      null;
+
+  void _openLocalPreviewFromAppBar() {
+    final chat = _chatKey.currentState;
+    if (chat != null) unawaited(chat.openLocalPreview());
   }
 
   void _openDashboardFromDrawer() {
@@ -1003,18 +1149,63 @@ class _DrawerActionButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Tooltip(
       message: label,
-      child: IconButton(
+      child: OutlinedButton(
         onPressed: onPressed,
-        tooltip: label,
-        constraints: const BoxConstraints.tightFor(width: 36, height: 36),
-        padding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        style: IconButton.styleFrom(
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size(0, 38),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          visualDensity: VisualDensity.compact,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
-        icon: Icon(icon, size: 18),
+        child: Row(
+          children: [
+            Icon(icon, size: 16),
+            const SizedBox(width: 3),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 11),
+              ),
+            ),
+          ],
+        ),
       ),
+    );
+  }
+}
+
+class _DrawerItemIconButton extends StatelessWidget {
+  const _DrawerItemIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      constraints: const BoxConstraints.tightFor(width: 24, height: 24),
+      padding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      style: IconButton.styleFrom(
+        fixedSize: const Size(24, 24),
+        minimumSize: Size.zero,
+        maximumSize: const Size(24, 24),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: EdgeInsets.zero,
+      ),
+      icon: Icon(icon, size: 13),
     );
   }
 }

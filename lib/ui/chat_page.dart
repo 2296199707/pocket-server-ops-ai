@@ -127,6 +127,8 @@ class ChatPageState extends State<ChatPage> {
 
   Future<void> openWorkModePicker() => _selectWorkMode();
 
+  Future<void> openLocalPreview() => _openLocalPreview();
+
   void _ensureTaskEvents() {
     final taskId = _taskId;
     if (taskId == null) return;
@@ -722,16 +724,6 @@ class ChatPageState extends State<ChatPage> {
                 title: const Text('选择手机项目文件'),
                 onTap: () => Navigator.pop(context, 'project'),
               ),
-            if (widget.controller.projectFor(
-                  _currentTask?.projectId ?? _projectId,
-                ) !=
-                null)
-              ListTile(
-                leading: const Icon(Icons.preview_outlined),
-                title: const Text('打开本地网页预览'),
-                subtitle: const Text('查看页面、控制台日志并检查本地资源'),
-                onTap: () => Navigator.pop(context, 'preview'),
-              ),
           ],
         ),
       ),
@@ -743,8 +735,6 @@ class ChatPageState extends State<ChatPage> {
       await _openProjectFiles();
     } else if (action == 'image') {
       await _requestImagePrompt();
-    } else if (action == 'preview') {
-      await _openLocalPreview();
     }
   }
 

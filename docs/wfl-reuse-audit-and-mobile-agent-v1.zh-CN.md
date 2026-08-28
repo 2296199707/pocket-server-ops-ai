@@ -107,7 +107,7 @@ Android 前台服务只负责在手机进程仍然存活时提高任务存活概
 为保持第一版实现小而可控，当前边界固定如下：
 
 - Agent 每轮最多 64 个模型步骤和 128 次工具调用。模型或网络在已执行远端操作后出错，或者达到上限，任务显示 `unknown`，提示人工检查，不自动重放；
-- 供应商协议由用户明确选择 Responses 或 Chat Completions。Responses 按 Codex 规则使用 `context_window`（缺失时取 `max_context_window`）、有效窗口 95% 和自动压缩阈值 90%；未知窗口不猜测也不发送压缩请求。当前兼容 Responses 供应商的自动/手动压缩使用同一供应商的普通 `POST /responses`，把 system 指令单独放入 `instructions`，并追加 Codex 压缩提示词生成本地摘要；压缩结果按 Codex 规则保留最近用户文本（最多约 20,000 个估算 token）后再追加摘要。不会因为供应商不提供 `/responses/compact` 就切换到 Chat Completions。Chat Completions 保持独立协议，只解析其 usage，不伪装成 Responses；
+- 供应商协议由用户明确选择 Responses 或 Chat Completions。Responses 按 Codex 规则使用 `context_window`（缺失时取 `max_context_window`）、有效窗口 95% 和自动压缩阈值 90%；当前普通 Responses 请求把该阈值发送为官方 `context_management`，由供应商返回 opaque compaction item，APP 原样保留并裁剪其之前的请求项。手动压缩在独立 endpoint 不可用时才使用同一供应商的普通 `POST /responses`，把 system 指令单独放入 `instructions`，追加 Codex 压缩提示词生成本地摘要；该手动请求会关闭 `context_management`。不会因为供应商不提供 `/responses/compact` 就切换到 Chat Completions。Chat Completions 保持独立协议，只解析其 usage，不伪装成 Responses；
 - `/models` 同时兼容 OpenAI 风格的 `data` 列表和 Codex 风格的 `models` 列表。返回的模型元数据按模型保存到供应商配置；只有模型目录给出真实限制时才更新已有值，普通只返回模型 ID 的接口不会覆盖手动元数据；
 - 每次模型响应保存 `last_token_usage` 对应的当前用量和 `total_token_usage` 对应的累计用量，并记录 `model_context_window`、`auto_compact_token_limit` 和压缩次数。底部上下文百分比只在窗口和 usage 都真实可用时显示，否则显示 `--`；分页或尚未加载的聊天历史不会影响该统计；
 - 手机不猜测模型 token 窗口，不按 Base64 字节数、字符数或固定几 MiB 推断上下文。Responses、Chat Completions 和生图接口的正常响应默认都不设本地字节上限；64 KiB 只用于截取供应商 HTTP 错误正文，不影响正常模型响应和图片；
@@ -148,7 +148,7 @@ SSH 始终使用用户配置的原账号和原权限；非 root 账号不会被�
 
 已确认的官方行为如下：
 
-1. 官方 Responses 文档同时定义普通请求的 `context_management` 服务端压缩和独立的 `POST /responses/compact`；Codex 源码按供应商能力选择路径。固定快照中自定义供应商是 `RemoteCompactionSupport::Unsupported`，因此通过普通 `/responses` 追加 `SUMMARIZATION_PROMPT`，把模型返回文本写成 `CompactionSummary` 用户项；支持远程能力的供应商才使用独立接口。Mobile 当前采用前者，不自动回退 Chat Completions。普通请求中的工具调用和 reasoning 仍属于 `input` 历史项；本地压缩请求不提供工具定义，system 指令通过 `instructions` 传入。
+1. 官方 Responses 文档同时定义普通请求的 `context_management` 服务端压缩和独立的 `POST /responses/compact`；Codex 源码按供应商能力选择路径。Mobile 普通 Responses 请求按当前模型阈值发送 `context_management`，并原样保留服务端返回的 opaque compaction item；独立 endpoint 不可用时，手动压缩使用普通 `/responses` 追加 `SUMMARIZATION_PROMPT`，把模型返回文本写成 `CompactionSummary` 用户项。Chat Completions 不发送该字段，也不自动回退。普通请求中的工具调用和 reasoning 仍属于 `input` 历史项；本地手动压缩请求不提供工具定义，system 指令通过 `instructions` 传入。
 2. Codex 会规范化历史：为缺少 output 的 function call 补 `aborted`，清理孤立 output，按模型 `input_modalities` 删除不支持的图片和音频，并对工具输出做语义化截断。
 3. 模型能力不是由客户端猜测。官方模型元数据至少涉及 `default_reasoning_level`、`supported_reasoning_levels`、`input_modalities`、`truncation_policy`、`context_window`、`max_context_window`、`auto_compact_token_limit` 和 `effective_context_window_percent`。
 4. 有效上下文窗口默认按原窗口的 95% 计算，自动压缩默认在原始上下文窗口约 90% 处触发。界面剩余上下文百分比使用官方 TUI 的 12,000 token baseline，而不是用字符数、Base64 字节数或固定几 MiB 猜算。

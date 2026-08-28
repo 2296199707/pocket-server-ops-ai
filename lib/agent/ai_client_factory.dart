@@ -10,6 +10,7 @@ AiChatClient createAiClient({
   required String model,
   String reasoningEffort = 'default',
   List<String>? inputModalities,
+  int? autoCompactTokenLimit,
   http.Client? client,
 }) {
   switch (wireApi) {
@@ -20,6 +21,7 @@ AiChatClient createAiClient({
         model: model,
         reasoningEffort: reasoningEffort,
         inputModalities: inputModalities,
+        autoCompactTokenLimit: autoCompactTokenLimit,
         client: client,
       );
     case 'chat-completions':
