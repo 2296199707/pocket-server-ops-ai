@@ -1083,6 +1083,21 @@
 - 内容：内置文档模块支持开关、Markdown/HTML/TXT 预览和真实 OOXML `.docx` 导出，支持标题、
   段落、列表、表格、粗体、斜体、代码及基础字体颜色；关闭模块不影响普通项目文件读写。
 
+### 2026-08-28：图片模型配置与更新渠道 Beta 1.0.3-beta.24
+
+- 功能与版本提交：`6525af3`；版本：`1.0.3-beta.24+33`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.24-release.apk`。
+- APK 大小：`77,832,975` bytes；SHA-256
+  `a8d8617d0a9c0f7f60a7650b8f736791436d26c338bdc096d5c58ff12ee202a2`。
+- 发布前验证：全量测试 187 项通过；`flutter analyze --no-pub` 通过；`git diff --check`
+  通过；release APK 构建通过。Flutter SDK、Gradle 缓存、构建输出和 APK 均位于 `/www`
+  数据盘。
+- 内容：每个供应商可独立配置图片模型，支持从供应商 `/models` 列表发现图片模型，
+  `image.generate` 使用该配置而不接受模型参数；更新检查新增 GitHub Raw 和 jsDelivr CDN
+  渠道，同时保留 GitHub API。静态更新清单位于 `updates/releases.json`。
+- 范围：本次只提交并推送 `beta` 分支，未创建 GitHub Release 或推送 `main`；清单中的 beta.24
+  Release/APK 地址待后续正式创建 Release 后可用。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
