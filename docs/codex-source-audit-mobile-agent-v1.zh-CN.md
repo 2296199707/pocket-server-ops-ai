@@ -26,8 +26,8 @@
 ### 2.2 当前应用
 
 - canonical app：`/www/server-agent/workspace/apps/mobile-agent-v1`；
-- 当前 beta：`1.0.3-beta.19`；
-- 当前基线 commit：`8cc8e0a`（版本提交：`96856a8`）；
+- 当前 beta：`1.0.3-beta.20`；
+- 当前基线 commit：`526b80c`（版本提交：`923b5d5`）；
 - legacy app `/www/server-agent/workspace/apps/mobile` 不属于审查和修改范围；
 - 构建、缓存和 APK 继续使用 `/www` 数据盘路径。
 
@@ -131,7 +131,7 @@
 
 - 已固定 Codex 源码 commit `f5420174dafba153913a3e697f89002c338dfd7e`；
 - 已确认源码快照 checkout 不完整，后续使用 Git object 读取，不把工作区缺失误判为源码缺失；
-- 当前 beta 基线为 `1.0.3-beta.19`，功能 commit `8cc8e0a`，版本 commit `96856a8`；
+- 当前 beta 基线为 `1.0.3-beta.20`，功能 commit `526b80c`，版本 commit `923b5d5`；
 - 上一轮调查中的结论只作为待复核线索，不直接作为本轮最终证据；
 - 建立基线时尚未修改业务代码；后续条目按表格顺序更新状态和结论。
 
@@ -989,6 +989,19 @@
   `92c45c1f3d41d3e2ff9e5e310deb7b59c6f703296b59f32fa3fa16969298547e`。
 - 发布前验证：`flutter analyze` 通过；Agent 控制器和循环定向测试 71 项通过；
   `git diff --check` 通过。构建输出和 APK 均位于 `/www` 数据盘。
+
+### 2026-08-28：Beta 1.0.3-beta.20 发布记录
+
+- 发布内容：统一手机端 iOS 视觉风格，调整对话输入区、消息气泡、状态胶囊、侧栏和
+  服务器仪表盘的表面层级与间距；接入 WFL `wfl_image_provider` 生成并规范化的服务器
+  机架 + AI 星标应用图标。
+- 功能提交：`526b80c`；版本提交：`923b5d5`。
+- 版本：`1.0.3-beta.20+29`；GitHub 标签：`v1.0.3-beta.20`。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.20-release.apk`。
+- APK 校验：`77,324,139` bytes；SHA-256
+  `6f6250e399b724ba8a6e39b0d098990e5899abb3807ed92ff037e2e4db1cda11`。
+- 发布前验证：`flutter analyze` 通过；本轮完整 `flutter test` 164 项通过；
+  `git diff --check` 通过；APK 构建和图标资源检查通过。构建输出和 APK 均位于 `/www` 数据盘。
 
 ## 9. 发现记录模板
 
