@@ -1205,6 +1205,193 @@
   APK 资产状态为 `uploaded`。Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4`。
 
+### 2026-08-29：Codex 子代理源码审查（专项）
+
+#### 调查边界和固定证据
+
+- Codex 仓库：`https://github.com/openai/codex`；本地源码快照：
+  `/www/mobile-agent-tooling/openai-codex-source`。
+- 本专项固定 commit：`6478a751fde8884b2fdc76486fe23175a8e795d4`。
+  稀疏 checkout 中缺失的文件使用 `git show <commit>:<path>` 读取，不能把工作区缺失
+  当作源码不存在。
+- 官方说明：`https://developers.openai.com/codex/agent-configuration/subagents.md`。
+  文档说明了角色、默认模型和并发配置；下面的线程、状态、通信和持久化结论以源码和
+  测试为准。
+- 参考仓库只读，未被修改；本专项随后在 Mobile Agent 中实现了一个明确的首版子集，
+  没有运行完整 Rust 测试套件。源码中的相关测试名称继续作为定向复核入口。
+
+#### 结论先行
+
+Codex 的子代理不是“给模型多加一个 prompt”，而是一个由控制平面管理的独立 agent
+thread。每个子代理有自己的线程、轮次、历史、状态和工具执行上下文；根线程和所有后代
+通过同一个 `AgentControl` 共享代理注册表、执行限制器、预算和部分根级路由状态。父线程
+只接收结构化的状态/邮箱通知或完成摘要，不把子代理的完整中间输出自动塞回父线程上下文。
+
+本版 Mobile Agent 没有复制完整的 Codex app-server，而是把上述控制面能力压缩成适合手机端
+的首版子集：每个子代理使用独立隐藏 `Task` 和独立 `AgentLoop` 历史；每个根对话维护一棵
+内存控制树；父子之间通过协作工具传递短状态和摘要。完整 fork 历史、独立 graph store、
+驻留淘汰和重启后拓扑恢复仍明确不属于本版。
+
+#### V1 和 V2 工具面
+
+证据入口：`codex-rs/core/src/tools/handlers/multi_agents_spec.rs`、
+`multi_agents_v2.rs`、`multi_agents_v2/*.rs`。
+
+| 能力 | Multi-Agent V1 | Multi-Agent V2 | 必须保留的语义 |
+| --- | --- | --- | --- |
+| 创建 | `multi_agent_v1.spawn_agent`，返回 thread id 和可选昵称 | `spawn_agent`，必须提供 `task_name` 和 `message`，返回 canonical task path | 创建前预留容量、路径/昵称；失败时释放预留，不留下半个代理 |
+| 上下文 | 可使用父线程上下文 fork；支持角色/模型相关选项 | `fork_turns` 为 `none`、`all` 或最近 N 轮 | fork 是独立线程历史快照，不是把子代理结果并入父线程实时消息 |
+| 发送消息 | `send_input`，可用 `interrupt=true` 立即改道，否则排队 | `send_message` 只投递邮箱消息，不启动新 turn；`followup_task` 会启动或排队后续 turn | 发送消息和启动轮次不能混成一个 API |
+| 等待 | 指定一个或多个 agent id，等待最终状态并返回状态映射 | 等待共享 mailbox、完成通知或 steer；返回简短摘要和超时信息，不返回子代理完整内容 | wait 是等待信号，不是拉取完整 transcript |
+| 继续/停止 | `resume_agent` 恢复已关闭代理；`close_agent` 关闭目标及开放后代 | `interrupt_agent` 只中断当前 turn，代理保留以便继续消息/任务；树关闭由控制平面处理 | interrupted、closed、completed 不能混为一个状态 |
+| 查询 | 以 agent id 为主 | `list_agents` 可按 canonical task path 前缀过滤 | 查询的是当前根线程树，不是整个进程所有代理 |
+
+V2 的 `wait_agent` 实现位于 `multi_agents_v2/wait.rs`：超时时间按配置的最小/最大值
+校正；mailbox 有消息、收到 steer 或超时才结束。`multi_agents_v2` 的通信构造会区分
+普通消息和新任务，并用 `trigger_turn` 表示是否启动轮次。相关工具 schema 明确禁止把
+V1 的 `items`、`interrupt` 参数带入 V2。
+
+#### 创建、配置继承和上下文 fork
+
+1. `codex-rs/core/src/agent/control/spawn.rs` 的创建流程先计算深度和版本，向共享注册表
+   预留代理数量、路径和昵称，再创建新线程或 fork 线程。线程创建后持久化来源/父线程关系、
+   发出 thread-created 通知，最后投递初始输入。任何中途失败都依靠 reservation 的释放
+   逻辑回收槽位和临时路径。
+2. `multi_agents_common.rs` 的 `build_agent_spawn_config()` 和
+   `build_agent_shared_config()` 从父线程**当前 turn**重建子代理配置，重新写入当前模型、
+   provider、推理强度、developer instructions、cwd、approval policy、permission profile
+   和 sandbox 运行时状态；角色级覆盖是在这之后应用。不能直接复制一份旧 config，否则
+   父线程刚切换供应商、目录或权限时，子代理会携带过期边界。
+3. 模型解析遵循显式 spawn 参数、`[agents]` 默认配置、父线程配置的优先级。没有显式模型
+   时继承父模型；模型改变而没有显式推理强度时使用新模型默认强度，并校验该模型声明的
+   推理能力。service tier 也按根会话规则重新校验。
+4. 完整 fork 前，`spawn_forked_thread()` 会 flush 父 rollout，再读取可证明的模型上下文。
+   它按 `all` 或最近 N 轮截取，过滤临时工具项、推理项、实时项和不应继承的代理通信，
+   同时处理 compaction replacement history、父/子 developer instructions 和 V2 usage hint。
+   最近 N 轮是按 turn 截取，不是按字符随意裁剪。
+5. fork 后子代理拥有独立历史；父代理不会因为子代理执行工具就自动获得全部工具输出。V1
+   通过完成 watcher 向父线程注入完成通知，V2 通过 inter-agent communication/mailbox
+   传回结果。父线程需要时再要求子代理发送摘要或后续任务。
+
+#### 父子关系、持久化和恢复
+
+Codex 将“线程历史”和“父子拓扑”分开保存：
+
+- `codex-rs/agent-graph-store/src/store.rs` 定义了
+  `upsert_thread_spawn_edge`、`set_thread_spawn_edge_status`、直接子节点查询和按深度
+  breadth-first 的后代查询。一个 child 最多有一个持久化 parent，列表顺序要求稳定。
+- `codex-rs/agent-graph-store/src/local.rs` 把上述接口接到 SQLite state runtime；
+  `codex-rs/state/migrations/0021_thread_spawn_edges.sql` 创建
+  `thread_spawn_edges(parent_thread_id, child_thread_id PRIMARY KEY, status)`，并按
+  `(parent_thread_id, status)` 建索引。非 ephemeral 的 thread-spawn 子代理才写入边。
+- 子线程自己的 rollout/history 仍由 thread store 保存。图表只记录拓扑和 open/closed
+  生命周期，不代替 transcript；因此“能查到父子关系”不等于“内存中仍加载了全部线程”。
+- `app-server/README.md` 的 `thread/list` 支持 `parentThreadId` 查询直接子代理和
+  `ancestorThreadId` 查询任意后代；`thread/read` 会返回 `parentThreadId`、角色和昵称。
+  未加载但可恢复的 thread 状态是 `notLoaded`，不能误报为 idle 或运行中。
+- V2 的 `residency.rs` 使用 LRU 管理内存驻留。只有已完成、出错或 interrupted、没有
+  active turn 且 mailbox 没有待处理消息的子代理才可淘汰。淘汰前 flush rollout、正常
+  shutdown、保存 environment selections，再从内存 thread manager 移除；这是卸载，不是
+  删除历史。恢复时从持久化历史重新加载，且遵循已关闭边的状态。
+
+相关状态和恢复结论来自 `control.rs` 的 `persist_thread_spawn_edge_for_source()`、
+`live_thread_spawn_children()`、子树遍历和关闭逻辑，以及 `spawn.rs` 的
+`resume_agent_from_rollout()`。必须区分：
+
+- `interrupt_agent`：当前轮次停下，代理还可以收消息和继续任务；
+- `close_agent`/树关闭：关闭目标及开放后代，后续不能当作普通 live agent 使用；
+- residency eviction：释放内存但保留 rollout 和图边；
+- 应用/管理器重启：只按持久化状态恢复，不能因为有旧任务记录就重复执行有副作用工具。
+
+#### 并发、限制和状态事件
+
+- `agent/registry.rs` 的 `AgentRegistry` 由同一根线程树的所有 `AgentControl` clone 共享，
+  负责子代理总数、canonical path 冲突、昵称和 reservation。它不是每个子代理自己的计数器。
+- `agent/control/execution.rs` 的 `AgentExecutionLimiter` 也按根会话共享；V2 子代理每次
+  active turn 拿到 RAII `AgentExecutionGuard`，turn 结束或异常释放计数。达到容量时拒绝
+  新轮次，而不是静默杀掉另一个正在执行的子代理。
+- V1 深度按配置的最大深度校验；V2 的 task path、目标解析和 root/self 约束由工具处理。等待
+  超时有上下限，路径冲突、无效目标、不能中断 root 或自己都有定向测试。
+- `agent/status.rs` 从事件推导 `PendingInit`、`Running`、`Interrupted`、
+  `Completed(Option<String>)`、`Errored(String)`、`Shutdown`、`NotFound`。不要用“最近一次
+  工具输出”猜测代理状态。
+- `protocol/src/items.rs` 的 `CollabAgentToolCallItem` 携带发送线程、接收线程、模型、
+  推理强度和各代理状态；`SubAgentActivityItem` 携带 activity kind、agent thread id 和
+  canonical path。V2 activity kind 包括 started、interacted、interrupted、completed。
+- `app-server` 公开的 `subAgentActivity` 可能在父 turn 的 `turn/completed` 之后才到达，
+  但读取历史时仍归属于发起它的父 turn。UI 不能收到父 turn 完成就把所有子代理活动清掉。
+  对 parent-owned V2 child，直接 `turn/start`/`turn/steer` 也可能被拒绝，消息应走父代理
+  的协作工具。
+
+#### 对当前 Mobile Agent 的核对
+
+| Codex 要件 | 当前实现证据 | 结论 |
+| --- | --- | --- |
+| 独立 agent thread 和控制树 | `lib/agent/subagents.dart:SubagentTree` 为每个根任务维护子节点；`AppController._createSubagentTree()` 为每个子节点启动独立 `runTask()` 和独立事件历史 | 首版已实现；未复制 Codex 的 app-server thread manager |
+| 根树共享控制器、父子关系和限制 | `SubagentNode` 保存 `parentId`、`rootTaskId`、`depth`；树内统一计算并发和递归限制，子节点只能通过所属树解析 | 首版已实现；没有 Codex canonical agent path |
+| 独立持久化历史 | `AppController._prepareSubagentTask()` 创建隐藏 `Task`；子任务的 `TaskEvent` 独立保存，父任务只记录子代理状态/摘要事件 | 首版已实现；创建参数固定为不 fork 父历史 |
+| 数据库拓扑 | `lib/domain/models.dart:Task` 和 `lib/storage/app_database.dart:onUpgrade` 增加 `isSubagent`、父/根 ID、深度和名称字段 | 部分实现；没有独立 spawn-edge、mailbox 或 residency 表 |
+| 协作通信 | `SubagentTree` 提供 `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`list_agents`、`interrupt_agent`；等待结果只返回状态和最多 1200 字摘要 | 首版已实现；mailbox 只在内存中存在 |
+| 配置继承与凭据边界 | `_prepareSubagentTask()` 从父任务快照继承 provider、模型、推理、工作模式、项目、服务器、目录和审批回调；只保存 provider 引用，不复制 API key、密码或私钥 | 首版已实现；子任务配置变更和独立角色文件暂不支持 |
+| 取消、关闭和迟到操作 | `SubagentTree.close()` 先阻止新操作，再取消子树并等待创建/启动操作；`deleteTask()` 和 `dispose()` 使用关闭流程 | 首版已实现；这是对 Codex 关闭/中断语义的轻量实现 |
+| 重启、驻留和 UI 活动 | 子任务默认隐藏于侧栏，根任务事件显示子代理活动；数据库启动时会恢复任务状态，但不会重建内存控制树或自动重放子任务 | 明确缺口；不作为本版自动恢复能力 |
+
+#### 本版实现边界（已编码）
+
+为了符合“最小编程、稳定优先”，本版只实现以下控制面，不复制整个 Codex app-server：
+
+1. 模型抽屉增加全局子代理设置：继承/指定模型、推理强度、并发线程和递归深度；设置保存于现有 `settings` 表。
+2. 根对话中的 `AgentLoop` 可创建独立隐藏子任务。子任务拥有自己的 provider 请求、工具集合、SSH/本地访问映射和事件历史，不把完整 transcript 注入根任务。
+3. 协作工具区分投递消息、启动后续轮次、等待状态和中断当前轮次；同一子代理启动新轮次前使用 `pending` 占位，避免并发 follow-up 覆盖运行句柄。
+4. 不同根对话可以并发；同一根树共享并发计数。创建过程、父任务停止、删除和应用退出都有取消收敛路径，pending 创建不会在树关闭后启动。
+5. 任务字段迁移同时写入新数据库和 `oldVersion < 13` 的 SQLite 升级路径；旧任务默认作为普通任务读取，子任务由 `isSubagent` 区分。
+
+以下能力留给后续明确需求，不在本版伪装成已支持：完整/最近 N 轮历史 fork、持久化 graph store、mailbox 恢复、residency eviction、子任务独立角色配置、重启后子树自动恢复。
+
+#### 最小验证矩阵和封存规则
+
+本版只覆盖与新增控制面直接相关的不变量，避免把完整 Codex 测试套件搬到手机端：
+
+- 设置序列化、并发上限、递归深度和 sibling task name 冲突；
+- `send_message` 不启动 turn，`followup_task` 在 idle 时启动、运行中排队；
+- wait 的完成/超时、中断和后续轮次，等待结果不携带完整子代理内容；
+- 关闭期间的 pending spawn 不得启动，关闭流程必须等待创建操作收敛；
+- `flutter analyze --no-pub` 和 `test/subagents_test.dart`、`test/app_controller_test.dart`、
+  `test/ui/chat_page_test.dart` 的聚焦测试。
+
+#### 首版落地验证记录（2026-08-29）
+
+- 实现文件：`lib/agent/subagents.dart`、`lib/domain/models.dart`、
+  `lib/storage/app_database.dart`、`lib/app_controller.dart`、`lib/ui/chat_page.dart`、
+  `lib/ui/home_shell.dart`。
+- 定向测试：`test/subagents_test.dart` 6 项通过；`test/app_controller_test.dart` 和
+  `test/ui/chat_page_test.dart` 合计 61 项通过，共 67 项。
+- 静态分析：`/www/mobile-agent-tooling/flutter/bin/flutter analyze --no-pub` 通过。
+- 关闭竞态修复：`SubagentTree.close()` 会先阻止新创建和 follow-up，再等待 pending
+  创建/启动操作与活动轮次收敛；父任务删除和 AppController `dispose()` 都调用该入口。
+- 仍未实现的部分以本节“本版实现边界”为准，后续不得把 Codex 的 graph store、fork
+  历史或重启恢复误报为当前能力。
+
+Codex 对照测试入口固定为：
+
+- `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`：
+  `multi_agent_v2_spawn_requires_task_name`、路径解析、消息/后续任务、wait 不返回完整
+  内容、中断不通知完成、关闭/恢复、深度和超时测试；
+- `codex-rs/core/src/agent/control_tests.rs`：
+  `spawn_agent_creates_thread_and_sends_prompt`、fork 历史清理、
+  `spawn_agent_limit_shared_across_clones`、父子完成通知、子树关闭和重启恢复测试；
+- `codex-rs/core/src/agent/control/residency_tests.rs`：
+  `residency_slot_reservation_unloads_oldest_idle_v2_agent`、
+  `interrupted_v2_agent_is_lost_after_residency_eviction`；
+- `codex-rs/agent-graph-store/src/local.rs`：直接子节点、状态过滤和 breadth-first 后代
+  查询测试。
+
+专项状态：`SA-01` 控制树、`SA-03` 协作工具和基础状态已实现；`SA-02` 仅实现独立历史，
+没有历史 fork；`SA-04` 仅实现任务字段持久化，没有独立拓扑表；`SA-05` 已实现运行期状态
+和关闭收敛，但没有驻留淘汰或重启后子树恢复。只有 Codex 固定 commit 变化、上述 Mobile
+对应实现开始改动、相关定向测试失败，或协议明确改变时，才重新读取同一组源码；普通 UI
+改动、模型名称变化和“想再确认一次”不触发重复调查。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
@@ -1233,3 +1420,32 @@ Mobile 实现：<path>:<symbol 或行号>
 - 新问题必须新增 ID 和记录，禁止覆盖旧结论；完成全部条目后追加一次总表快照，并以
   总表作为后续工作的入口。
 - 每次新增源码读取都必须先关联到一个未完成或重新开启的 ID；没有关联 ID 时停止扩大搜索。
+
+## 11. 2026-08-29：推理强度兜底与子代理供应商链路复核
+
+- 供应商模型目录明确返回 `supported_reasoning_levels`、`reasoningEfforts` 或
+  `reasoning_options` 时，Mobile 只显示该模型声明的值；明确返回空列表仍表示该模型没有
+  可调推理档位。
+- 供应商只返回模型 ID、没有返回推理能力字段时，模型选择和子代理模型选择统一显示
+  `Default / Low / High / Max`。这些是可用性兜底，不会写入模型能力目录；用户选择后才按
+  当前协议发送，旧的显式值仍保留并标记为未确认。
+- DeepSeek 官方文档（`https://api-docs.deepseek.com/guides/thinking_mode`）说明 Chat
+  Completions 格式把思考开关和档位分开：`thinking.type` 控制启用，`reasoning_effort`
+  支持 `low/high/max`。因此 Mobile 对已识别的 DeepSeek 模型在选择档位时
+  同时发送 `thinking: {type: enabled}` 和 `reasoning_effort`；选择历史兼容值 `none` 时只发送
+  `thinking: {type: disabled}`，`default` 不强行覆盖供应商默认值。普通 Chat Completions
+  供应商仍只发送标准 `reasoning_effort`，不增加未声明的 `thinking` 字段。
+- 子代理设置保存在现有 `settings` 表：空 `providerId` 表示跟随当前对话供应商，非空值引用
+  已配置供应商；空模型分别表示继承父模型或使用指定供应商的默认模型。创建子代理时将当前
+  供应商、模型、协议、推理强度和凭据引用解析到独立任务，实际请求走该任务的客户端，不把
+  API Key 写入子代理设置或历史事件。模型抽屉只使用已缓存模型，刷新按钮才请求模型目录。
+
+本轮修复入口：`lib/domain/models.dart:reasoningEffortValuesForModel`、
+`lib/agent/chat_completions_client.dart:ChatCompletionsClient.complete`、
+`lib/ui/chat_page.dart:_selectModelAndReasoning`、
+`lib/app_controller.dart:_prepareSubagentTask`。
+
+复核测试：`test/domain/models_test.dart` 覆盖无能力目录的四项兜底和明确空列表；
+`test/chat_completions_client_test.dart` 覆盖 DeepSeek 开关、档位与
+`reasoning_content` 回放；`test/subagents_test.dart` 覆盖指定供应商、并发和递归边界。
+本节作为当前结论封存；只有这些实现或对应测试变化时才重新读取同一供应商契约。

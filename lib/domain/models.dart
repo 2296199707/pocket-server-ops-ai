@@ -2,8 +2,15 @@ import 'dart:convert';
 
 // `default` is an app-only sentinel: omitting reasoning.effort lets the
 // selected model use its documented default. Explicit values come from the
-// selected model's provider metadata.
+// selected model's provider metadata when available; a small compatibility
+// fallback is shown when the provider exposes no reasoning metadata.
 const defaultReasoningEffort = 'default';
+const genericReasoningEffortValues = <String>['low', 'high', 'max'];
+
+const defaultSubagentMaxConcurrentThreads = 4;
+const defaultSubagentMaxRecursionDepth = 1;
+const subagentMaxConcurrentThreadsRange = (1, 16);
+const subagentMaxRecursionDepthRange = (1, 8);
 
 const wireApiOptions = <String>['responses', 'chat-completions'];
 
@@ -29,6 +36,102 @@ String normalizeContextWindowMode(String? value) {
   return contextWindowModeOptions.contains(value)
       ? value!
       : defaultContextWindowMode;
+}
+
+/// Settings shared by all subagents spawned from a root conversation.
+///
+/// An empty provider id follows the parent conversation's provider. An empty
+/// model follows the parent model when the provider is inherited, or uses the
+/// selected provider's default model when a provider is explicitly selected.
+/// This mirrors Codex's configured subagent defaults without copying secrets
+/// or provider credentials into the setting itself.
+class SubagentSettings {
+  const SubagentSettings({
+    this.providerId = '',
+    this.model = '',
+    this.reasoningEffort = defaultReasoningEffort,
+    this.maxConcurrentThreads = defaultSubagentMaxConcurrentThreads,
+    this.maxRecursionDepth = defaultSubagentMaxRecursionDepth,
+  });
+
+  final String providerId;
+  final String model;
+  final String reasoningEffort;
+  final int maxConcurrentThreads;
+  final int maxRecursionDepth;
+
+  factory SubagentSettings.fromJson(String? value) {
+    if (value == null || value.trim().isEmpty) return const SubagentSettings();
+    try {
+      final decoded = jsonDecode(value);
+      return decoded is Map
+          ? SubagentSettings.fromMap(Map<String, Object?>.from(decoded))
+          : const SubagentSettings();
+    } on FormatException {
+      return const SubagentSettings();
+    }
+  }
+
+  factory SubagentSettings.fromMap(Map<String, Object?> map) {
+    final threads =
+        (_readOptionalInt(
+                  map['maxConcurrentThreads'] ?? map['max_concurrent_threads'],
+                ) ??
+                defaultSubagentMaxConcurrentThreads)
+            .clamp(
+              subagentMaxConcurrentThreadsRange.$1,
+              subagentMaxConcurrentThreadsRange.$2,
+            )
+            .toInt();
+    final depth =
+        (_readOptionalInt(
+                  map['maxRecursionDepth'] ?? map['max_recursion_depth'],
+                ) ??
+                defaultSubagentMaxRecursionDepth)
+            .clamp(
+              subagentMaxRecursionDepthRange.$1,
+              subagentMaxRecursionDepthRange.$2,
+            )
+            .toInt();
+    final model = map['model'];
+    final providerId = map['providerId'] ?? map['provider_id'];
+    final effort = map['reasoningEffort'] ?? map['reasoning_effort'];
+    return SubagentSettings(
+      providerId: providerId is String ? providerId.trim() : '',
+      model: model is String ? model.trim() : '',
+      reasoningEffort: effort is String && effort.trim().isNotEmpty
+          ? effort.trim()
+          : defaultReasoningEffort,
+      maxConcurrentThreads: threads,
+      maxRecursionDepth: depth,
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'providerId': providerId,
+    'model': model,
+    'reasoningEffort': reasoningEffort,
+    'maxConcurrentThreads': maxConcurrentThreads,
+    'maxRecursionDepth': maxRecursionDepth,
+  };
+
+  String toJson() => jsonEncode(toMap());
+
+  SubagentSettings copyWith({
+    String? providerId,
+    String? model,
+    String? reasoningEffort,
+    int? maxConcurrentThreads,
+    int? maxRecursionDepth,
+  }) {
+    return SubagentSettings(
+      providerId: providerId ?? this.providerId,
+      model: model ?? this.model,
+      reasoningEffort: reasoningEffort ?? this.reasoningEffort,
+      maxConcurrentThreads: maxConcurrentThreads ?? this.maxConcurrentThreads,
+      maxRecursionDepth: maxRecursionDepth ?? this.maxRecursionDepth,
+    );
+  }
 }
 
 String wireApiLabel(String value) {
@@ -307,6 +410,7 @@ class ProviderModelMetadata {
     this.autoCompactTokenLimit,
     this.compactionMode = 'auto',
     this.source = 'manual',
+    this.reasoning,
     this.defaultReasoningLevel,
     this.supportedReasoningLevels,
     this.inputModalities,
@@ -328,6 +432,7 @@ class ProviderModelMetadata {
   final int? autoCompactTokenLimit;
   final String compactionMode;
   final String source;
+  final bool? reasoning;
   final String? defaultReasoningLevel;
   final List<ProviderReasoningLevel>? supportedReasoningLevels;
   final List<String>? inputModalities;
@@ -363,6 +468,7 @@ class ProviderModelMetadata {
           (map['compactionMode'] ?? map['compaction_mode']) as String? ??
           'auto',
       source: map['source'] as String? ?? 'manual',
+      reasoning: _readOptionalBool(map['reasoning']),
       defaultReasoningLevel: _readOptionalString(
         map['defaultReasoningLevel'] ??
             map['default_reasoning_level'] ??
@@ -373,7 +479,10 @@ class ProviderModelMetadata {
         map['supportedReasoningLevels'] ??
             map['supported_reasoning_levels'] ??
             map['reasoningEfforts'] ??
-            map['reasoning_efforts'],
+            map['reasoning_efforts'] ??
+            map['reasoningOptions'] ??
+            map['reasoning_options'],
+        reasoning: _readOptionalBool(map['reasoning']),
       ),
       inputModalities: _readOptionalStringList(
         map['inputModalities'] ?? map['input_modalities'],
@@ -414,6 +523,7 @@ class ProviderModelMetadata {
       'autoCompactTokenLimit': autoCompactTokenLimit,
     'compactionMode': compactionMode,
     'source': source,
+    if (reasoning != null) 'reasoning': reasoning,
     if (defaultReasoningLevel != null)
       'defaultReasoningLevel': defaultReasoningLevel,
     if (supportedReasoningLevels != null)
@@ -537,6 +647,7 @@ class ProviderModelMetadata {
           ? remote.compactionMode
           : compactionMode,
       source: remote.source,
+      reasoning: remote.reasoning ?? reasoning,
       defaultReasoningLevel:
           remote.defaultReasoningLevel ?? defaultReasoningLevel,
       supportedReasoningLevels:
@@ -693,12 +804,28 @@ List<String>? _readOptionalStringList(Object? value) {
   ]);
 }
 
-List<ProviderReasoningLevel>? _readOptionalReasoningLevels(Object? value) {
+List<ProviderReasoningLevel>? _readOptionalReasoningLevels(
+  Object? value, {
+  bool? reasoning,
+}) {
+  if (value == null) {
+    return reasoning == false ? const <ProviderReasoningLevel>[] : null;
+  }
   if (value is! List) return null;
   final levels = <ProviderReasoningLevel>[];
   for (final item in value) {
     try {
-      levels.add(ProviderReasoningLevel.fromMap(item));
+      if (item is Map && item['type'] == 'effort' && item['values'] is List) {
+        for (final option in item['values'] as List) {
+          if (option is String && option.isNotEmpty) {
+            levels.add(ProviderReasoningLevel(effort: option));
+          } else if (option is Map) {
+            levels.add(ProviderReasoningLevel.fromMap(option));
+          }
+        }
+      } else {
+        levels.add(ProviderReasoningLevel.fromMap(item));
+      }
     } on FormatException {
       // Ignore malformed entries while retaining the valid catalog entries.
     }
@@ -843,6 +970,12 @@ List<String> reasoningEffortValuesForModel(
         values.add(level.effort);
       }
     }
+  } else if (model.trim().isNotEmpty) {
+    // A normal OpenAI-compatible /models response often returns only IDs.
+    // Keep the picker useful for providers such as DeepSeek/OpenCode until a
+    // richer model catalog is available. An explicit empty list still means
+    // that the provider declared no adjustable reasoning levels.
+    values.addAll(genericReasoningEffortValues);
   }
   if (preserveCurrent != null &&
       preserveCurrent.trim().isNotEmpty &&
@@ -868,6 +1001,11 @@ class Task {
   final String title;
   final String? workingDirectory;
   final String executionMode;
+  final bool isSubagent;
+  final String? parentTaskId;
+  final String? rootTaskId;
+  final int agentDepth;
+  final String? agentName;
   final String status;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -886,6 +1024,11 @@ class Task {
     required this.title,
     required this.workingDirectory,
     required this.executionMode,
+    this.isSubagent = false,
+    this.parentTaskId,
+    this.rootTaskId,
+    this.agentDepth = 0,
+    this.agentName,
     required this.status,
     required this.createdAt,
     required this.updatedAt,
@@ -916,6 +1059,11 @@ class Task {
           : map['executionMode'] == 'auto'
           ? 'auto'
           : 'confirm',
+      isSubagent: map['isSubagent'] == true || map['isSubagent'] == 1,
+      parentTaskId: map['parentTaskId'] as String?,
+      rootTaskId: map['rootTaskId'] as String?,
+      agentDepth: _readOptionalInt(map['agentDepth']) ?? 0,
+      agentName: map['agentName'] as String?,
       status: map['status'] as String,
       createdAt: _readTime(map['createdAt']),
       updatedAt: _readTime(map['updatedAt']),
@@ -936,6 +1084,11 @@ class Task {
     'title': title,
     'workingDirectory': workingDirectory,
     'executionMode': executionMode,
+    'isSubagent': isSubagent,
+    'parentTaskId': parentTaskId,
+    'rootTaskId': rootTaskId,
+    'agentDepth': agentDepth,
+    'agentName': agentName,
     'status': status,
     'createdAt': _writeTime(createdAt),
     'updatedAt': _writeTime(updatedAt),
@@ -954,6 +1107,11 @@ class Task {
     String? title,
     String? workingDirectory,
     String? executionMode,
+    bool? isSubagent,
+    Object? parentTaskId = _taskFieldUnset,
+    Object? rootTaskId = _taskFieldUnset,
+    int? agentDepth,
+    Object? agentName = _taskFieldUnset,
     String? status,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -981,6 +1139,17 @@ class Task {
       title: title ?? this.title,
       workingDirectory: workingDirectory ?? this.workingDirectory,
       executionMode: executionMode ?? this.executionMode,
+      isSubagent: isSubagent ?? this.isSubagent,
+      parentTaskId: identical(parentTaskId, _taskFieldUnset)
+          ? this.parentTaskId
+          : parentTaskId as String?,
+      rootTaskId: identical(rootTaskId, _taskFieldUnset)
+          ? this.rootTaskId
+          : rootTaskId as String?,
+      agentDepth: agentDepth ?? this.agentDepth,
+      agentName: identical(agentName, _taskFieldUnset)
+          ? this.agentName
+          : agentName as String?,
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,

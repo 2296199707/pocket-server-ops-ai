@@ -968,7 +968,11 @@ class AgentForegroundService : Service() {
         val view = overlayView ?: return false
         val params = overlayParams ?: return false
         val screenWidth = resources.displayMetrics.widthPixels
-        return params.x < 0 || params.x + view.width > screenWidth - dp(overlayVisiblePixels)
+        // A fully visible capsule may keep a small margin from the edge. Only
+        // classify it as hidden after part of the window is actually outside
+        // the screen; otherwise a right-side visible capsule is mistaken for
+        // a hidden one and its tap only repeats revealOverlay().
+        return params.x < 0 || params.x + view.width > screenWidth
     }
 
     private fun boundedY(value: Int, viewHeight: Int): Int {

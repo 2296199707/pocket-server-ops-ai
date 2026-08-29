@@ -119,6 +119,45 @@ void main() {
     expect(model.supportedReasoningLevels?.first.description, 'Low');
   });
 
+  test(
+    'parses Models.dev reasoning_options returned by OpenCode gateways',
+    () async {
+      final client = MockClient(
+        (_) async => Response(
+          jsonEncode({
+            'models': [
+              {
+                'slug': 'deepseek-v4-flash',
+                'reasoning': true,
+                'reasoning_options': [
+                  {
+                    'type': 'effort',
+                    'values': ['low', 'high', 'max'],
+                  },
+                ],
+              },
+            ],
+          }),
+          200,
+        ),
+      );
+      addTearDown(client.close);
+
+      final model =
+          (await ProviderConnectionTester(client: client).listModelMetadata(
+            _profile('https://opencode.example/v1'),
+            'secret',
+          )).single;
+
+      expect(model.reasoning, isTrue);
+      expect(model.supportedReasoningLevels?.map((level) => level.effort), [
+        'low',
+        'high',
+        'max',
+      ]);
+    },
+  );
+
   test('falls back to the standard model list when catalog negotiation is rejected', () async {
     var requests = 0;
     final client = MockClient((request) async {

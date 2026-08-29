@@ -190,7 +190,42 @@ void main() {
     );
     expect(reasoningEffortValuesForModel(provider, 'unknown-model'), [
       'default',
+      'low',
+      'high',
+      'max',
     ]);
+
+    const unadvertisedProvider = ProviderProfile(
+      id: 'provider-unadvertised',
+      name: '未声明推理能力的供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-unadvertised',
+      apiKeyRef: 'provider-unadvertised:key',
+      isDefault: false,
+    );
+    expect(
+      reasoningEffortValuesForModel(unadvertisedProvider, 'model-unadvertised'),
+      ['default', 'low', 'high', 'max'],
+    );
+
+    const noReasoningProvider = ProviderProfile(
+      id: 'provider-no-reasoning',
+      name: '无推理供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-no-reasoning',
+      apiKeyRef: 'provider-no-reasoning:key',
+      isDefault: false,
+      modelMetadata: {
+        'model-no-reasoning': ProviderModelMetadata(
+          model: 'model-no-reasoning',
+          supportedReasoningLevels: [],
+        ),
+      },
+    );
+    expect(
+      reasoningEffortValuesForModel(noReasoningProvider, 'model-no-reasoning'),
+      ['default'],
+    );
   });
 
   test('Codex model can switch between default and maximum windows', () {
@@ -380,6 +415,32 @@ void main() {
     expect(restored.truncationPolicy?.limit, 10000);
     expect(restored.toolMode, 'direct');
     expect(restored.compHash, 'comp-123');
+  });
+
+  test('parses Models.dev reasoning_options and explicit reasoning false', () {
+    final metadata = ProviderModelMetadata.fromMap({
+      'model': 'deepseek-v4-flash',
+      'reasoning': true,
+      'reasoning_options': [
+        {
+          'type': 'effort',
+          'values': ['low', 'high', 'max'],
+        },
+      ],
+    });
+
+    expect(metadata.reasoning, isTrue);
+    expect(metadata.supportedReasoningLevels?.map((level) => level.effort), [
+      'low',
+      'high',
+      'max',
+    ]);
+
+    final disabled = ProviderModelMetadata.fromMap({
+      'model': 'plain-model',
+      'reasoning': false,
+    });
+    expect(disabled.supportedReasoningLevels, isEmpty);
   });
 
   test('id-only model catalog does not replace manual capabilities', () {

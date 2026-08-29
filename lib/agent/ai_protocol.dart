@@ -109,6 +109,7 @@ class AiMessage {
     this.toolCalls = const [],
     this.toolCallId,
     this.name,
+    this.reasoningContent,
     this.finishReason,
     this.responsesOutputItems = const [],
     this.usage,
@@ -120,6 +121,10 @@ class AiMessage {
   final List<AiToolCall> toolCalls;
   final String? toolCallId;
   final String? name;
+
+  /// DeepSeek Chat Completions returns this alongside tool calls and requires
+  /// it to be replayed on the next request.
+  final String? reasoningContent;
 
   /// The provider's termination reason. This is kept for AgentLoop decisions
   /// and is intentionally not sent back in the next API request.
@@ -161,6 +166,9 @@ class AiMessage {
     final result = <String, Object?>{'role': role};
     if (content != null) result['content'] = content;
     if (name != null) result['name'] = name;
+    if (reasoningContent != null) {
+      result['reasoning_content'] = reasoningContent;
+    }
     if (toolCallId != null) result['tool_call_id'] = toolCallId;
     if (toolCalls.isNotEmpty) {
       result['tool_calls'] = toolCalls.map((call) => call.toJson()).toList();

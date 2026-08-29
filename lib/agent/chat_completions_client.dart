@@ -49,6 +49,7 @@ class ChatCompletionsClient implements AiChatClient {
     required String apiKey,
     required String model,
     String reasoningEffort = 'default',
+    bool? deepSeekThinking,
     bool stream = true,
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
@@ -70,6 +71,7 @@ class ChatCompletionsClient implements AiChatClient {
       apiKey: apiKey,
       model: model,
       reasoningEffort: reasoningEffort,
+      deepSeekThinking: deepSeekThinking ?? _looksLikeDeepSeek(baseUrl, model),
       stream: stream,
       client: client ?? http.Client(),
       timeout: timeout,
@@ -82,6 +84,7 @@ class ChatCompletionsClient implements AiChatClient {
     required this._apiKey,
     required this.model,
     required this.reasoningEffort,
+    required this.deepSeekThinking,
     required this.stream,
     required this._client,
     required this.timeout,
@@ -92,6 +95,7 @@ class ChatCompletionsClient implements AiChatClient {
   final String _apiKey;
   final String model;
   final String reasoningEffort;
+  final bool deepSeekThinking;
   final bool stream;
   final Duration timeout;
   final int? maxResponseBytes;
@@ -123,7 +127,16 @@ class ChatCompletionsClient implements AiChatClient {
       'messages': _messages(messages),
       'stream': stream,
     };
-    if (reasoningEffort != 'default') {
+    if (deepSeekThinking) {
+      // DeepSeek's OpenAI format separates the thinking-mode switch from its
+      // effort control. The switch alone would silently discard Low/High/Max.
+      if (reasoningEffort == 'none') {
+        requestBody['thinking'] = {'type': 'disabled'};
+      } else if (reasoningEffort != 'default') {
+        requestBody['thinking'] = {'type': 'enabled'};
+        requestBody['reasoning_effort'] = reasoningEffort;
+      }
+    } else if (reasoningEffort != 'default') {
       requestBody['reasoning_effort'] = reasoningEffort;
     }
     if (tools.isNotEmpty) {
@@ -202,6 +215,7 @@ class ChatCompletionsClient implements AiChatClient {
     void Function(String delta)? onContentDelta,
   ) async {
     final content = StringBuffer();
+    final reasoningContent = StringBuffer();
     final toolCalls = <int, _ChatToolCallAccumulator>{};
     final dataLines = <String>[];
     String? finishReason;
@@ -256,6 +270,10 @@ class ChatCompletionsClient implements AiChatClient {
       final deltaMap = Map<String, Object?>.from(delta);
       final text = deltaMap['content'];
       if (text is String) appendText(text);
+      final reasoning = deltaMap['reasoning_content'];
+      if (reasoning is String && reasoning.isNotEmpty) {
+        reasoningContent.write(reasoning);
+      }
       _mergeStreamToolCalls(toolCalls, deltaMap['tool_calls']);
     }
 
@@ -296,6 +314,9 @@ class ChatCompletionsClient implements AiChatClient {
       role: 'assistant',
       content: content.isEmpty ? null : content.toString(),
       toolCalls: calls,
+      reasoningContent: reasoningContent.isEmpty
+          ? null
+          : reasoningContent.toString(),
       finishReason: effectiveFinishReason,
       usage: usage,
     );
@@ -333,6 +354,7 @@ class ChatCompletionsClient implements AiChatClient {
     }
     final messageMap = Map<String, Object?>.from(message);
     final content = _readContent(messageMap['content']);
+    final reasoningContent = messageMap['reasoning_content'];
     final calls = _readToolCalls(messageMap['tool_calls']);
     final rawFinishReason = choice['finish_reason'];
     if (rawFinishReason != null && rawFinishReason is! String) {
@@ -355,6 +377,10 @@ class ChatCompletionsClient implements AiChatClient {
       role: role is String && role.isNotEmpty ? role : 'assistant',
       content: content,
       toolCalls: calls,
+      reasoningContent:
+          reasoningContent is String && reasoningContent.isNotEmpty
+          ? reasoningContent
+          : null,
       finishReason: finishReason,
       usage: _readUsage(decoded['usage']),
     );
@@ -388,6 +414,9 @@ class ChatCompletionsClient implements AiChatClient {
 
     final content = _requestContent(message);
     if (content != null) result['content'] = content;
+    if (message.role == 'assistant' && message.reasoningContent != null) {
+      result['reasoning_content'] = message.reasoningContent;
+    }
     if (message.toolCalls.isNotEmpty) {
       result['tool_calls'] = [
         for (final call in message.toolCalls) _requestToolCall(call),
@@ -651,6 +680,13 @@ class ChatCompletionsClient implements AiChatClient {
   }
 
   void close() => _client.close();
+}
+
+bool _looksLikeDeepSeek(String baseUrl, String model) {
+  final modelName = model.toLowerCase();
+  if (modelName.contains('deepseek')) return true;
+  final host = Uri.tryParse(baseUrl.trim())?.host.toLowerCase() ?? '';
+  return host.contains('deepseek');
 }
 
 class _ChatToolCallAccumulator {

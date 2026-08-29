@@ -102,13 +102,7 @@ class _HomeShellState extends State<HomeShell> {
     final taskId = arguments['taskId'];
     if (call.method == 'overlayTaskOpened') {
       if (taskId is! String || taskId.isEmpty) return null;
-      Task? task;
-      for (final candidate in widget.controller.tasks) {
-        if (candidate.id == taskId) {
-          task = candidate;
-          break;
-        }
-      }
+      final task = widget.controller.taskForId(taskId);
       if (task == null) {
         if (widget.controller.isLoading) _pendingOverlayTaskId = taskId;
         return null;
@@ -131,14 +125,17 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _activateOverlayTask(Task task) {
+    final visibleTask = task.isSubagent && task.rootTaskId != null
+        ? widget.controller.taskForId(task.rootTaskId!) ?? task
+        : task;
     _pendingOverlayTaskId = null;
     if (!mounted) return;
     setState(() {
-      _activeTaskId = task.id;
-      _pendingProjectId = task.projectId;
+      _activeTaskId = visibleTask.id;
+      _pendingProjectId = visibleTask.projectId;
       _selectedIndex = 0;
     });
-    unawaited(widget.controller.setLastConversationTask(task.id));
+    unawaited(widget.controller.setLastConversationTask(visibleTask.id));
   }
 
   void _restoreLastConversation() {

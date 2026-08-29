@@ -237,6 +237,7 @@ class AgentLoop {
               content: assistant.content,
               toolCallId: assistant.toolCallId,
               name: assistant.name,
+              reasoningContent: assistant.reasoningContent,
               finishReason: finishReason,
               responsesOutputItems: assistant.responsesOutputItems,
               usage: assistant.usage,
@@ -261,6 +262,8 @@ class AgentLoop {
                   call.toEventJson(responses: _wireApi(client) == 'responses'),
             )
             .toList(),
+        if (assistantForHistory.reasoningContent != null)
+          'reasoning_content': assistantForHistory.reasoningContent,
         'finish_reason': finishReason,
         'responses_output_items': assistantForHistory.responsesOutputItems,
         'usage': assistantForHistory.usage,
@@ -296,9 +299,10 @@ class AgentLoop {
         );
       }
       if (assistantForHistory.toolCalls.isEmpty) {
-        await _emit(onEvent, 'task.completed', {
-          'text': assistantForHistory.content ?? '',
-        });
+        // The complete assistant text is already stored in the preceding
+        // assistant.completed event. Keep the terminal marker small so a long
+        // reply is not persisted twice.
+        await _emit(onEvent, 'task.completed', const {});
         return AgentResult(
           status: 'completed',
           messages: List.unmodifiable(messages),

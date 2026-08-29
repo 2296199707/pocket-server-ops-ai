@@ -31,6 +31,7 @@ void main() {
                   'message': {
                     'role': 'assistant',
                     'content': '我会执行命令。',
+                    'reasoning_content': '先检查工作目录。',
                     'tool_calls': [
                       {
                         'id': 'call_1',
@@ -86,6 +87,7 @@ void main() {
         },
       });
       expect(response.content, '我会执行命令。');
+      expect(response.reasoningContent, '先检查工作目录。');
       expect(response.finishReason, 'tool_calls');
       expect(response.toolCalls.single.id, 'call_1');
       expect(response.toolCalls.single.callId, 'call_1');
@@ -233,6 +235,59 @@ void main() {
       });
     },
   );
+
+  test('DeepSeek reasoning sends thinking and effort and replays reasoning_content', () async {
+    late http.Request request;
+    final client = ChatCompletionsClient(
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'test-key',
+      model: 'deepseek-reasoner',
+      reasoningEffort: 'high',
+      stream: false,
+      client: MockClient((incoming) async {
+        request = incoming;
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'finish_reason': 'stop',
+                'message': {
+                  'role': 'assistant',
+                  'content': '完成',
+                  'reasoning_content': '已完成分析。',
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [
+        const AiMessage(
+          role: 'assistant',
+          reasoningContent: '上一步分析。',
+          content: '执行工具',
+        ),
+        AiMessage.user('继续'),
+      ],
+      tools: const [],
+    );
+
+    final body = jsonDecode(request.body) as Map<String, Object?>;
+    expect(body['reasoning_effort'], 'high');
+    expect(body['thinking'], {'type': 'enabled'});
+    expect((body['messages'] as List).first, {
+      'role': 'assistant',
+      'content': '执行工具',
+      'reasoning_content': '上一步分析。',
+    });
+    expect(response.reasoningContent, '已完成分析。');
+  });
 
   test(
     'unsupported endpoint fails explicitly without protocol fallback',

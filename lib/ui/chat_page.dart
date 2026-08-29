@@ -79,6 +79,8 @@ class ChatPageState extends State<ChatPage> {
   bool _loadingEarlier = false;
   String? _usageRequestedFor;
   String? _contextRequestedFor;
+  List<TaskEvent>? _presentationSource;
+  List<_EventPresentation>? _presentationCache;
 
   bool get _agentAutoExecute =>
       widget.agentAutoExecute ?? widget.controller.agentAutoExecute;
@@ -115,6 +117,8 @@ class ChatPageState extends State<ChatPage> {
         _reasoningEffortOverride = null;
         _pendingAttachments = const [];
         _contextRequestedFor = null;
+        _presentationSource = null;
+        _presentationCache = null;
       });
       _ensureTaskEvents();
     } else if (_agentAutoExecute !=
@@ -163,6 +167,16 @@ class ChatPageState extends State<ChatPage> {
     );
   }
 
+  List<_EventPresentation> _presentationsFor(List<TaskEvent> events) {
+    if (identical(_presentationSource, events) && _presentationCache != null) {
+      return _presentationCache!;
+    }
+    final presentations = _eventPresentations(events);
+    _presentationSource = events;
+    _presentationCache = presentations;
+    return presentations;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.controller.isLoading) {
@@ -172,13 +186,14 @@ class ChatPageState extends State<ChatPage> {
     final events = task == null
         ? const <TaskEvent>[]
         : widget.controller.eventsFor(task.id);
-    final presentations = _eventPresentations(events);
+    final presentations = _presentationsFor(events);
     final hasEarlier =
         task != null && widget.controller.hasEarlierTaskEvents(task.id);
     final running = task != null && widget.controller.isTaskRunning(task.id);
     final streamingText = task == null
         ? ''
         : widget.controller.streamingAssistantText(task.id);
+    final showStreaming = task != null && (running || streamingText.isNotEmpty);
     final provider = _providerFor(task?.providerId ?? _effectiveProviderId);
     if (provider != null && _usageRequestedFor != provider.id) {
       _usageRequestedFor = provider.id;
@@ -257,12 +272,16 @@ class ChatPageState extends State<ChatPage> {
                         presentations.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : presentations.isEmpty
-                  ? streamingText.isEmpty
+                  ? !showStreaming
                         ? const _EmptyConversation()
-                        : ListView(
+                        : ListView.builder(
                             controller: _scroll,
                             padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-                            children: [_StreamingTile(text: streamingText)],
+                            itemCount: 1,
+                            itemBuilder: (_, _) => _StreamingTile(
+                              controller: widget.controller,
+                              taskId: task.id,
+                            ),
                           )
                   : ListView.builder(
                       controller: _scroll,
@@ -270,7 +289,7 @@ class ChatPageState extends State<ChatPage> {
                       itemCount:
                           presentations.length +
                           (hasEarlier ? 1 : 0) +
-                          (streamingText.isEmpty ? 0 : 1),
+                          (showStreaming ? 1 : 0),
                       itemBuilder: (context, index) {
                         if (hasEarlier && index == 0) {
                           return _LoadEarlierTile(
@@ -280,7 +299,10 @@ class ChatPageState extends State<ChatPage> {
                         }
                         final contentIndex = index - (hasEarlier ? 1 : 0);
                         if (contentIndex == presentations.length) {
-                          return _StreamingTile(text: streamingText);
+                          return _StreamingTile(
+                            controller: widget.controller,
+                            taskId: task!.id,
+                          );
                         }
                         return _EventTile(
                           controller: widget.controller,
@@ -1095,6 +1117,14 @@ class ChatPageState extends State<ChatPage> {
         task?.reasoningEffortOverride ??
         _reasoningEffortOverride ??
         provider.reasoningEffort;
+    var selectedSubagentSettings = widget.controller.subagentSettings;
+    ProviderProfile? providerById(String id) {
+      for (final item in widget.controller.providers) {
+        if (item.id == id) return item;
+      }
+      return null;
+    }
+
     var metadataByModel = <String, ProviderModelMetadata>{
       ...provider.modelMetadata,
     };
@@ -1105,6 +1135,16 @@ class ChatPageState extends State<ChatPage> {
       if (widget.controller.previewMode) ...['demo-model', 'demo-coder'],
       if (selectedModel.trim().isNotEmpty) selectedModel,
     }.toList();
+    var selectedSubagentProviderId = selectedSubagentSettings.providerId.trim();
+    if (selectedSubagentProviderId.isNotEmpty &&
+        providerById(selectedSubagentProviderId) == null) {
+      selectedSubagentProviderId = '';
+      selectedSubagentSettings = selectedSubagentSettings.copyWith(
+        providerId: '',
+        model: '',
+        reasoningEffort: defaultReasoningEffort,
+      );
+    }
 
     final selected = await showModalBottomSheet<_ModelReasoningSelection>(
       context: context,
@@ -1115,6 +1155,7 @@ class ChatPageState extends State<ChatPage> {
         var modelLoadFailed = false;
         var refreshingModels = false;
         var modelsExpanded = false;
+        var subagentExpanded = false;
 
         return StatefulBuilder(
           builder: (context, setSheetState) {
@@ -1133,11 +1174,45 @@ class ChatPageState extends State<ChatPage> {
               selectedModel,
               preserveCurrent: selectedReasoningEffort,
             );
+            final followsParentProvider = selectedSubagentProviderId.isEmpty;
+            final selectedSubagentProvider = followsParentProvider
+                ? provider
+                : providerById(selectedSubagentProviderId) ?? provider;
+            final subagentProviderMetadata =
+                selectedSubagentProvider.id == provider.id
+                ? metadataByModel
+                : selectedSubagentProvider.modelMetadata;
+            final subagentProvider = selectedSubagentProvider.copyWith(
+              modelMetadata: subagentProviderMetadata,
+            );
+            final subagentModel = selectedSubagentSettings.model.trim().isEmpty
+                ? followsParentProvider
+                      ? selectedModel
+                      : subagentProvider.model
+                : selectedSubagentSettings.model;
+            final subagentMetadata = resolveProviderModelMetadata(
+              subagentProvider,
+              subagentModel,
+            );
+            final subagentEffortOptions = reasoningEffortValuesForModel(
+              subagentProvider,
+              subagentModel,
+              preserveCurrent: selectedSubagentSettings.reasoningEffort,
+            );
+            final subagentModels = <String>{
+              if (subagentProvider.model.trim().isNotEmpty)
+                subagentProvider.model,
+              ...subagentProviderMetadata.keys,
+              ...subagentProviderMetadata.values.map(
+                (metadata) => metadata.model,
+              ),
+              if (subagentModel.trim().isNotEmpty) subagentModel,
+            }.toList()..sort();
             String? reasoningSubtitle(String effort) {
               if (effort == defaultReasoningEffort) {
                 final defaultLevel = selectedMetadata?.defaultReasoningLevel;
                 return defaultLevel == null
-                    ? '使用模型默认值，不发送推理参数'
+                    ? '未返回能力列表，提供 Low / High / Max'
                     : '供应商目录默认：${_reasoningMenuLabel(defaultLevel)}';
               }
               for (final level in advertisedReasoningLevels ?? const []) {
@@ -1154,6 +1229,19 @@ class ChatPageState extends State<ChatPage> {
               return advertisedReasoningLevels == null
                   ? '当前设置，供应商未声明此值'
                   : '当前设置，供应商目录未包含此值';
+            }
+
+            String subagentReasoningSubtitle(String effort) {
+              if (effort == defaultReasoningEffort) {
+                final defaultLevel = subagentMetadata?.defaultReasoningLevel;
+                return followsParentProvider &&
+                        selectedSubagentSettings.model.trim().isEmpty
+                    ? '继承父代理当前推理设置'
+                    : defaultLevel == null
+                    ? '未返回能力列表，提供 Low / High / Max'
+                    : '子代理模型默认：${_reasoningMenuLabel(defaultLevel)}';
+              }
+              return '子代理专用推理设置';
             }
 
             Future<void> refreshModels() async {
@@ -1177,6 +1265,8 @@ class ChatPageState extends State<ChatPage> {
                   for (final item in metadata) item.model,
                   if (provider.model.trim().isNotEmpty) provider.model,
                   if (selectedModel.trim().isNotEmpty) selectedModel,
+                  if (selectedSubagentSettings.model.trim().isNotEmpty)
+                    selectedSubagentSettings.model,
                 }.toList();
                 refreshed.sort();
                 setSheetState(() {
@@ -1361,7 +1451,7 @@ class ChatPageState extends State<ChatPage> {
                               if (advertisedReasoningLevels == null) ...[
                                 const SizedBox(height: 4),
                                 Text(
-                                  '供应商未返回当前模型的推理强度列表，仅提供模型默认。',
+                                  '供应商未返回能力列表，提供 Low / High / Max。',
                                   style: Theme.of(context).textTheme.labelSmall
                                       ?.copyWith(
                                         color: colors.onSurfaceVariant,
@@ -1387,6 +1477,220 @@ class ChatPageState extends State<ChatPage> {
                                     () => selectedReasoningEffort = effort,
                                   ),
                                 ),
+                              const SizedBox(height: 12),
+                              const Divider(height: 24),
+                              InkWell(
+                                borderRadius: BorderRadius.circular(12),
+                                onTap: () => setSheetState(
+                                  () => subagentExpanded = !subagentExpanded,
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.account_tree_outlined,
+                                        size: 20,
+                                        color: colors.primary,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              '子代理模型设置',
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .titleSmall
+                                                  ?.copyWith(
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                            ),
+                                            Text(
+                                              '${followsParentProvider ? '跟随 ${provider.name}' : selectedSubagentProvider.name} · '
+                                              '${selectedSubagentSettings.model.trim().isEmpty ? (followsParentProvider ? '继承模型' : '默认模型') : _shortModelName(selectedSubagentSettings.model)} · '
+                                              '${selectedSubagentSettings.maxConcurrentThreads} 线程',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .labelSmall
+                                                  ?.copyWith(
+                                                    color:
+                                                        colors.onSurfaceVariant,
+                                                  ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      Icon(
+                                        subagentExpanded
+                                            ? Icons.expand_less
+                                            : Icons.chevron_right,
+                                        color: colors.onSurfaceVariant,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              if (subagentExpanded) ...[
+                                const SizedBox(height: 8),
+                                const _ModelPickerSectionLabel(
+                                  title: '子代理供应商',
+                                  subtitle: '默认跟随当前对话供应商，可单独指定其他供应商',
+                                ),
+                                const SizedBox(height: 4),
+                                _ModelPickerChoice(
+                                  title: '跟随当前对话（${provider.name}）',
+                                  subtitle: '使用当前对话的模型协议和密钥',
+                                  selected: followsParentProvider,
+                                  onTap: () => setSheetState(() {
+                                    selectedSubagentProviderId = '';
+                                    selectedSubagentSettings =
+                                        selectedSubagentSettings.copyWith(
+                                          providerId: '',
+                                          model: '',
+                                          reasoningEffort:
+                                              defaultReasoningEffort,
+                                        );
+                                  }),
+                                ),
+                                for (final candidate
+                                    in widget.controller.providers)
+                                  _ModelPickerChoice(
+                                    title: candidate.id == provider.id
+                                        ? '${candidate.name}（当前）'
+                                        : candidate.name,
+                                    subtitle: candidate.id == provider.id
+                                        ? '固定使用此供应商'
+                                        : '使用此供应商的模型、协议和密钥',
+                                    selected:
+                                        selectedSubagentProviderId ==
+                                        candidate.id,
+                                    onTap: () => setSheetState(() {
+                                      selectedSubagentProviderId = candidate.id;
+                                      selectedSubagentSettings =
+                                          selectedSubagentSettings.copyWith(
+                                            providerId: candidate.id,
+                                            model: '',
+                                            reasoningEffort:
+                                                defaultReasoningEffort,
+                                          );
+                                    }),
+                                  ),
+                                const SizedBox(height: 10),
+                                _ModelPickerSectionLabel(
+                                  title: '子代理模型',
+                                  subtitle: followsParentProvider
+                                      ? '默认跟随当前对话模型'
+                                      : '${selectedSubagentProvider.name} 的已保存模型',
+                                ),
+                                const SizedBox(height: 4),
+                                _ModelPickerChoice(
+                                  title: followsParentProvider
+                                      ? '继承父代理（${_shortModelName(selectedModel)}）'
+                                      : '供应商默认（${_shortModelName(selectedSubagentProvider.model)}）',
+                                  subtitle: followsParentProvider
+                                      ? '子代理跟随当前对话的模型'
+                                      : '使用所选供应商的默认模型',
+                                  selected: selectedSubagentSettings.model
+                                      .trim()
+                                      .isEmpty,
+                                  onTap: () => setSheetState(
+                                    () => selectedSubagentSettings =
+                                        selectedSubagentSettings.copyWith(
+                                          model: '',
+                                        ),
+                                  ),
+                                ),
+                                for (final model in subagentModels)
+                                  _ModelPickerChoice(
+                                    title: model,
+                                    subtitle:
+                                        model == selectedSubagentProvider.model
+                                        ? '供应商默认模型'
+                                        : null,
+                                    selected:
+                                        selectedSubagentSettings.model
+                                            .trim()
+                                            .isNotEmpty &&
+                                        model == subagentModel,
+                                    onTap: () => setSheetState(
+                                      () => selectedSubagentSettings =
+                                          selectedSubagentSettings.copyWith(
+                                            model:
+                                                !followsParentProvider &&
+                                                    model ==
+                                                        selectedSubagentProvider
+                                                            .model
+                                                ? ''
+                                                : model,
+                                          ),
+                                    ),
+                                  ),
+                                const SizedBox(height: 10),
+                                _ModelPickerSectionLabel(
+                                  title: '子代理推理强度',
+                                  subtitle:
+                                      followsParentProvider &&
+                                          selectedSubagentSettings.model
+                                              .trim()
+                                              .isEmpty
+                                      ? '默认继承父代理'
+                                      : '使用子代理模型的推理参数',
+                                ),
+                                const SizedBox(height: 4),
+                                for (final effort in subagentEffortOptions)
+                                  _ModelPickerChoice(
+                                    title: effort == defaultReasoningEffort
+                                        ? followsParentProvider
+                                              ? '继承父代理'
+                                              : '模型默认'
+                                        : _reasoningMenuLabel(effort),
+                                    subtitle: subagentReasoningSubtitle(effort),
+                                    selected:
+                                        effort ==
+                                        selectedSubagentSettings
+                                            .reasoningEffort,
+                                    onTap: () => setSheetState(
+                                      () => selectedSubagentSettings =
+                                          selectedSubagentSettings.copyWith(
+                                            reasoningEffort: effort,
+                                          ),
+                                    ),
+                                  ),
+                                const SizedBox(height: 8),
+                                _SubagentNumericSetting(
+                                  label: '并发线程',
+                                  value: selectedSubagentSettings
+                                      .maxConcurrentThreads,
+                                  min: subagentMaxConcurrentThreadsRange.$1,
+                                  max: subagentMaxConcurrentThreadsRange.$2,
+                                  onChanged: (value) => setSheetState(
+                                    () => selectedSubagentSettings =
+                                        selectedSubagentSettings.copyWith(
+                                          maxConcurrentThreads: value,
+                                        ),
+                                  ),
+                                ),
+                                _SubagentNumericSetting(
+                                  label: '递归深度',
+                                  value: selectedSubagentSettings
+                                      .maxRecursionDepth,
+                                  min: subagentMaxRecursionDepthRange.$1,
+                                  max: subagentMaxRecursionDepthRange.$2,
+                                  onChanged: (value) => setSheetState(
+                                    () => selectedSubagentSettings =
+                                        selectedSubagentSettings.copyWith(
+                                          maxRecursionDepth: value,
+                                        ),
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -1505,6 +1809,7 @@ class ChatPageState extends State<ChatPage> {
                                 _ModelReasoningSelection(
                                   model: selectedModel,
                                   reasoningEffort: selectedReasoningEffort,
+                                  subagentSettings: selectedSubagentSettings,
                                 ),
                               ),
                               icon: const Icon(Icons.check, size: 18),
@@ -1539,6 +1844,7 @@ class ChatPageState extends State<ChatPage> {
         ? ''
         : selected.reasoningEffort;
     if (task == null) {
+      await widget.controller.setSubagentSettings(selected.subagentSettings);
       setState(() {
         _modelOverride = modelOverride.isEmpty ? null : modelOverride;
         _reasoningEffortOverride = reasoningEffortOverride.isEmpty
@@ -1559,6 +1865,7 @@ class ChatPageState extends State<ChatPage> {
         modelOverride: modelOverride,
         reasoningEffortOverride: reasoningEffortOverride,
       );
+      await widget.controller.setSubagentSettings(selected.subagentSettings);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -1638,11 +1945,12 @@ class ChatPageState extends State<ChatPage> {
         activeTask,
         prompt: prompt,
         attachments: attachments,
-        confirm: (tool, arguments) =>
-            widget.onConfirmTool(activeTask, tool, arguments),
-        onFirstHostKey: (key) => widget.onConfirmHostKey(activeTask, key),
-        onUserInfoRequest: (request) =>
-            widget.onUserInfoRequest(activeTask, request),
+        confirmForTask: (targetTask, tool, arguments) =>
+            widget.onConfirmTool(targetTask, tool, arguments),
+        onFirstHostKeyForTask: (targetTask, key) =>
+            widget.onConfirmHostKey(targetTask, key),
+        onUserInfoRequestForTask: (targetTask, request) =>
+            widget.onUserInfoRequest(targetTask, request),
       );
       if (mounted && sendingGeneration == _sendingGeneration) {
         setState(() => _sending = false);
@@ -2314,6 +2622,53 @@ class _ModelPickerChoice extends StatelessWidget {
   }
 }
 
+class _SubagentNumericSetting extends StatelessWidget {
+  const _SubagentNumericSetting({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final int min;
+  final int max;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+        ),
+        IconButton(
+          tooltip: '减少$label',
+          visualDensity: VisualDensity.compact,
+          onPressed: value <= min ? null : () => onChanged(value - 1),
+          icon: const Icon(Icons.remove_circle_outline, size: 20),
+        ),
+        SizedBox(
+          width: 28,
+          child: Text(
+            '$value',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+        ),
+        IconButton(
+          tooltip: '增加$label',
+          visualDensity: VisualDensity.compact,
+          onPressed: value >= max ? null : () => onChanged(value + 1),
+          icon: const Icon(Icons.add_circle_outline, size: 20),
+        ),
+      ],
+    );
+  }
+}
+
 class _ModelReasoningPill extends StatelessWidget {
   const _ModelReasoningPill({
     required this.model,
@@ -2378,10 +2733,12 @@ class _ModelReasoningSelection {
   const _ModelReasoningSelection({
     required this.model,
     required this.reasoningEffort,
+    required this.subagentSettings,
   });
 
   final String model;
   final String reasoningEffort;
+  final SubagentSettings subagentSettings;
 }
 
 class _ContextStatusDialog extends StatefulWidget {
@@ -3829,6 +4186,8 @@ class _MessageBubble extends StatelessWidget {
     final avatarColor = isUser ? colors.primary : colors.tertiary;
     final content = isUser
         ? SelectableText(text, style: TextStyle(color: colors.onPrimary))
+        : streaming
+        ? Text(text, style: TextStyle(color: colors.onSurface))
         : MarkdownBody(
             data: text,
             selectable: true,
@@ -4054,8 +4413,7 @@ class _ToolEventTile extends StatelessWidget {
             ],
           ),
           children: [
-            if (arguments != null)
-              _ToolDetail(title: '参数', value: _prettyValue(arguments)),
+            if (arguments != null) _ToolDetail(title: '参数', value: arguments),
             if (resultValue is Map &&
                 resultValue['attachment_id'] is String &&
                 resultValue['mime_type'] is String)
@@ -4073,8 +4431,7 @@ class _ToolEventTile extends StatelessWidget {
                       : null,
                 ),
               ),
-            if (result != null)
-              _ToolDetail(title: '结果', value: _prettyValue(resultValue)),
+            if (result != null) _ToolDetail(title: '结果', value: resultValue),
           ],
         ),
       ),
@@ -4156,7 +4513,7 @@ class _ToolDetail extends StatefulWidget {
   const _ToolDetail({required this.title, required this.value});
 
   final String title;
-  final String value;
+  final Object? value;
 
   @override
   State<_ToolDetail> createState() => _ToolDetailState();
@@ -4164,11 +4521,23 @@ class _ToolDetail extends StatefulWidget {
 
 class _ToolDetailState extends State<_ToolDetail> {
   bool _expanded = false;
+  String? _formattedValue;
+
+  @override
+  void didUpdateWidget(covariant _ToolDetail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.value, widget.value)) {
+      _formattedValue = null;
+    }
+  }
 
   bool get _hasMore {
     final collapsedLines = widget.title == '结果' ? 4 : 7;
-    return widget.value.length > 600 ||
-        widget.value.split('\n').length > collapsedLines;
+    final value = widget.value;
+    if (value is String) {
+      return value.length > 600 || value.split('\n').length > collapsedLines;
+    }
+    return value is Map || value is List;
   }
 
   @override
@@ -4178,6 +4547,9 @@ class _ToolDetailState extends State<_ToolDetail> {
     final expandedHeight = (MediaQuery.sizeOf(context).height * 0.42)
         .clamp(160.0, 360.0)
         .toDouble();
+    final value = _expanded
+        ? (_formattedValue ??= _prettyValue(widget.value))
+        : _toolDetailPreview(widget.value);
     return Padding(
       padding: const EdgeInsets.only(top: 5),
       child: Column(
@@ -4203,7 +4575,7 @@ class _ToolDetailState extends State<_ToolDetail> {
               child: _expanded
                   ? SingleChildScrollView(
                       child: SelectableText(
-                        widget.value,
+                        value,
                         style: const TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 9,
@@ -4212,7 +4584,7 @@ class _ToolDetailState extends State<_ToolDetail> {
                       ),
                     )
                   : SelectableText(
-                      widget.value,
+                      value,
                       maxLines: collapsedLines,
                       style: const TextStyle(
                         fontFamily: 'monospace',
@@ -4284,13 +4656,18 @@ class _StatusTile extends StatelessWidget {
 }
 
 class _StreamingTile extends StatelessWidget {
-  const _StreamingTile({required this.text});
+  const _StreamingTile({required this.controller, required this.taskId});
 
-  final String text;
+  final AppController controller;
+  final String taskId;
 
   @override
   Widget build(BuildContext context) {
-    return _MessageBubble(text: text, isUser: false, streaming: true);
+    return ValueListenableBuilder<String>(
+      valueListenable: controller.streamingAssistantTextListenable(taskId),
+      builder: (context, text, _) =>
+          _MessageBubble(text: text, isUser: false, streaming: true),
+    );
   }
 }
 
@@ -4322,6 +4699,13 @@ String _prettyValue(Object? value) {
   } catch (_) {
     return '$value';
   }
+}
+
+String _toolDetailPreview(Object? value) {
+  if (value is String) return value;
+  if (value is Map) return '{${value.length} 项，展开查看完整内容}';
+  if (value is List) return '[${value.length} 项，展开查看完整内容]';
+  return '$value';
 }
 
 String _eventBody(TaskEvent event) {

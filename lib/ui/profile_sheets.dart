@@ -333,6 +333,13 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     preserveCurrent: _reasoningEffort,
   );
 
+  String get _reasoningHelperText {
+    final levels = _selectedModelMetadata?.supportedReasoningLevels;
+    if (levels == null) return '供应商未返回能力列表，提供 Default / Low / High / Max';
+    if (levels.isEmpty) return '供应商声明当前模型没有可调推理强度';
+    return '按当前模型返回的 supported_reasoning_levels 显示';
+  }
+
   @override
   Widget build(BuildContext context) {
     return _SheetFrame(
@@ -480,10 +487,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
               initialValue: _reasoningEffort,
               decoration: InputDecoration(
                 labelText: '默认推理强度',
-                helperText:
-                    _selectedModelMetadata?.supportedReasoningLevels == null
-                    ? '供应商未返回当前模型的推理强度列表，仅可使用模型默认'
-                    : '按当前模型返回的 supported_reasoning_levels 显示',
+                helperText: _reasoningHelperText,
               ),
               items: [
                 for (final effort in _reasoningOptions)

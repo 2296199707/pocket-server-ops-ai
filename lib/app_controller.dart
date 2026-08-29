@@ -17,6 +17,7 @@ import 'agent/auto_review.dart';
 import 'agent/openai_compatible_client.dart';
 import 'agent/remote_instructions.dart';
 import 'agent/remote_write_queue.dart';
+import 'agent/subagents.dart';
 import 'agent/tool_display.dart';
 import 'credentials/credential_store.dart';
 import 'domain/models.dart';
@@ -110,6 +111,7 @@ class AppController extends ChangeNotifier {
   final Map<String, AgentCancellation> _runningTasks = {};
   final Map<String, Future<AgentResult>> _taskRuns = {};
   final Map<String, String> _taskRunIds = {};
+  final Map<String, SubagentTree> _subagentTrees = {};
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
@@ -126,6 +128,9 @@ class AppController extends ChangeNotifier {
   final Set<String> _loadedTaskEvents = {};
   final Map<String, bool> _hasEarlierTaskEvents = {};
   final Map<String, String> _streamingAssistantText = {};
+  final Map<String, StringBuffer> _streamingAssistantBuffers = {};
+  final Map<String, ValueNotifier<String>> _streamingAssistantNotifiers = {};
+  final Map<String, Timer> _streamingAssistantFlushes = {};
   final Map<String, ProviderUsageSnapshot> _providerUsages = {};
   final Map<String, Future<ProviderUsageSnapshot>> _providerUsageLoads = {};
   final Map<String, String> _imageModels = {};
@@ -151,6 +156,7 @@ class AppController extends ChangeNotifier {
   double _floatingCapsuleScale = 1.0;
   double _floatingCapsuleLengthScale = 1.0;
   bool _documentModuleEnabled = true;
+  SubagentSettings _subagentSettings = const SubagentSettings();
   String? _imageProviderId;
   String? _lastDashboardServerId;
   String? _lastConversationTaskId;
@@ -162,13 +168,15 @@ class AppController extends ChangeNotifier {
   List<ServerProfile> get servers => List.unmodifiable(_servers);
   List<ProviderProfile> get providers => List.unmodifiable(_providers);
   List<Project> get projects => List.unmodifiable(_projects);
-  List<Task> get tasks => List.unmodifiable(_tasks);
+  List<Task> get tasks =>
+      List.unmodifiable(_tasks.where((task) => !task.isSubagent));
   bool get agentAutoExecute => _agentAutoExecute;
   bool get betaUpdatesEnabled => _betaUpdatesEnabled;
   bool get floatingCapsuleEnabled => _floatingCapsuleEnabled;
   double get floatingCapsuleScale => _floatingCapsuleScale;
   double get floatingCapsuleLengthScale => _floatingCapsuleLengthScale;
   bool get documentModuleEnabled => _documentModuleEnabled;
+  SubagentSettings get subagentSettings => _subagentSettings;
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
@@ -255,12 +263,29 @@ class AppController extends ChangeNotifier {
 
   bool isTaskRunning(String taskId) => _runningTasks.containsKey(taskId);
 
+  Task? taskForId(String taskId) {
+    for (final task in _tasks) {
+      if (task.id == taskId) return task;
+    }
+    return null;
+  }
+
+  bool hasActiveSubagents(String rootTaskId) {
+    return _subagentTrees[rootTaskId]?.hasActiveAgents ?? false;
+  }
+
+  List<SubagentNode> subagentsFor(String rootTaskId) {
+    return List.unmodifiable(_subagentTrees[rootTaskId]?.agents ?? const []);
+  }
+
   bool isTaskCompacting(String taskId) => _taskCompactions.containsKey(taskId);
 
   String? activeTurnIdFor(String taskId) => _taskRunIds[taskId];
 
   List<TaskEvent> eventsFor(String taskId) {
-    return List.unmodifiable(_events[taskId] ?? const <TaskEvent>[]);
+    // Event lists are replaced with unmodifiable lists whenever they change.
+    // Reusing the same instance lets the chat UI cache its presentation work.
+    return _events[taskId] ?? const <TaskEvent>[];
   }
 
   bool taskEventsLoaded(String taskId) => _loadedTaskEvents.contains(taskId);
@@ -337,6 +362,51 @@ class AppController extends ChangeNotifier {
 
   String streamingAssistantText(String taskId) {
     return _streamingAssistantText[taskId] ?? '';
+  }
+
+  ValueListenable<String> streamingAssistantTextListenable(String taskId) {
+    return _streamingAssistantNotifiers.putIfAbsent(
+      taskId,
+      () => ValueNotifier(_streamingAssistantText[taskId] ?? ''),
+    );
+  }
+
+  void _appendStreamingAssistantText(String taskId, String delta) {
+    if (_disposed || delta.isEmpty) return;
+    final buffer = _streamingAssistantBuffers.putIfAbsent(
+      taskId,
+      () => StringBuffer(_streamingAssistantText[taskId] ?? ''),
+    );
+    buffer.write(delta);
+    if (_streamingAssistantFlushes.containsKey(taskId)) return;
+    _streamingAssistantFlushes[taskId] = Timer(
+      const Duration(milliseconds: 32),
+      () {
+        _streamingAssistantFlushes.remove(taskId);
+        _flushStreamingAssistantText(taskId);
+      },
+    );
+  }
+
+  void _flushStreamingAssistantText(String taskId) {
+    if (_disposed) return;
+    final current = _streamingAssistantBuffers[taskId];
+    if (current == null) return;
+    final text = current.toString();
+    if (_streamingAssistantText[taskId] == text) return;
+    _streamingAssistantText[taskId] = text;
+    final notifier = _streamingAssistantNotifiers[taskId];
+    if (notifier != null && notifier.value != text) notifier.value = text;
+  }
+
+  void _clearStreamingAssistantText(String taskId) {
+    _streamingAssistantFlushes.remove(taskId)?.cancel();
+    _flushStreamingAssistantText(taskId);
+    _streamingAssistantBuffers.remove(taskId);
+    _streamingAssistantText.remove(taskId);
+    if (_disposed) return;
+    final notifier = _streamingAssistantNotifiers[taskId];
+    if (notifier != null && notifier.value.isNotEmpty) notifier.value = '';
   }
 
   Future<void> load() {
@@ -436,6 +506,9 @@ class AppController extends ChangeNotifier {
                 1.0)
             .clamp(0.85, 1.15)
             .toDouble();
+    _subagentSettings = SubagentSettings.fromJson(
+      await _database.readSetting(_subagentSettingsSetting),
+    );
     final storedTasks = await _database.loadTasks();
     final eventsByTask = <String, List<TaskEvent>>{};
 
@@ -838,6 +911,12 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
+  Future<void> setSubagentSettings(SubagentSettings settings) async {
+    await _database.writeSetting(_subagentSettingsSetting, settings.toJson());
+    _subagentSettings = settings;
+    _notify();
+  }
+
   Future<void> setImageProviderId(String? providerId) async {
     final value = providerId?.trim();
     if (value != null &&
@@ -1184,6 +1263,27 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> deleteTask(Task task) async {
+    if (!task.isSubagent) {
+      final tree = _subagentTrees[task.id];
+      final treeClose = tree?.close();
+      final rootRun = _taskRuns[task.id];
+      if (rootRun != null) {
+        stopTask(task.id);
+        try {
+          await rootRun;
+        } catch (_) {
+          // The task is being deleted; its final error is no longer actionable.
+        }
+      }
+      await treeClose;
+      final descendants = _tasks
+          .where((item) => item.rootTaskId == task.id)
+          .toList(growable: false);
+      for (final child in descendants) {
+        await deleteTask(child);
+      }
+      _subagentTrees.remove(task.id);
+    }
     final run = _taskRuns[task.id];
     if (run != null) {
       stopTask(task.id);
@@ -1204,7 +1304,7 @@ class AppController extends ChangeNotifier {
     final statusTail = _taskStatusTails[task.id];
     if (statusTail != null) await statusTail;
     _invalidateTaskContextUsage(task.id);
-    _streamingAssistantText.remove(task.id);
+    _disposeStreamingAssistantState(task.id);
     await _database.deleteTask(task.id);
     if (_lastConversationTaskId == task.id) {
       await setLastConversationTask(null);
@@ -1496,8 +1596,17 @@ class AppController extends ChangeNotifier {
     List<AiAttachment> attachments = const [],
     Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
     confirm,
+    Future<bool> Function(
+      Task task,
+      AgentTool tool,
+      Map<String, Object?> arguments,
+    )?
+    confirmForTask,
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FutureOr<bool> Function(Task task, SshHostKey key)? onFirstHostKeyForTask,
     SshUserInfoHandler? onUserInfoRequest,
+    FutureOr<List<String>?> Function(Task task, SshUserInfoRequest request)?
+    onUserInfoRequestForTask,
   }) async {
     if (_taskRuns.containsKey(task.id)) {
       throw StateError('任务正在运行');
@@ -1513,8 +1622,11 @@ class AppController extends ChangeNotifier {
       prompt: prompt,
       attachments: attachments,
       confirm: confirm,
+      confirmForTask: confirmForTask,
       onFirstHostKey: onFirstHostKey,
+      onFirstHostKeyForTask: onFirstHostKeyForTask,
       onUserInfoRequest: onUserInfoRequest,
+      onUserInfoRequestForTask: onUserInfoRequestForTask,
     );
     _taskRuns[task.id] = future;
     unawaited(
@@ -1535,8 +1647,17 @@ class AppController extends ChangeNotifier {
     required List<AiAttachment> attachments,
     Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
     confirm,
+    Future<bool> Function(
+      Task task,
+      AgentTool tool,
+      Map<String, Object?> arguments,
+    )?
+    confirmForTask,
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FutureOr<bool> Function(Task task, SshHostKey key)? onFirstHostKeyForTask,
     SshUserInfoHandler? onUserInfoRequest,
+    FutureOr<List<String>?> Function(Task task, SshUserInfoRequest request)?
+    onUserInfoRequestForTask,
   }) async {
     Future<TaskEvent> appendTurnEvent(
       String type,
@@ -1561,7 +1682,7 @@ class AppController extends ChangeNotifier {
     }
     final cancellation = AgentCancellation();
     _runningTasks[task.id] = cancellation;
-    _streamingAssistantText.remove(task.id);
+    _clearStreamingAssistantText(task.id);
     _notify();
     var previousEvents = const <TaskEvent>[];
     var requestAttachments = attachments;
@@ -1615,12 +1736,15 @@ class AppController extends ChangeNotifier {
     }
 
     Future<bool> Function(AgentTool, Map<String, Object?>)? waitingConfirm;
-    if (confirm != null) {
+    final confirmForCurrentTask = confirmForTask == null
+        ? confirm
+        : (tool, arguments) => confirmForTask(task, tool, arguments);
+    if (confirmForCurrentTask != null) {
       waitingConfirm = (tool, arguments) async {
         await markTaskWaiting();
         try {
           if (cancellation.isCancelled) return false;
-          return await confirm(tool, arguments);
+          return await confirmForCurrentTask(tool, arguments);
         } finally {
           await restoreTaskAfterWaiting();
         }
@@ -1628,12 +1752,15 @@ class AppController extends ChangeNotifier {
     }
 
     FutureOr<bool> Function(SshHostKey)? waitingHostKey;
-    if (onFirstHostKey != null) {
+    final onFirstHostKeyForCurrentTask = onFirstHostKeyForTask == null
+        ? onFirstHostKey
+        : (key) => onFirstHostKeyForTask(task, key);
+    if (onFirstHostKeyForCurrentTask != null) {
       waitingHostKey = (key) async {
         await markTaskWaiting();
         try {
           if (cancellation.isCancelled) return false;
-          return await onFirstHostKey(key);
+          return await onFirstHostKeyForCurrentTask(key);
         } finally {
           await restoreTaskAfterWaiting();
         }
@@ -1641,12 +1768,15 @@ class AppController extends ChangeNotifier {
     }
 
     SshUserInfoHandler? waitingUserInfo;
-    if (onUserInfoRequest != null) {
+    final onUserInfoRequestForCurrentTask = onUserInfoRequestForTask == null
+        ? onUserInfoRequest
+        : (request) => onUserInfoRequestForTask(task, request);
+    if (onUserInfoRequestForCurrentTask != null) {
       waitingUserInfo = (request) async {
         await markTaskWaiting();
         try {
           if (cancellation.isCancelled) return null;
-          return await onUserInfoRequest(request);
+          return await onUserInfoRequestForCurrentTask(request);
         } finally {
           await restoreTaskAfterWaiting();
         }
@@ -1795,6 +1925,28 @@ class AppController extends ChangeNotifier {
                 '$systemPrompt\n\n--- project-doc ---\n\n$instructions';
           }
         }
+        final rootTaskId = task.rootTaskId ?? task.id;
+        final rootTask = _tasks.firstWhere(
+          (item) => item.id == rootTaskId,
+          orElse: () => task,
+        );
+        final existingSubagentTree = _subagentTrees[rootTaskId];
+        final tree =
+            existingSubagentTree ??
+            _createSubagentTree(
+              rootTask,
+              confirm: confirm,
+              confirmForTask: confirmForTask,
+              onFirstHostKey: onFirstHostKey,
+              onFirstHostKeyForTask: onFirstHostKeyForTask,
+              onUserInfoRequest: onUserInfoRequest,
+              onUserInfoRequestForTask: onUserInfoRequestForTask,
+            );
+        if (existingSubagentTree != null) {
+          tree.updateSettings(_subagentSettings);
+        }
+        _subagentTrees[rootTaskId] = tree;
+        tools.addAll(tree.toolsFor(task.id));
         if (tools.isEmpty) {
           throw StateError('Agent 没有可用的项目或服务器工具');
         }
@@ -1868,9 +2020,7 @@ class AppController extends ChangeNotifier {
             if (_taskRunIds[task.id] == turnId &&
                 delta is String &&
                 delta.isNotEmpty) {
-              _streamingAssistantText[task.id] =
-                  '${_streamingAssistantText[task.id] ?? ''}$delta';
-              _notify();
+              _appendStreamingAssistantText(task.id, delta);
             }
             return Future.value();
           }
@@ -1909,7 +2059,7 @@ class AppController extends ChangeNotifier {
             // the history. This matters for an assistant message that also
             // contains tool calls: the tools may start immediately after it.
             if (clearStreamingAfterPersist && _taskRunIds[task.id] == turnId) {
-              _streamingAssistantText.remove(task.id);
+              _clearStreamingAssistantText(task.id);
               _notify();
             }
           });
@@ -1960,7 +2110,7 @@ class AppController extends ChangeNotifier {
       return AgentResult(status: status, messages: const [], error: error);
     } finally {
       if (_taskRunIds[task.id] == turnId) {
-        _streamingAssistantText.remove(task.id);
+        _clearStreamingAssistantText(task.id);
       }
       if (client != null) closeAiClient(client);
       if (task.mode == 'agent') {
@@ -2004,6 +2154,180 @@ class AppController extends ChangeNotifier {
     _runningTasks.remove(taskId);
     _taskProgressLabels.remove(taskId);
     _notify();
+  }
+
+  void _disposeStreamingAssistantState(String taskId) {
+    _streamingAssistantFlushes.remove(taskId)?.cancel();
+    _streamingAssistantBuffers.remove(taskId);
+    _streamingAssistantText.remove(taskId);
+    _streamingAssistantNotifiers.remove(taskId)?.dispose();
+  }
+
+  SubagentTree _createSubagentTree(
+    Task rootTask, {
+    Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
+    confirm,
+    Future<bool> Function(
+      Task task,
+      AgentTool tool,
+      Map<String, Object?> arguments,
+    )?
+    confirmForTask,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FutureOr<bool> Function(Task task, SshHostKey key)? onFirstHostKeyForTask,
+    SshUserInfoHandler? onUserInfoRequest,
+    FutureOr<List<String>?> Function(Task task, SshUserInfoRequest request)?
+    onUserInfoRequestForTask,
+  }) {
+    final childConfirmForTask =
+        confirmForTask ??
+        (confirm == null
+            ? null
+            : (Task task, AgentTool tool, Map<String, Object?> arguments) =>
+                  confirm(tool, arguments));
+    final childHostKeyForTask =
+        onFirstHostKeyForTask ??
+        (onFirstHostKey == null
+            ? null
+            : (Task task, SshHostKey key) => onFirstHostKey(key));
+    final childUserInfoForTask =
+        onUserInfoRequestForTask ??
+        (onUserInfoRequest == null
+            ? null
+            : (Task task, SshUserInfoRequest request) =>
+                  onUserInfoRequest(request));
+
+    return SubagentTree(
+      rootTaskId: rootTask.id,
+      settings: _subagentSettings,
+      prepare: (node, {required followup}) =>
+          _prepareSubagentTask(rootTask, node, followup: followup),
+      start: (node, prompt) {
+        final child = _tasks.firstWhere((task) => task.id == node.id);
+        return runTask(
+          child,
+          prompt: prompt,
+          confirmForTask: childConfirmForTask,
+          onFirstHostKeyForTask: childHostKeyForTask,
+          onUserInfoRequestForTask: childUserInfoForTask,
+        );
+      },
+      onEvent: _recordSubagentEvent,
+      interrupt: _interruptSubagentTask,
+    );
+  }
+
+  Future<void> _interruptSubagentTask(SubagentNode node) async {
+    if (_runningTasks.containsKey(node.id)) {
+      stopTask(node.id);
+      return;
+    }
+    final task = taskForId(node.id);
+    if (task == null || _isTerminalTaskStatus(task.status)) return;
+    try {
+      await updateTaskStatus(node.id, 'cancelled');
+    } catch (_) {
+      // The parent may be deleting the task at the same time.
+    }
+  }
+
+  Future<void> _prepareSubagentTask(
+    Task rootTask,
+    SubagentNode node, {
+    required bool followup,
+  }) async {
+    final existingIndex = _tasks.indexWhere((task) => task.id == node.id);
+    if (followup) {
+      if (existingIndex < 0) throw StateError('子代理任务不存在');
+      return;
+    }
+    if (existingIndex >= 0) throw StateError('子代理任务 ID 已存在');
+    final parent = _tasks.firstWhere(
+      (task) => task.id == node.parentId,
+      orElse: () => rootTask,
+    );
+    final provider = node.providerId == null
+        ? _providerForTask(parent)
+        : _providerForOptionalId(node.providerId) ??
+              (throw StateError('子代理供应商不存在'));
+    final inheritsParentModel = node.providerId == null && node.model == null;
+    final model =
+        node.model ??
+        (node.providerId == null
+            ? _modelForTask(parent, provider)
+            : provider.model);
+    if (model.trim().isEmpty) {
+      throw StateError('子代理供应商未配置模型，请先选择子代理模型');
+    }
+    final reasoning =
+        node.reasoningEffort ??
+        (inheritsParentModel
+            ? parent.reasoningEffortOverride ?? provider.reasoningEffort
+            : provider.reasoningEffort);
+    final normalizedReasoning = reasoning == defaultReasoningEffort
+        ? null
+        : _normalizeOptionalValue(reasoning);
+    ServerProfile? server;
+    for (final value in _servers) {
+      if (value.id == parent.serverId) {
+        server = value;
+        break;
+      }
+    }
+    final workingDirectory =
+        parent.workingDirectory ?? server?.defaultWorkingDirectory;
+    final now = DateTime.now().toUtc();
+    final child = Task(
+      id: node.id,
+      mode: 'agent',
+      workMode: parent.effectiveWorkMode,
+      projectId: parent.projectId,
+      serverId: parent.serverId,
+      providerId: provider.id,
+      reviewProviderId: parent.reviewProviderId,
+      reviewModelOverride: parent.reviewModelOverride,
+      modelOverride: model.isEmpty ? null : model,
+      reasoningEffortOverride: normalizedReasoning,
+      title: '${rootTask.title} · ${node.taskName}',
+      workingDirectory: workingDirectory,
+      executionMode: parent.executionMode,
+      isSubagent: true,
+      parentTaskId: node.parentId,
+      rootTaskId: node.rootTaskId,
+      agentDepth: node.depth,
+      agentName: node.taskName,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    );
+    await _database.saveTask(child);
+    final parentAccess = _localAccess[parent.id];
+    if (parentAccess != null) _localAccess[child.id] = parentAccess;
+    _tasks = [child, ..._tasks];
+    _events = {..._events, child.id: const <TaskEvent>[]};
+    _loadedTaskEvents.add(child.id);
+    _hasEarlierTaskEvents[child.id] = false;
+    _notify();
+  }
+
+  Future<void> _recordSubagentEvent(
+    SubagentNode node,
+    String type,
+    Map<String, Object?> payload,
+  ) {
+    final parentTurnId = _taskRunIds[node.rootTaskId];
+    return appendTaskEvent(
+      taskId: node.rootTaskId,
+      type: type,
+      payload: {
+        'agent_id': node.id,
+        'parent_task_id': node.parentId,
+        'root_task_id': node.rootTaskId,
+        'agent_depth': node.depth,
+        ...?(parentTurnId == null ? null : {'parent_turn_id': parentTurnId}),
+        ...payload,
+      },
+    ).then<void>((_) {});
   }
 
   List<AgentTool> _serializeRemoteWrites(
@@ -2123,6 +2447,17 @@ class AppController extends ChangeNotifier {
     final turnId = _taskRunIds[taskId];
     if (expectedTurnId != null && turnId != expectedTurnId) return;
     cancellation.cancel();
+    Task? task;
+    for (final item in _tasks) {
+      if (item.id == taskId) {
+        task = item;
+        break;
+      }
+    }
+    if (task != null && task.rootTaskId == null) {
+      final tree = _subagentTrees[taskId];
+      if (tree != null) unawaited(tree.cancelAll());
+    }
     unawaited(updateTaskStatus(taskId, 'stopping', turnId: turnId));
     unawaited(_recordCancellationRequest(taskId, turnId));
     _notify();
@@ -3589,6 +3924,14 @@ class AppController extends ChangeNotifier {
     }
     await _database.writeSetting(_imageModelSettingKey(profile.id), '');
     _imageModels.remove(profile.id);
+    if (_subagentSettings.providerId == profile.id) {
+      const reset = SubagentSettings();
+      await _database.writeSetting(_subagentSettingsSetting, reset.toJson());
+      _subagentSettings = reset;
+      for (final tree in _subagentTrees.values) {
+        tree.updateSettings(reset);
+      }
+    }
     _notify();
   }
 
@@ -4141,6 +4484,14 @@ class AppController extends ChangeNotifier {
         'copy a binary file.',
       );
     }
+    final subagentScope = task.mode == 'agent'
+        ? 'You may delegate independent, bounded work with spawn_agent. Each '
+              'child has its own history and the same selected work scope. '
+              'Use wait_agent when you need a result; do not assume a child '
+              'finished just because it was created. Use list_agents for '
+              'status and keep the parent response focused on the requested '
+              'outcome.'
+        : '';
     return 'You are an autonomous coding and operations agent running on a '
         'phone. Work until the request is complete: inspect state, make '
         'changes, and verify the result. Before the first tool call, for any '
@@ -4152,6 +4503,7 @@ class AppController extends ChangeNotifier {
         'a phase finishes or the next action changes; do not stay silent until '
         'all tool calls finish. These updates are commentary, not the final '
         'answer. Do not narrate every trivial command. ${scopes.join(' ')} '
+        '$subagentScope '
         'Never claim success without checking the result. A tool call that '
         'writes local or server state may require confirmation. Any '
         'long-running server process still running when this turn ends will '
@@ -4197,7 +4549,7 @@ class AppController extends ChangeNotifier {
     await appendTaskEvent(
       taskId: task.id,
       type: 'task.completed',
-      payload: {'turn_id': turnId, 'text': text},
+      payload: {'turn_id': turnId},
     );
     await updateTaskStatus(task.id, 'completed', turnId: turnId);
     return AgentResult(
@@ -4281,6 +4633,9 @@ class AppController extends ChangeNotifier {
               role: 'assistant',
               content: text is String ? text : '',
               toolCalls: normalizedCalls,
+              reasoningContent: event.payload['reasoning_content'] is String
+                  ? event.payload['reasoning_content'] as String
+                  : null,
               finishReason: event.payload['finish_reason'] is String
                   ? event.payload['finish_reason'] as String
                   : null,
@@ -4353,6 +4708,7 @@ class AppController extends ChangeNotifier {
             messages[index] = AiMessage(
               role: assistant.role,
               content: assistant.content,
+              reasoningContent: assistant.reasoningContent,
               toolCalls: [
                 ...assistant.toolCalls,
                 AiToolCall(
@@ -4474,6 +4830,7 @@ class AppController extends ChangeNotifier {
         toolCalls: message.toolCalls,
         toolCallId: message.toolCallId,
         name: message.name,
+        reasoningContent: message.reasoningContent,
         finishReason: message.finishReason,
         responsesOutputItems: message.responsesOutputItems,
         usage: message.usage,
@@ -5355,15 +5712,32 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    for (final timer in _streamingAssistantFlushes.values) {
+      timer.cancel();
+    }
+    for (final notifier in _streamingAssistantNotifiers.values) {
+      notifier.dispose();
+    }
+    _streamingAssistantFlushes.clear();
+    _streamingAssistantBuffers.clear();
+    _streamingAssistantText.clear();
+    _streamingAssistantNotifiers.clear();
     for (final cancellation in _runningTasks.values) {
       cancellation.cancel();
     }
     final runs = List<Future<AgentResult>>.of(_taskRuns.values);
-    unawaited(_disposeAsync(runs));
+    final trees = List<SubagentTree>.of(_subagentTrees.values);
+    unawaited(_disposeAsync(runs, trees));
     super.dispose();
   }
 
-  Future<void> _disposeAsync(List<Future<AgentResult>> runs) async {
+  Future<void> _disposeAsync(
+    List<Future<AgentResult>> runs,
+    List<SubagentTree> trees,
+  ) async {
+    await Future.wait([
+      for (final tree in trees) tree.close(),
+    ], eagerError: false);
     await _closePhoneTasks();
     try {
       await Future.wait(runs, eagerError: false);
@@ -5399,6 +5773,7 @@ const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
 const _floatingCapsuleLengthScaleSetting = 'floating_capsule_length_scale';
 const _documentModuleSetting = 'document_module_enabled';
 const _fontScaleSetting = 'font_scale';
+const _subagentSettingsSetting = 'subagent_settings';
 const _imageProviderSetting = 'image_provider_id';
 const _imageModelSettingPrefix = 'image_model:';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';

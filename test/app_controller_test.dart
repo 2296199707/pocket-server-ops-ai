@@ -1209,6 +1209,12 @@ void main() {
 
       var sawStreamingText = false;
       var blankBeforePersistence = false;
+      final streamingListenable = controller.streamingAssistantTextListenable(
+        task.id,
+      );
+      streamingListenable.addListener(() {
+        if (streamingListenable.value.isNotEmpty) sawStreamingText = true;
+      });
       controller.addListener(() {
         final streaming = controller.streamingAssistantText(task.id);
         final preamblePersisted = controller
@@ -1282,6 +1288,41 @@ void main() {
     expect(controller.providers, hasLength(2));
     controller.dispose();
   });
+
+  test(
+    'deleting a provider clears an unused subagent provider selection',
+    () async {
+      final database = MemoryAppDatabase();
+      const provider = ProviderProfile(
+        id: 'provider-subagent-only',
+        name: '子代理供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'child-model',
+        apiKeyRef: 'provider-subagent-only:key',
+        isDefault: true,
+      );
+      await database.saveProvider(provider);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+      await controller.setSubagentSettings(
+        const SubagentSettings(providerId: 'provider-subagent-only'),
+      );
+
+      await controller.deleteProvider(provider);
+
+      expect(controller.subagentSettings.providerId, isEmpty);
+      expect(
+        SubagentSettings.fromJson(
+          await database.readSetting('subagent_settings'),
+        ).providerId,
+        isEmpty,
+      );
+      controller.dispose();
+    },
+  );
 
   test('different phone Agent tasks can run concurrently', () async {
     final controller = AppController(
