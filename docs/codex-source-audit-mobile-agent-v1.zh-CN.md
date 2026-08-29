@@ -1170,6 +1170,26 @@
   APK 路径：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.27-release.apk`；
   Release 地址：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.27`。
 
+### 2026-08-29：悬浮窗尺寸与供应商模型选择 Beta 1.0.3-beta.28
+
+- 悬浮窗整体大小和长度设置的最小值从 `75%` 调整为 `20%`；Flutter 设置、Android 服务和
+  持久化读取统一使用 `20%–140%`，同时移除原生端 `160dp` 的窗口宽度下限，确保设置值真正生效。
+- 供应商编辑页增加字段间距和列表行距，避免窄屏上标签、辅助说明和下一行叠加。
+- 删除独立的图片模型请求和按名称猜测图片模型的逻辑。一次模型目录请求返回的完整列表同时用于
+  选择默认模型和图片模型；图片模型固定保留“无”，由用户明确选择，不由客户端判断模型能力。
+- 供应商总设置页的“生图供应商”下增加图片模型选择，可读取该供应商已缓存的统一模型列表。
+  已保存但不在新目录中的图片模型会保留为当前选项，避免升级后丢失配置。
+- 功能与版本提交：`ba07a04`；版本：`1.0.3-beta.28+37`。
+- 发布前验证：供应商、模型目录、图片配置和悬浮窗相关定向测试 63 项通过；
+  `flutter analyze --no-pub` 通过；release APK 构建通过；构建输出、Gradle 缓存和 APK 均位于
+  `/www` 数据盘。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.28-release.apk`；
+  大小 `78,275,831` bytes；SHA-256
+  `f907d2b0624443ec033265dfc3d1fa9f68bbbfe5126df180e334de8a09a39fb2`。
+- 发布结果：已创建 GitHub Pre-release `v1.0.3-beta.28`，标签目标为 `beta` 分支提交
+  `ba07a04`，并上传上述 APK。Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.28`。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
