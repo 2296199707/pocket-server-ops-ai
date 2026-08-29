@@ -1628,3 +1628,17 @@ beta.3；后续只有模型目录协议、上述实现或对应测试改变时�
   状态再决定是否重试；多服务器中单台连接失败不会阻止其他服务器工具和 AI 会话启动。
 - `RemoteAgentTools` 支持无连接实例和并发合并的 `ensureConnection()`；成功建连后仍复用原有
   进程恢复和连接池。远程项目说明属于可选信息，读取失败不会中断 Agent。
+
+### 2026-08-29：远程连接错误处理 Beta 1.0.4-beta.4 发布记录
+
+- 功能与版本提交：`74190ce`；版本：`1.0.4-beta.4+41`。
+- 验证：`flutter analyze` 通过；`test/agent_loop_test.dart`、
+  `test/remote_process_test.dart` 和 `test/app_controller_test.dart` 定向测试全部通过；
+  `git diff --check` 通过。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.4-release.apk`；
+  大小 `79029775` bytes；SHA-256
+  `3874c5976ea80824389ac8e8832a1a8ac3133cbf38d17971cfe0fb893a919c9a`。
+  APK manifest 已核对为 `versionName=1.0.4-beta.4`、`versionCode=41`。
+- 发布结果：已推送到远端 `beta` 分支并创建 GitHub Pre-release
+  `v1.0.4-beta.4`，上传上述 APK。
+  Release 地址：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.4`。
