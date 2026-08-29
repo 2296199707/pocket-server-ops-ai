@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.4-beta.2",
+      "title": "PocketServerOps AI v1.0.4-beta.2",
+      "notes": "优化模型设置界面：AI 模型和子代理设置分别进入独立抽屉子页面，左上角返回；推理强度继续直接显示在模型主页面。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.2",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.4-beta.2/pocket-server-ops-ai-v1.0.4-beta.2-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-29T11:15:15Z"
+    },
+    {
       "version": "1.0.4-beta.1",
       "title": "PocketServerOps AI v1.0.4-beta.1",
       "notes": "稳定性修复：优化长回复流式加载与历史渲染；加入 Codex 风格子代理设置和生命周期控制；修复悬浮窗在右侧未隐藏时点击无法进入对话的问题。",

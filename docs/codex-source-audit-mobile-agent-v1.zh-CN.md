@@ -1450,6 +1450,15 @@ Mobile 实现：<path>:<symbol 或行号>
 `reasoning_content` 回放；`test/subagents_test.dart` 覆盖指定供应商、并发和递归边界。
 本节作为当前结论封存；只有这些实现或对应测试变化时才重新读取同一供应商契约。
 
+### 2026-08-29：模型与子代理设置抽屉子页面 Beta 1.0.4-beta.2
+
+- AI 模型选择改为覆盖模型设置抽屉的独立子页面，模型主页面保留推理强度直接选择；模型子页面提供左上角返回和模型列表刷新。
+- 子代理设置改为覆盖模型设置抽屉的独立子页面，保留供应商、模型、推理强度、并发线程和递归深度配置；返回时不丢失尚未应用的选择。
+- 功能与版本提交：`bef1d45`；版本：`1.0.4-beta.2+39`。
+- 发布前验证：`flutter analyze --no-pub` 通过；`test/ui/chat_page_test.dart` 11 项通过；release APK 构建通过；构建输出、Gradle 缓存和 APK 均位于 `/www` 数据盘。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.2-release.apk`；大小 `78,554,435` bytes；SHA-256 `69f8c52760c2f52db0a0b702455153fd0053692200458a8c6484287e55f96a07`。
+- 发布结果：待推送后创建 GitHub Pre-release `v1.0.4-beta.2`，标签指向 `beta` 分支。
+
 ### 2026-08-29：长回复稳定性、子代理与悬浮窗点击 Beta 1.0.4-beta.1
 
 - 长回复使用流式缓冲和局部监听刷新，流式阶段不重复解析 Markdown；工具参数和结果在展开时才完整格式化，任务完成事件不再重复保存完整回复文本。完整历史和 AI 上下文仍保留。
