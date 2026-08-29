@@ -1565,13 +1565,16 @@ Mobile 实现：<path>:<symbol 或行号>
   `lib/app_controller.dart`、`lib/ui/profile_sheets.dart`、`lib/ui/chat_page.dart`、
   `lib/providers/provider_connection_tester.dart`。修复了旧推理值下拉初始值问题，并保持
   Responses/Chat Completions、上下文压缩、历史和工具执行架构不变。
-- 验证：`flutter analyze --no-pub` 通过；模型、供应商、连接和聊天定向测试 38 项通过。
-  版本 `1.0.4-beta.2+39` 的 debug APK 已在数据盘构建：
-  `/www/mobile-agent-build/app/outputs/flutter-apk/app-debug.apk`，大小
-  `202576009` bytes，SHA-256
-  `9ac72377c64efd620dd2486703c72b356ff6481e4390b41f9ff14c83d10faeb0`。
-  本轮未提交、未推送、未创建 beta Release。
+- 验证：`flutter analyze --no-pub` 通过；全量测试 217 项通过。
+  版本 `1.0.4-beta.3+40` 的 release APK 已在数据盘构建：
+  `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.3-release.apk`，大小
+  `78849451` bytes，SHA-256
+  `774ddca10804cda3fd2efb64689153db2b6d4a35919655e685060d771d5f3c0e`。
+  APK manifest 已核对为 `versionName=1.0.4-beta.3`、`versionCode=40`。
+- 发布结果：提交 `62c3a1a` 已推送到远端 `beta` 分支，GitHub Pre-release
+  `v1.0.4-beta.3` 已创建并上传上述 APK。Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.3`。
 
-当前结论：供应商推理能力同步、自定义推理值和统一模型/图片模型选择已编码；下一步只做
-  最终测试、数据盘构建和 diff 审查。后续只有模型目录协议、上述实现或对应测试改变时才
-  重新审查本条，不因普通 UI 或模型名称变化重复查询。
+当前结论：供应商推理能力同步、自定义推理值和统一模型/图片模型选择已编码并发布到
+beta.3；后续只有模型目录协议、上述实现或对应测试改变时才重新审查本条，不因普通 UI
+或模型名称变化重复查询。
