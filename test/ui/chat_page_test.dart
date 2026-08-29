@@ -60,7 +60,13 @@ void main() {
 
     await tester.tap(find.text('AI 模型'));
     await tester.pumpAndSettle();
+    expect(find.text('模型列表'), findsOneWidget);
+    expect(find.byTooltip('返回模型与推理'), findsOneWidget);
     expect(find.text('demo-coder'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('返回模型与推理'));
+    await tester.pumpAndSettle();
+    expect(find.text('模型与推理'), findsOneWidget);
 
     controller.dispose();
   });
@@ -399,6 +405,8 @@ void main() {
     expect(find.text('模型与推理'), findsOneWidget);
     expect(modelRequests, 0);
     expect(find.text('模型列表刷新失败，继续使用已保存的模型'), findsNothing);
+    await tester.tap(find.text('AI 模型'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('刷新模型列表'));
     await tester.pumpAndSettle();
     expect(modelRequests, 1);

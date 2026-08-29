@@ -1154,8 +1154,8 @@ class ChatPageState extends State<ChatPage> {
       builder: (sheetContext) {
         var modelLoadFailed = false;
         var refreshingModels = false;
-        var modelsExpanded = false;
-        var subagentExpanded = false;
+        var modelPage = false;
+        var subagentPage = false;
 
         return StatefulBuilder(
           builder: (context, setSheetState) {
@@ -1318,31 +1318,226 @@ class ChatPageState extends State<ChatPage> {
                           ),
                         ),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.auto_awesome_outlined,
-                              size: 20,
-                              color: colors.primary,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
+                      if (modelPage)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                          child: Row(
+                            children: [
+                              IconButton(
+                                tooltip: '返回模型与推理',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () =>
+                                    setSheetState(() => modelPage = false),
+                                icon: const Icon(Icons.arrow_back),
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'AI 模型',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    Text(
+                                      '选择当前对话使用的模型',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: '关闭',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => Navigator.pop(context),
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (subagentPage)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                          child: Row(
+                            children: [
+                              IconButton(
+                                tooltip: '返回模型与推理',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () =>
+                                    setSheetState(() => subagentPage = false),
+                                icon: const Icon(Icons.arrow_back),
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '子代理设置',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    Text(
+                                      '配置子代理使用的供应商、模型和并发行为',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: '关闭',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => Navigator.pop(context),
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (!modelPage && !subagentPage)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.auto_awesome_outlined,
+                                size: 20,
+                                color: colors.primary,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      '模型与推理',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    Text(
+                                      provider.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: colors.onSurfaceVariant,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: '关闭',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => Navigator.pop(context),
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ),
+                        ),
+                      Expanded(
+                        child: Scrollbar(
+                          child: ListView(
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                            children: [
+                              if (!modelPage && !subagentPage) ...[
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 10,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: colors.primaryContainer.withValues(
+                                      alpha: 0.55,
+                                    ),
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.tune_rounded,
+                                        size: 18,
+                                        color: colors.primary,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          _shortModelName(selectedModel),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelLarge
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        _reasoningMenuLabel(
+                                          selectedReasoningEffort,
+                                        ),
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelLarge
+                                            ?.copyWith(
+                                              color: colors.primary,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                _ModelPickerSectionLabel(
+                                  title: '推理强度',
+                                  subtitle: '当前模型的推理参数',
+                                ),
+                                if (advertisedReasoningLevels == null) ...[
+                                  const SizedBox(height: 4),
                                   Text(
-                                    '模型与推理',
+                                    '供应商未返回能力列表，提供 Low / High / Max。',
                                     style: Theme.of(context)
                                         .textTheme
-                                        .titleMedium
-                                        ?.copyWith(fontWeight: FontWeight.w700),
+                                        .labelSmall
+                                        ?.copyWith(
+                                          color: colors.onSurfaceVariant,
+                                        ),
                                   ),
+                                ] else if (advertisedReasoningLevels
+                                    .isEmpty) ...[
+                                  const SizedBox(height: 4),
                                   Text(
-                                    provider.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
+                                    '供应商声明当前模型没有可调推理强度。',
                                     style: Theme.of(context)
                                         .textTheme
                                         .labelSmall
@@ -1351,85 +1546,113 @@ class ChatPageState extends State<ChatPage> {
                                         ),
                                   ),
                                 ],
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: '关闭',
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () => Navigator.pop(context),
-                              icon: const Icon(Icons.close),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: Scrollbar(
-                          child: ListView(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 10,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: colors.primaryContainer.withValues(
-                                    alpha: 0.55,
+                                const SizedBox(height: 4),
+                                for (final effort in effortOptions)
+                                  _ModelPickerChoice(
+                                    title: _reasoningMenuLabel(effort),
+                                    subtitle: reasoningSubtitle(effort),
+                                    selected: effort == selectedReasoningEffort,
+                                    onTap: () => setSheetState(
+                                      () => selectedReasoningEffort = effort,
+                                    ),
                                   ),
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      Icons.tune_rounded,
-                                      size: 18,
-                                      color: colors.primary,
+                                const SizedBox(height: 12),
+                                const Divider(height: 24),
+                                InkWell(
+                                  borderRadius: BorderRadius.circular(12),
+                                  onTap: () =>
+                                      setSheetState(() => subagentPage = true),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 8,
                                     ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(
-                                        _shortModelName(selectedModel),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelLarge
-                                            ?.copyWith(
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      _reasoningMenuLabel(
-                                        selectedReasoningEffort,
-                                      ),
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .labelLarge
-                                          ?.copyWith(
-                                            color: colors.primary,
-                                            fontWeight: FontWeight.w700,
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.account_tree_outlined,
+                                          size: 20,
+                                          color: colors.primary,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                '子代理模型设置',
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .titleSmall
+                                                    ?.copyWith(
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                              ),
+                                              Text(
+                                                '${followsParentProvider ? '跟随 ${provider.name}' : selectedSubagentProvider.name} · '
+                                                '${selectedSubagentSettings.model.trim().isEmpty ? (followsParentProvider ? '继承模型' : '默认模型') : _shortModelName(selectedSubagentSettings.model)} · '
+                                                '${selectedSubagentSettings.maxConcurrentThreads} 线程',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .labelSmall
+                                                    ?.copyWith(
+                                                      color: colors
+                                                          .onSurfaceVariant,
+                                                    ),
+                                              ),
+                                            ],
                                           ),
+                                        ),
+                                        Icon(
+                                          Icons.chevron_right,
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              if (modelPage) ...[
+                                const SizedBox(height: 8),
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Expanded(
+                                      child: _ModelPickerSectionLabel(
+                                        title: '模型列表',
+                                        subtitle: '已缓存的供应商模型',
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: '刷新模型列表',
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: refreshingModels
+                                          ? null
+                                          : refreshModels,
+                                      icon: refreshingModels
+                                          ? const SizedBox.square(
+                                              dimension: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(Icons.refresh),
                                     ),
                                   ],
                                 ),
-                              ),
-                              if (modelLoadFailed) ...[
-                                const SizedBox(height: 8),
-                                Text(
-                                  '模型列表刷新失败，继续使用已保存的模型',
-                                  style: Theme.of(context).textTheme.labelSmall
-                                      ?.copyWith(color: colors.error),
-                                ),
-                              ],
-                              if (modelsExpanded) ...[
-                                const SizedBox(height: 14),
-                                const Divider(height: 24),
-                                const _ModelPickerSectionLabel(
-                                  title: '模型列表',
-                                  subtitle: '已保存的供应商模型',
-                                ),
+                                if (modelLoadFailed) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '模型列表刷新失败，继续使用已保存的模型',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
+                                        ?.copyWith(color: colors.error),
+                                  ),
+                                ],
                                 const SizedBox(height: 4),
                                 for (final model in models)
                                   _ModelPickerChoice(
@@ -1443,101 +1666,7 @@ class ChatPageState extends State<ChatPage> {
                                     ),
                                   ),
                               ],
-                              const SizedBox(height: 14),
-                              _ModelPickerSectionLabel(
-                                title: '推理强度',
-                                subtitle: '当前模型的推理参数',
-                              ),
-                              if (advertisedReasoningLevels == null) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  '供应商未返回能力列表，提供 Low / High / Max。',
-                                  style: Theme.of(context).textTheme.labelSmall
-                                      ?.copyWith(
-                                        color: colors.onSurfaceVariant,
-                                      ),
-                                ),
-                              ] else if (advertisedReasoningLevels.isEmpty) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  '供应商声明当前模型没有可调推理强度。',
-                                  style: Theme.of(context).textTheme.labelSmall
-                                      ?.copyWith(
-                                        color: colors.onSurfaceVariant,
-                                      ),
-                                ),
-                              ],
-                              const SizedBox(height: 4),
-                              for (final effort in effortOptions)
-                                _ModelPickerChoice(
-                                  title: _reasoningMenuLabel(effort),
-                                  subtitle: reasoningSubtitle(effort),
-                                  selected: effort == selectedReasoningEffort,
-                                  onTap: () => setSheetState(
-                                    () => selectedReasoningEffort = effort,
-                                  ),
-                                ),
-                              const SizedBox(height: 12),
-                              const Divider(height: 24),
-                              InkWell(
-                                borderRadius: BorderRadius.circular(12),
-                                onTap: () => setSheetState(
-                                  () => subagentExpanded = !subagentExpanded,
-                                ),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 8,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Icon(
-                                        Icons.account_tree_outlined,
-                                        size: 20,
-                                        color: colors.primary,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              '子代理模型设置',
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .titleSmall
-                                                  ?.copyWith(
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                            ),
-                                            Text(
-                                              '${followsParentProvider ? '跟随 ${provider.name}' : selectedSubagentProvider.name} · '
-                                              '${selectedSubagentSettings.model.trim().isEmpty ? (followsParentProvider ? '继承模型' : '默认模型') : _shortModelName(selectedSubagentSettings.model)} · '
-                                              '${selectedSubagentSettings.maxConcurrentThreads} 线程',
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .labelSmall
-                                                  ?.copyWith(
-                                                    color:
-                                                        colors.onSurfaceVariant,
-                                                  ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                      Icon(
-                                        subagentExpanded
-                                            ? Icons.expand_less
-                                            : Icons.chevron_right,
-                                        color: colors.onSurfaceVariant,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              if (subagentExpanded) ...[
+                              if (subagentPage) ...[
                                 const SizedBox(height: 8),
                                 const _ModelPickerSectionLabel(
                                   title: '子代理供应商',
@@ -1695,95 +1824,79 @@ class ChatPageState extends State<ChatPage> {
                           ),
                         ),
                       ),
-                      Container(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-                        decoration: BoxDecoration(
-                          border: Border(
-                            top: BorderSide(
-                              color: colors.outlineVariant.withValues(
-                                alpha: 0.7,
+                      if (!modelPage && !subagentPage)
+                        Container(
+                          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                          decoration: BoxDecoration(
+                            border: Border(
+                              top: BorderSide(
+                                color: colors.outlineVariant.withValues(
+                                  alpha: 0.7,
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(12),
-                                onTap: () => setSheetState(
-                                  () => modelsExpanded = !modelsExpanded,
-                                ),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 5,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Icon(
-                                        Icons.smart_toy_outlined,
-                                        size: 20,
-                                        color: colors.primary,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              'AI 模型',
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .titleSmall
-                                                  ?.copyWith(
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                            ),
-                                            Text(
-                                              _shortModelName(selectedModel),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .labelSmall
-                                                  ?.copyWith(
-                                                    color:
-                                                        colors.onSurfaceVariant,
-                                                  ),
-                                            ),
-                                          ],
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(12),
+                                  onTap: () =>
+                                      setSheetState(() => modelPage = true),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 5,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          Icons.smart_toy_outlined,
+                                          size: 20,
+                                          color: colors.primary,
                                         ),
-                                      ),
-                                      Icon(
-                                        modelsExpanded
-                                            ? Icons.expand_less
-                                            : Icons.chevron_right,
-                                        color: colors.onSurfaceVariant,
-                                      ),
-                                    ],
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                'AI 模型',
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .titleSmall
+                                                    ?.copyWith(
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                              ),
+                                              Text(
+                                                _shortModelName(selectedModel),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .labelSmall
+                                                    ?.copyWith(
+                                                      color: colors
+                                                          .onSurfaceVariant,
+                                                    ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Icon(
+                                          Icons.chevron_right,
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                            IconButton(
-                              tooltip: '刷新模型列表',
-                              visualDensity: VisualDensity.compact,
-                              onPressed: refreshingModels
-                                  ? null
-                                  : refreshModels,
-                              icon: refreshingModels
-                                  ? const SizedBox.square(
-                                      dimension: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.refresh),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
                       Container(
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                         decoration: BoxDecoration(
