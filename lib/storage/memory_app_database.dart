@@ -13,6 +13,7 @@ class MemoryAppDatabase extends AppDatabase {
   final Map<String, Task> _tasks = {};
   final Map<String, TaskEvent> _events = {};
   final Map<String, AttachmentRecord> _attachments = {};
+  final Map<String, ServerDirectoryCacheRecord> _serverDirectoryCaches = {};
   final Map<String, String> _settings = {};
 
   void _seedDemoData() {
@@ -57,6 +58,38 @@ class MemoryAppDatabase extends AppDatabase {
   @override
   Future<void> deleteServer(String id) async {
     _servers.remove(id);
+    _serverDirectoryCaches.removeWhere((_, record) => record.serverId == id);
+  }
+
+  @override
+  Future<List<ServerDirectoryCacheRecord>> loadServerDirectoryCaches() async {
+    final values = _serverDirectoryCaches.values.toList()
+      ..sort((left, right) => right.accessedAt.compareTo(left.accessedAt));
+    return values;
+  }
+
+  @override
+  Future<void> saveServerDirectoryCache(
+    ServerDirectoryCacheRecord record,
+  ) async {
+    _serverDirectoryCaches[record.cacheKey] = record;
+    final sorted = _serverDirectoryCaches.values.toList()
+      ..sort((left, right) => right.accessedAt.compareTo(left.accessedAt));
+    for (final stale in sorted.skip(256)) {
+      _serverDirectoryCaches.remove(stale.cacheKey);
+    }
+  }
+
+  @override
+  Future<void> deleteServerDirectoryCaches(String serverId) async {
+    _serverDirectoryCaches.removeWhere(
+      (_, record) => record.serverId == serverId,
+    );
+  }
+
+  @override
+  Future<void> deleteServerDirectoryCache(String cacheKey) async {
+    _serverDirectoryCaches.remove(cacheKey);
   }
 
   @override

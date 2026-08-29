@@ -48,6 +48,30 @@ class ServerTerminalSession {
   }
 }
 
+class _ServerDirectoryProbe {
+  const _ServerDirectoryProbe({
+    required this.fingerprint,
+    required this.unchanged,
+    this.entries,
+  });
+
+  final String fingerprint;
+  final bool unchanged;
+  final List<SshDirectoryEntry>? entries;
+}
+
+class _CachedServerFileContent {
+  const _CachedServerFileContent({
+    required this.content,
+    required this.size,
+    required this.modified,
+  });
+
+  final String content;
+  final int? size;
+  final DateTime? modified;
+}
+
 class AppController extends ChangeNotifier {
   AppController({
     AppDatabase? database,
@@ -89,7 +113,9 @@ class AppController extends ChangeNotifier {
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
+  final Map<String, ServerDirectoryCacheRecord> _directoryCacheRecords = {};
   final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
+  final Map<String, _CachedServerFileContent> _serverFileContentCache = {};
   final Map<String, List<ProjectFileEntry>> _projectDirectoryCache = {};
   final Map<String, Future<List<ProjectFileEntry>>> _projectDirectoryLoads = {};
   final RemoteWriteQueue _remoteWriteQueue = RemoteWriteQueue();
@@ -332,6 +358,15 @@ class AppController extends ChangeNotifier {
     _loadError = null;
     _notify();
     _servers = await _database.loadServers();
+    final directoryCaches = await _database.loadServerDirectoryCaches();
+    _directoryCache.clear();
+    _directoryCacheRecords.clear();
+    for (final record in directoryCaches) {
+      _directoryCache[record.cacheKey] = List<SshDirectoryEntry>.unmodifiable(
+        record.entries,
+      );
+      _directoryCacheRecords[record.cacheKey] = record;
+    }
     _providers = await _database.loadProviders();
     _projects = await _database.loadProjects();
     _agentAutoExecute =
@@ -2193,25 +2228,244 @@ class AppController extends ChangeNotifier {
     if (pending != null) return pending;
     if (!forceRefresh) {
       final cached = _directoryCache[cacheKey];
-      if (cached != null) return cached;
+      if (cached != null) {
+        _touchServerDirectoryCache(profile, path);
+        return cached;
+      }
     }
 
-    final request = _loadServerDirectory(
-      profile,
-      path,
-      onFirstHostKey: onFirstHostKey,
-    );
+    final request = forceRefresh
+        ? _refreshServerDirectory(profile, path, onFirstHostKey: onFirstHostKey)
+        : _loadAndCacheServerDirectory(
+            profile,
+            path,
+            onFirstHostKey: onFirstHostKey,
+          );
     _directoryLoads[cacheKey] = request;
     try {
-      final entries = await request;
-      final cachedEntries = List<SshDirectoryEntry>.unmodifiable(entries);
-      _directoryCache[cacheKey] = cachedEntries;
-      return cachedEntries;
+      return await request;
     } finally {
       if (identical(_directoryLoads[cacheKey], request)) {
         _directoryLoads.remove(cacheKey);
       }
     }
+  }
+
+  Future<List<SshDirectoryEntry>> _loadAndCacheServerDirectory(
+    ServerProfile profile,
+    String remotePath, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final entries = await _loadServerDirectory(
+      profile,
+      remotePath,
+      onFirstHostKey: onFirstHostKey,
+    );
+    final cached = _storeServerDirectoryCache(
+      profile,
+      remotePath,
+      entries,
+      fingerprint: null,
+      checkedAt: DateTime.now().toUtc(),
+    );
+    unawaited(
+      _preloadChangedServerFiles(
+        profile,
+        const [],
+        cached,
+        onFirstHostKey: onFirstHostKey,
+      ),
+    );
+    return cached;
+  }
+
+  Future<List<SshDirectoryEntry>> _refreshServerDirectory(
+    ServerProfile profile,
+    String remotePath, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final cacheKey = _directoryCacheKey(profile, remotePath);
+    final previous = _directoryCache[cacheKey];
+    final record = _directoryCacheRecords[cacheKey];
+    if (!previewMode) {
+      final probe = await _probeServerDirectory(
+        profile,
+        remotePath,
+        expectedFingerprint: _probeFingerprint(record?.fingerprint),
+        onFirstHostKey: onFirstHostKey,
+      );
+      if (probe != null) {
+        if (probe.unchanged && previous != null) {
+          _touchServerDirectoryCache(profile, remotePath);
+          return previous;
+        }
+        final entries = probe.entries;
+        if (entries != null) {
+          final cached = _storeServerDirectoryCache(
+            profile,
+            remotePath,
+            entries,
+            fingerprint: 'probe:${probe.fingerprint}',
+            checkedAt: DateTime.now().toUtc(),
+          );
+          unawaited(
+            _preloadChangedServerFiles(
+              profile,
+              previous ?? const [],
+              cached,
+              onFirstHostKey: onFirstHostKey,
+            ),
+          );
+          return cached;
+        }
+      }
+    }
+
+    final entries = await _loadServerDirectory(
+      profile,
+      remotePath,
+      onFirstHostKey: onFirstHostKey,
+    );
+    final cached = _storeServerDirectoryCache(
+      profile,
+      remotePath,
+      entries,
+      fingerprint: null,
+      checkedAt: DateTime.now().toUtc(),
+    );
+    unawaited(
+      _preloadChangedServerFiles(
+        profile,
+        previous ?? const [],
+        cached,
+        onFirstHostKey: onFirstHostKey,
+      ),
+    );
+    return cached;
+  }
+
+  Future<_ServerDirectoryProbe?> _probeServerDirectory(
+    ServerProfile profile,
+    String remotePath, {
+    String? expectedFingerprint,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    try {
+      final result = await _withServerConnection(
+        profile,
+        (connection) => connection.run(
+          _serverDirectoryProbeCommand(remotePath, expectedFingerprint),
+          timeout: const Duration(seconds: 15),
+        ),
+        onFirstHostKey: onFirstHostKey,
+      );
+      if (result.exitCode != 0) return null;
+      return _parseServerDirectoryProbe(result.stdout, remotePath);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _ServerDirectoryProbe? _parseServerDirectoryProbe(
+    String output,
+    String remotePath,
+  ) {
+    final values = <String, String>{};
+    final entries = <SshDirectoryEntry>[];
+    for (final line in output.split('\n')) {
+      if (line.startsWith('entry\t')) {
+        final parts = line.substring('entry\t'.length).split('\t');
+        if (parts.length < 4) return null;
+        final itemType = parts[0];
+        if (itemType != 'd' && itemType != 'f') return null;
+        final size = int.tryParse(parts[1]);
+        final seconds = int.tryParse(parts[2]);
+        final name = parts.sublist(3).join('\t');
+        if (name.isEmpty || size == null || seconds == null) return null;
+        entries.add(
+          SshDirectoryEntry(
+            name: name,
+            path: path_util.posix.join(remotePath, name),
+            isDirectory: itemType == 'd',
+            size: size,
+            modified: DateTime.fromMillisecondsSinceEpoch(
+              seconds * 1000,
+              isUtc: true,
+            ),
+          ),
+        );
+        continue;
+      }
+      final separator = line.indexOf('=');
+      if (separator > 0) {
+        values[line.substring(0, separator)] = line.substring(separator + 1);
+      }
+    }
+    if (values['probe_version'] != '1') return null;
+    final fingerprint = values['fingerprint']?.trim();
+    if (fingerprint == null || fingerprint.isEmpty) return null;
+    final unchanged = values['unchanged'] == '1';
+    if (!unchanged && values['unchanged'] != '0') return null;
+    return _ServerDirectoryProbe(
+      fingerprint: fingerprint,
+      unchanged: unchanged,
+      entries: unchanged ? null : entries,
+    );
+  }
+
+  List<SshDirectoryEntry> _storeServerDirectoryCache(
+    ServerProfile profile,
+    String remotePath,
+    Iterable<SshDirectoryEntry> entries, {
+    required String? fingerprint,
+    required DateTime checkedAt,
+  }) {
+    final cacheKey = _directoryCacheKey(profile, remotePath);
+    final cachedEntries = List<SshDirectoryEntry>.unmodifiable(entries);
+    final now = DateTime.now().toUtc();
+    final record = ServerDirectoryCacheRecord(
+      cacheKey: cacheKey,
+      serverId: profile.id,
+      host: profile.host,
+      port: profile.port,
+      username: profile.username,
+      remotePath: _normalizeRemotePath(remotePath),
+      fingerprint: fingerprint,
+      entries: cachedEntries,
+      cachedAt: now,
+      checkedAt: checkedAt,
+      accessedAt: now,
+    );
+    _directoryCache[cacheKey] = cachedEntries;
+    _directoryCacheRecords[cacheKey] = record;
+    _persistServerDirectoryCache(record);
+    return cachedEntries;
+  }
+
+  void _touchServerDirectoryCache(ServerProfile profile, String remotePath) {
+    final cacheKey = _directoryCacheKey(profile, remotePath);
+    final current = _directoryCacheRecords[cacheKey];
+    if (current == null) return;
+    final now = DateTime.now().toUtc();
+    final updated = ServerDirectoryCacheRecord(
+      cacheKey: current.cacheKey,
+      serverId: current.serverId,
+      host: current.host,
+      port: current.port,
+      username: current.username,
+      remotePath: current.remotePath,
+      fingerprint: current.fingerprint,
+      entries: current.entries,
+      cachedAt: current.cachedAt,
+      checkedAt: now,
+      accessedAt: now,
+    );
+    _directoryCacheRecords[cacheKey] = updated;
+    _persistServerDirectoryCache(updated);
+  }
+
+  void _persistServerDirectoryCache(ServerDirectoryCacheRecord record) {
+    unawaited(_database.saveServerDirectoryCache(record).catchError((_) {}));
   }
 
   Future<List<ProjectFileEntry>> listProjectDirectory(
@@ -2402,6 +2656,136 @@ class AppController extends ChangeNotifier {
     final path = remotePath.trim();
     if (path.isEmpty) return null;
     return _directoryCache[_directoryCacheKey(profile, path)];
+  }
+
+  String? cachedServerFileContent(
+    ServerProfile profile,
+    SshDirectoryEntry entry,
+  ) {
+    return _serverFileContentCache[_serverFileContentCacheKey(
+          profile,
+          entry.path,
+          entry.size,
+          entry.modified,
+        )]
+        ?.content;
+  }
+
+  Future<void> _preloadChangedServerFiles(
+    ServerProfile profile,
+    Iterable<SshDirectoryEntry> previousEntries,
+    Iterable<SshDirectoryEntry> currentEntries, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    final previousByPath = <String, SshDirectoryEntry>{
+      for (final entry in previousEntries) entry.path: entry,
+    };
+    for (final entry in currentEntries) {
+      if (entry.isDirectory || !_isPreloadableServerTextFile(entry.name)) {
+        continue;
+      }
+      final previous = previousByPath[entry.path];
+      if (previous != null && _sameDirectoryEntry(previous, entry)) continue;
+      if (entry.size == null || entry.size! > _serverTextPreloadLimit) {
+        continue;
+      }
+      final key = _serverFileContentCacheKey(
+        profile,
+        entry.path,
+        entry.size,
+        entry.modified,
+      );
+      if (_serverFileContentCache.containsKey(key)) continue;
+      try {
+        final content = await readServerFile(
+          profile,
+          entry.path,
+          onFirstHostKey: onFirstHostKey,
+        );
+        if (utf8.encode(content).length > _serverTextPreloadLimit) continue;
+        _serverFileContentCache[key] = _CachedServerFileContent(
+          content: content,
+          size: entry.size,
+          modified: entry.modified,
+        );
+      } catch (_) {
+        // Preloading is an optimization; opening the file still reads it.
+      }
+    }
+  }
+
+  String _serverFileContentCacheKey(
+    ServerProfile profile,
+    String remotePath,
+    int? size,
+    DateTime? modified,
+  ) {
+    return '${profile.id}\u0000${profile.host}\u0000${profile.port}'
+        '\u0000${profile.username}\u0000${_normalizeRemotePath(remotePath)}'
+        '\u0000${size ?? ''}\u0000${modified?.toUtc().millisecondsSinceEpoch ?? ''}';
+  }
+
+  static bool _sameDirectoryEntry(
+    SshDirectoryEntry left,
+    SshDirectoryEntry right,
+  ) {
+    return left.name == right.name &&
+        left.path == right.path &&
+        left.isDirectory == right.isDirectory &&
+        left.size == right.size &&
+        left.modified == right.modified;
+  }
+
+  static bool _isPreloadableServerTextFile(String name) {
+    const extensions = <String>{
+      '.c',
+      '.cc',
+      '.cpp',
+      '.css',
+      '.dart',
+      '.go',
+      '.h',
+      '.hpp',
+      '.html',
+      '.java',
+      '.js',
+      '.json',
+      '.jsx',
+      '.kt',
+      '.log',
+      '.md',
+      '.py',
+      '.rs',
+      '.sh',
+      '.sql',
+      '.swift',
+      '.ts',
+      '.tsx',
+      '.txt',
+      '.xml',
+      '.yaml',
+      '.yml',
+    };
+    return extensions.contains(path_util.extension(name).toLowerCase());
+  }
+
+  static const _serverTextPreloadLimit = 1024 * 1024;
+
+  static String? _probeFingerprint(String? fingerprint) {
+    if (fingerprint == null || !fingerprint.startsWith('probe:')) return null;
+    final value = fingerprint.substring('probe:'.length).trim();
+    return value.isEmpty ? null : value;
+  }
+
+  static String _serverDirectoryProbeCommand(
+    String remotePath,
+    String? expectedFingerprint,
+  ) {
+    final expected = expectedFingerprint == null
+        ? ''
+        : ' ${_shellQuote(expectedFingerprint)}';
+    return '\$HOME/.local/bin/mobile-agent-status directory '
+        '${_shellQuote(remotePath)}$expected';
   }
 
   Future<List<SshDirectoryEntry>> _loadServerDirectory(
@@ -2649,7 +3033,10 @@ class AppController extends ChangeNotifier {
           },
           onProgress: publishProgress,
         );
-        _invalidateServerDirectoryCache(profile);
+        _invalidateServerDirectoryCache(
+          profile,
+          paths: [path_util.posix.dirname(destinationPath)],
+        );
         return uploaded;
       } finally {
         await localFile.close();
@@ -2682,7 +3069,10 @@ class AppController extends ChangeNotifier {
       ),
       cancellation: AgentCancellation(),
     );
-    _invalidateServerDirectoryCache(profile);
+    _invalidateServerDirectoryCache(
+      profile,
+      paths: [path_util.posix.dirname(remotePath.trim())],
+    );
   }
 
   Future<void> deleteServerFiles(
@@ -2705,7 +3095,12 @@ class AppController extends ChangeNotifier {
       }, onFirstHostKey: onFirstHostKey),
       cancellation: AgentCancellation(),
     );
-    _invalidateServerDirectoryCache(profile);
+    _invalidateServerDirectoryCache(
+      profile,
+      paths: [
+        for (final path in paths) ...[path_util.posix.dirname(path), path],
+      ],
+    );
   }
 
   Future<SshFileInfo> statServerFile(
@@ -2749,7 +3144,10 @@ class AppController extends ChangeNotifier {
       ),
       cancellation: AgentCancellation(),
     );
-    _invalidateServerDirectoryCache(profile);
+    _invalidateServerDirectoryCache(
+      profile,
+      paths: [path_util.posix.dirname(path), path],
+    );
   }
 
   Future<void> copyServerFiles(
@@ -2812,7 +3210,10 @@ class AppController extends ChangeNotifier {
       ),
       cancellation: AgentCancellation(),
     );
-    _invalidateServerDirectoryCache(profile);
+    _invalidateServerDirectoryCache(
+      profile,
+      paths: [path_util.posix.dirname(source)],
+    );
   }
 
   Future<void> _copyOrMoveServerFiles(
@@ -2858,7 +3259,16 @@ class AppController extends ChangeNotifier {
       }, onFirstHostKey: onFirstHostKey),
       cancellation: AgentCancellation(),
     );
-    _invalidateServerDirectoryCache(profile);
+    _invalidateServerDirectoryCache(
+      profile,
+      paths: [
+        destination,
+        for (final source in sources) ...[
+          path_util.posix.dirname(source),
+          source,
+        ],
+      ],
+    );
   }
 
   String _directoryCacheKey(ServerProfile profile, String remotePath) {
@@ -2866,13 +3276,48 @@ class AppController extends ChangeNotifier {
         '\u0000${profile.username}\u0000${_normalizeRemotePath(remotePath)}';
   }
 
-  void _invalidateServerDirectoryCache(ServerProfile profile) {
-    _invalidateServerDirectoryCacheById(profile.id);
+  void _invalidateServerDirectoryCache(
+    ServerProfile profile, {
+    Iterable<String>? paths,
+  }) {
+    if (paths == null) {
+      _invalidateServerDirectoryCacheById(profile.id);
+      return;
+    }
+    final identityPrefix =
+        '${profile.id}\u0000${profile.host}'
+        '\u0000${profile.port}\u0000${profile.username}\u0000';
+    final targets = paths.map(_normalizeRemotePath).toSet();
+    final keys = _directoryCache.keys
+        .where(
+          (key) =>
+              key.startsWith(identityPrefix) &&
+              targets.contains(key.substring(identityPrefix.length)),
+        )
+        .toList(growable: false);
+    for (final key in keys) {
+      _directoryCache.remove(key);
+      _directoryCacheRecords.remove(key);
+      unawaited(_database.deleteServerDirectoryCache(key).catchError((_) {}));
+    }
+    _serverFileContentCache.removeWhere(
+      (key, _) => key.startsWith('${profile.id}\u0000'),
+    );
   }
 
   void _invalidateServerDirectoryCacheById(String serverId) {
     final prefix = '$serverId\u0000';
-    _directoryCache.removeWhere((key, _) => key.startsWith(prefix));
+    final keys = _directoryCache.keys
+        .where((key) => key.startsWith(prefix))
+        .toList(growable: false);
+    for (final key in keys) {
+      _directoryCache.remove(key);
+      _directoryCacheRecords.remove(key);
+    }
+    _serverFileContentCache.removeWhere((key, _) => key.startsWith(prefix));
+    unawaited(
+      _database.deleteServerDirectoryCaches(serverId).catchError((_) {}),
+    );
   }
 
   Future<ServerDashboard> loadServerDashboard(
@@ -4859,7 +5304,8 @@ class AppController extends ChangeNotifier {
       cpuUsage: int.tryParse(values['cpu_usage']?.trim() ?? ''),
       memory: values['memory'] ?? 'unknown',
       disk: values['disk'] ?? 'unknown',
-      statusScriptInstalled: values['script_version'] == '1',
+      statusScriptInstalled:
+          (int.tryParse(values['script_version'] ?? '') ?? 0) >= 1,
       disks: _parseDisks(values['disk_details']),
       network: _parseNetwork(values['network']),
       processCount: int.tryParse(values['processes'] ?? ''),
@@ -4978,6 +5424,8 @@ String _normalizeRemotePath(String value) {
   if (path.length <= 1) return path;
   return path.replaceFirst(RegExp(r'/+$'), '');
 }
+
+String _shellQuote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
 
 String? _normalizeOptionalValue(String? value) {
   final normalized = value?.trim();

@@ -107,12 +107,14 @@ class SshDirectoryEntry {
     required this.path,
     required this.isDirectory,
     required this.size,
+    this.modified,
   });
 
   final String name;
   final String path;
   final bool isDirectory;
   final int? size;
+  final DateTime? modified;
 }
 
 class SshFileInfo {
@@ -610,6 +612,12 @@ class DartSshConnection implements SshConnection {
               path: _joinRemotePath(remotePath, entry.filename),
               isDirectory: entry.attr.isDirectory,
               size: entry.attr.size,
+              modified: entry.attr.modifyTime == null
+                  ? null
+                  : DateTime.fromMillisecondsSinceEpoch(
+                      entry.attr.modifyTime! * 1000,
+                      isUtc: true,
+                    ),
             ),
       ];
       result.sort((left, right) {

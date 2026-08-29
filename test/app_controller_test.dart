@@ -2661,6 +2661,84 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'server directory cache survives reload and refreshes from probe metadata',
+    () async {
+      final database = MemoryAppDatabase();
+      final credentials = MemoryCredentialStore();
+      final connector = _FakeConnector();
+      await database.saveServer(
+        const ServerProfile(
+          id: 'server-1',
+          name: '应用服务器',
+          host: 'server.example.com',
+          port: 22,
+          username: 'ops',
+          authType: 'password',
+          credentialRef: 'server-1:ssh',
+          credentialPassphraseRef: null,
+          hostKey: null,
+          hostKeyFingerprint: null,
+          defaultWorkingDirectory: '/srv/app',
+        ),
+      );
+      await credentials.write('server-1:ssh', 'password');
+      connector.directoryProbeOutput =
+          'probe_version=1\n'
+          'fingerprint=100:10\n'
+          'unchanged=0\n'
+          'entry\tf\t12\t1700000000\tREADME.md\n';
+
+      final firstController = AppController(
+        database: database,
+        credentials: credentials,
+        sshConnector: connector,
+      );
+      await firstController.load();
+      final firstEntries = await firstController.listServerDirectory(
+        firstController.servers.single,
+        '/srv/app',
+        forceRefresh: true,
+      );
+      expect(firstEntries.single.name, 'README.md');
+      expect(connector.directoryCalls, isEmpty);
+      await Future<void>.delayed(Duration.zero);
+      firstController.dispose();
+
+      final secondController = AppController(
+        database: database,
+        credentials: credentials,
+        sshConnector: connector,
+      );
+      await secondController.load();
+      expect(
+        secondController
+            .cachedServerDirectory(secondController.servers.single, '/srv/app')
+            ?.single
+            .name,
+        'README.md',
+      );
+
+      connector.directoryProbeOutput =
+          'probe_version=1\n'
+          'fingerprint=200:10\n'
+          'unchanged=0\n'
+          'entry\tf\t20\t1700000001\tREADME.md\n'
+          'entry\td\t4096\t1700000001\tassets\n';
+      final refreshed = await secondController.listServerDirectory(
+        secondController.servers.single,
+        '/srv/app',
+        forceRefresh: true,
+      );
+      expect(
+        refreshed.map((entry) => entry.name),
+        containsAll(['README.md', 'assets']),
+      );
+      expect(connector.directoryCalls, isEmpty);
+      secondController.dispose();
+    },
+  );
+
   test('dashboard and file APIs use the direct SSH connection', () async {
     final database = MemoryAppDatabase();
     final credentials = MemoryCredentialStore();
@@ -2840,6 +2918,7 @@ class _FakeConnector implements SshConnector {
   final directoryCalls = <String>[];
   final writes = <({String path, Uint8List contents})>[];
   final fileOperations = <String>[];
+  String? directoryProbeOutput;
 
   @override
   Future<SshConnection> connect(SshConnectionConfig config) async {
@@ -2848,6 +2927,7 @@ class _FakeConnector implements SshConnector {
       directoryCalls: directoryCalls,
       writes: writes,
       fileOperations: fileOperations,
+      directoryProbeOutput: directoryProbeOutput,
     );
   }
 }
@@ -2858,12 +2938,14 @@ class _FakeConnection implements SshConnection {
     required this.directoryCalls,
     required this.writes,
     required this.fileOperations,
+    this.directoryProbeOutput,
   });
 
   final List<String> commands;
   final List<String> directoryCalls;
   final List<({String path, Uint8List contents})> writes;
   final List<String> fileOperations;
+  final String? directoryProbeOutput;
   bool closed = false;
 
   @override
@@ -2900,6 +2982,14 @@ class _FakeConnection implements SshConnection {
     Duration timeout = const Duration(minutes: 2),
   }) async {
     commands.add(command);
+    if (command.contains('mobile-agent-status directory') &&
+        directoryProbeOutput != null) {
+      return SshCommandResult(
+        stdout: directoryProbeOutput!,
+        stderr: '',
+        exitCode: 0,
+      );
+    }
     if (command.contains('mobile-agent-status.tmp')) {
       return const SshCommandResult(
         stdout: 'installed\n',

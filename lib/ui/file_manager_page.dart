@@ -409,8 +409,16 @@ class _FileManagerPageState extends State<FileManagerPage> {
   }
 
   Future<void> _loadModifiedTimes(Iterable<SshDirectoryEntry> source) async {
+    for (final entry in source) {
+      if (entry.modified != null) {
+        _modifiedTimes[entry.path] = entry.modified;
+      }
+    }
     final missing = source
-        .where((entry) => !_modifiedTimes.containsKey(entry.path))
+        .where(
+          (entry) =>
+              entry.modified == null && !_modifiedTimes.containsKey(entry.path),
+        )
         .toList(growable: false);
     if (missing.isEmpty) return;
     final command =
@@ -782,6 +790,10 @@ class _FileManagerPageState extends State<FileManagerPage> {
           server: widget.server,
           path: entry.path,
           name: entry.name,
+          initialContent: widget.controller.cachedServerFileContent(
+            widget.server,
+            entry,
+          ),
         ),
       ),
     );
@@ -1183,6 +1195,7 @@ class RemoteFileEditorPage extends StatefulWidget {
     required this.server,
     required this.path,
     required this.name,
+    this.initialContent,
     super.key,
   });
 
@@ -1190,6 +1203,7 @@ class RemoteFileEditorPage extends StatefulWidget {
   final ServerProfile server;
   final String path;
   final String name;
+  final String? initialContent;
 
   @override
   State<RemoteFileEditorPage> createState() => _RemoteFileEditorPageState();
@@ -1204,8 +1218,12 @@ class _RemoteFileEditorPageState extends State<RemoteFileEditorPage> {
   @override
   void initState() {
     super.initState();
-    _content = TextEditingController();
-    unawaited(_load());
+    _content = TextEditingController(text: widget.initialContent ?? '');
+    if (widget.initialContent == null) {
+      unawaited(_load());
+    } else {
+      _loading = false;
+    }
   }
 
   @override

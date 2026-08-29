@@ -4,12 +4,100 @@ import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 
 import '../domain/models.dart';
+import '../ssh/ssh_connection.dart';
 
 class TaskEventPage {
   const TaskEventPage({required this.events, required this.hasEarlier});
 
   final List<TaskEvent> events;
   final bool hasEarlier;
+}
+
+class ServerDirectoryCacheRecord {
+  const ServerDirectoryCacheRecord({
+    required this.cacheKey,
+    required this.serverId,
+    required this.host,
+    required this.port,
+    required this.username,
+    required this.remotePath,
+    required this.fingerprint,
+    required this.entries,
+    required this.cachedAt,
+    required this.checkedAt,
+    required this.accessedAt,
+  });
+
+  final String cacheKey;
+  final String serverId;
+  final String host;
+  final int port;
+  final String username;
+  final String remotePath;
+  final String? fingerprint;
+  final List<SshDirectoryEntry> entries;
+  final DateTime cachedAt;
+  final DateTime? checkedAt;
+  final DateTime accessedAt;
+
+  factory ServerDirectoryCacheRecord.fromMap(Map<String, Object?> map) {
+    final rawEntries = jsonDecode(map['entries'] as String) as List;
+    return ServerDirectoryCacheRecord(
+      cacheKey: map['cacheKey'] as String,
+      serverId: map['serverId'] as String,
+      host: map['host'] as String,
+      port: map['port'] as int,
+      username: map['username'] as String,
+      remotePath: map['remotePath'] as String,
+      fingerprint: map['fingerprint'] as String?,
+      entries: [
+        for (final raw in rawEntries)
+          _entryFromJson(Map<String, Object?>.from(raw as Map)),
+      ],
+      cachedAt: DateTime.parse(map['cachedAt'] as String),
+      checkedAt: _parseDate(map['checkedAt']),
+      accessedAt: DateTime.parse(map['accessedAt'] as String),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'cacheKey': cacheKey,
+    'serverId': serverId,
+    'host': host,
+    'port': port,
+    'username': username,
+    'remotePath': remotePath,
+    'fingerprint': fingerprint,
+    'entries': jsonEncode([
+      for (final entry in entries)
+        {
+          'name': entry.name,
+          'path': entry.path,
+          'isDirectory': entry.isDirectory,
+          'size': entry.size,
+          'modified': entry.modified?.toUtc().toIso8601String(),
+        },
+    ]),
+    'cachedAt': cachedAt.toUtc().toIso8601String(),
+    'checkedAt': checkedAt?.toUtc().toIso8601String(),
+    'accessedAt': accessedAt.toUtc().toIso8601String(),
+  };
+
+  static SshDirectoryEntry _entryFromJson(Map<String, Object?> map) {
+    final modified = _parseDate(map['modified']);
+    return SshDirectoryEntry(
+      name: map['name'] as String,
+      path: map['path'] as String,
+      isDirectory: map['isDirectory'] == true,
+      size: (map['size'] as num?)?.toInt(),
+      modified: modified,
+    );
+  }
+
+  static DateTime? _parseDate(Object? value) {
+    final text = value as String?;
+    return text == null || text.isEmpty ? null : DateTime.parse(text);
+  }
 }
 
 class AppDatabase {
@@ -21,7 +109,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 11,
+      version: 12,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -113,6 +201,25 @@ class AppDatabase {
             value TEXT NOT NULL
           )
         ''');
+        await db.execute('''
+          CREATE TABLE server_directory_cache (
+            cacheKey TEXT PRIMARY KEY,
+            serverId TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            remotePath TEXT NOT NULL,
+            fingerprint TEXT,
+            entries TEXT NOT NULL,
+            cachedAt TEXT NOT NULL,
+            checkedAt TEXT,
+            accessedAt TEXT NOT NULL
+          )
+        ''');
+        await db.execute(
+          'CREATE INDEX server_directory_cache_server '
+          'ON server_directory_cache(serverId)',
+        );
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -190,6 +297,27 @@ class AppDatabase {
             "ALTER TABLE providers ADD COLUMN contextWindowMode TEXT NOT NULL DEFAULT 'default'",
           );
         }
+        if (oldVersion < 12) {
+          await db.execute('''
+            CREATE TABLE server_directory_cache (
+              cacheKey TEXT PRIMARY KEY,
+              serverId TEXT NOT NULL,
+              host TEXT NOT NULL,
+              port INTEGER NOT NULL,
+              username TEXT NOT NULL,
+              remotePath TEXT NOT NULL,
+              fingerprint TEXT,
+              entries TEXT NOT NULL,
+              cachedAt TEXT NOT NULL,
+              checkedAt TEXT,
+              accessedAt TEXT NOT NULL
+            )
+          ''');
+          await db.execute(
+            'CREATE INDEX server_directory_cache_server '
+            'ON server_directory_cache(serverId)',
+          );
+        }
       },
     );
   }
@@ -229,6 +357,55 @@ class AppDatabase {
 
   Future<void> deleteServer(String id) async {
     await (await _db).delete('servers', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<List<ServerDirectoryCacheRecord>> loadServerDirectoryCaches() async {
+    final rows = await (await _db).query(
+      'server_directory_cache',
+      orderBy: 'accessedAt DESC',
+    );
+    return rows
+        .map(
+          (row) => ServerDirectoryCacheRecord.fromMap(
+            Map<String, Object?>.from(row),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<void> saveServerDirectoryCache(
+    ServerDirectoryCacheRecord record,
+  ) async {
+    final database = await _db;
+    await database.insert(
+      'server_directory_cache',
+      record.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    await database.rawDelete('''
+      DELETE FROM server_directory_cache
+      WHERE cacheKey NOT IN (
+        SELECT cacheKey FROM server_directory_cache
+        ORDER BY accessedAt DESC
+        LIMIT 256
+      )
+    ''');
+  }
+
+  Future<void> deleteServerDirectoryCaches(String serverId) async {
+    await (await _db).delete(
+      'server_directory_cache',
+      where: 'serverId = ?',
+      whereArgs: [serverId],
+    );
+  }
+
+  Future<void> deleteServerDirectoryCache(String cacheKey) async {
+    await (await _db).delete(
+      'server_directory_cache',
+      where: 'cacheKey = ?',
+      whereArgs: [cacheKey],
+    );
   }
 
   Future<List<ProviderProfile>> loadProviders() async {

@@ -5,6 +5,71 @@ clean_value() {
   printf '%s' "$1" | tr '\t\r\n' '   '
 }
 
+if [ "${1:-}" = "directory" ]; then
+  directory_path=${2:-}
+  expected_fingerprint=${3:-}
+  if [ -z "$directory_path" ] || [ ! -d "$directory_path" ]; then
+    printf 'probe_version=1\n'
+    printf 'error=directory_unavailable\n'
+    exit 1
+  fi
+  if ! command -v stat >/dev/null 2>&1 ||
+     ! command -v sort >/dev/null 2>&1 ||
+     ! command -v cksum >/dev/null 2>&1; then
+    printf 'probe_version=1\n'
+    printf 'error=probe_tools_unavailable\n'
+    exit 1
+  fi
+
+  directory_metadata() {
+    for item in "$directory_path"/* "$directory_path"/.[!.]* "$directory_path"/..?*; do
+      [ -e "$item" ] || [ -L "$item" ] || continue
+      item_name=${item##*/}
+      item_type=f
+      [ -d "$item" ] && item_type=d
+      item_stat=$(stat -c '%s %Y' "$item" 2>/dev/null)
+      [ -n "$item_stat" ] || item_stat=$(stat -f '%z %m' "$item" 2>/dev/null)
+      if [ -z "$item_stat" ]; then
+        printf '__mobile_agent_probe_error__\n'
+        continue
+      fi
+      item_size=${item_stat%% *}
+      item_modified=${item_stat#* }
+      printf '%s\t%s\t%s\t%s\n' \
+        "$item_type" "$item_size" "$item_modified" "$item_name"
+    done
+  }
+
+  directory_output=$(directory_metadata)
+  case "$directory_output" in
+    *__mobile_agent_probe_error__*)
+    printf 'probe_version=1\n'
+    printf 'error=entry_metadata_unavailable\n'
+    exit 1
+    ;;
+  esac
+  sorted_directory=$(printf '%s\n' "$directory_output" | LC_ALL=C sort)
+  fingerprint_value=$(printf '%s\n' "$sorted_directory" | cksum | awk '{print $1 ":" $2}')
+  if [ -z "$fingerprint_value" ]; then
+    printf 'probe_version=1\n'
+    printf 'error=fingerprint_unavailable\n'
+    exit 1
+  fi
+  printf 'probe_version=1\n'
+  printf 'fingerprint=%s\n' "$fingerprint_value"
+  if [ -n "$expected_fingerprint" ] &&
+     [ "$expected_fingerprint" = "$fingerprint_value" ]; then
+    printf 'unchanged=1\n'
+    exit 0
+  fi
+  printf 'unchanged=0\n'
+  printf '%s\n' "$sorted_directory" | while IFS= read -r item_line; do
+    [ -n "$item_line" ] || continue
+    printf 'entry\t%s\n' "$item_line"
+  done
+  exit 0
+fi
+
 hostname_value=$(hostname 2>/dev/null | head -n 1)
 os_value=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
 [ -n "$os_value" ] || os_value=$(uname -s 2>/dev/null)
@@ -38,7 +103,7 @@ cpu_usage=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
   }
 }')
 
-printf 'script_version=1\n'
+printf 'script_version=2\n'
 printf 'hostname=%s\n' "$(clean_value "$hostname_value")"
 printf 'os=%s\n' "$(clean_value "$os_value")"
 printf 'kernel=%s\n' "$(clean_value "$kernel_value")"

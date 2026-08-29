@@ -514,7 +514,7 @@ class _StatusScriptPanel extends StatelessWidget {
           Text(installed ? '轻量状态脚本已安装' : '当前使用一次性基础命令读取状态'),
           const SizedBox(height: 5),
           Text(
-            '脚本位于 ~/.local/bin/mobile-agent-status，不运行后台服务。',
+            '脚本位于 ~/.local/bin/mobile-agent-status，同时提供目录变更探测；不运行后台服务。',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
