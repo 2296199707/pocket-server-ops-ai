@@ -126,9 +126,9 @@ class AgentForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         overlayEnabled = preferences.getBoolean("overlay_enabled", false)
-        overlayScale = preferences.getFloat("overlay_scale", 1.0f).coerceIn(0.75f, 1.4f)
+        overlayScale = preferences.getFloat("overlay_scale", 1.0f).coerceIn(0.2f, 1.4f)
         overlayLengthScale = preferences.getFloat("overlay_length_scale", 1.0f)
-            .coerceIn(0.75f, 1.5f)
+            .coerceIn(0.2f, 1.4f)
         createNotificationChannel()
         startForeground(notificationId, buildNotification())
     }
@@ -197,7 +197,7 @@ class AgentForegroundService : Service() {
                 overlayScale = intent.getDoubleExtra(
                     EXTRA_OVERLAY_SCALE,
                     overlayScale.toDouble(),
-                ).toFloat().coerceIn(0.75f, 1.4f)
+                ).toFloat().coerceIn(0.2f, 1.4f)
                 preferences.edit().putFloat("overlay_scale", overlayScale).apply()
                 if (overlayView != null) {
                     val params = overlayParams
@@ -215,7 +215,7 @@ class AgentForegroundService : Service() {
                 overlayLengthScale = intent.getDoubleExtra(
                     EXTRA_OVERLAY_LENGTH_SCALE,
                     overlayLengthScale.toDouble(),
-                ).toFloat().coerceIn(0.75f, 1.5f)
+                ).toFloat().coerceIn(0.2f, 1.4f)
                 preferences.edit()
                     .putFloat("overlay_length_scale", overlayLengthScale)
                     .apply()
@@ -245,14 +245,14 @@ class AgentForegroundService : Service() {
                     overlayScale = intent.getDoubleExtra(
                         EXTRA_OVERLAY_SCALE,
                         overlayScale.toDouble(),
-                    ).toFloat().coerceIn(0.75f, 1.4f)
+                    ).toFloat().coerceIn(0.2f, 1.4f)
                     preferences.edit().putFloat("overlay_scale", overlayScale).apply()
                 }
                 if (intent.hasExtra(EXTRA_OVERLAY_LENGTH_SCALE)) {
                     overlayLengthScale = intent.getDoubleExtra(
                         EXTRA_OVERLAY_LENGTH_SCALE,
                         overlayLengthScale.toDouble(),
-                    ).toFloat().coerceIn(0.75f, 1.5f)
+                    ).toFloat().coerceIn(0.2f, 1.4f)
                     preferences.edit()
                         .putFloat("overlay_length_scale", overlayLengthScale)
                         .apply()
@@ -1031,7 +1031,7 @@ class AgentForegroundService : Service() {
     private fun overlayWidth(): Int {
         return (scaledDp(overlayBaseWidth) * overlayLengthScale)
             .toInt()
-            .coerceAtLeast(dp(160))
+            .coerceAtLeast(1)
     }
 
     private fun overlayWindowWidth(): Int {

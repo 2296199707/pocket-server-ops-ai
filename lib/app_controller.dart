@@ -381,7 +381,7 @@ class AppController extends ChangeNotifier {
                       '',
                 ) ??
                 1.0)
-            .clamp(0.75, 1.4)
+            .clamp(0.2, 1.4)
             .toDouble();
     _floatingCapsuleLengthScale =
         (double.tryParse(
@@ -391,7 +391,7 @@ class AppController extends ChangeNotifier {
                       '',
                 ) ??
                 1.0)
-            .clamp(0.75, 1.4)
+            .clamp(0.2, 1.4)
             .toDouble();
     _documentModuleEnabled =
         (await _database.readSetting(_documentModuleSetting)) != 'false';
@@ -753,7 +753,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> setFloatingCapsuleScale(double scale) async {
-    final value = scale.clamp(0.75, 1.4).toDouble();
+    final value = scale.clamp(0.2, 1.4).toDouble();
     await _database.writeSetting(_floatingCapsuleScaleSetting, '$value');
     _floatingCapsuleScale = value;
     if (_runningTasks.isNotEmpty) {
@@ -763,7 +763,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> setFloatingCapsuleLengthScale(double scale) async {
-    final value = scale.clamp(0.75, 1.4).toDouble();
+    final value = scale.clamp(0.2, 1.4).toDouble();
     await _database.writeSetting(_floatingCapsuleLengthScaleSetting, '$value');
     _floatingCapsuleLengthScale = value;
     if (_runningTasks.isNotEmpty) {
@@ -3666,16 +3666,6 @@ class AppController extends ChangeNotifier {
     if (previewMode) return const ['demo-model', 'demo-coder'];
     final models = await loadProviderModelMetadata(profile, secret: secret);
     return [for (final model in models) model.model];
-  }
-
-  Future<List<String>> loadProviderImageModels(
-    ProviderProfile profile, {
-    String? secret,
-  }) async {
-    if (previewMode) return const [defaultImageModel];
-    final apiKey =
-        secret ?? await _readCredential(profile.apiKeyRef, 'API Key 不可用');
-    return _providerTester.listImageModels(profile, apiKey);
   }
 
   Future<List<ProviderModelMetadata>> loadProviderModelMetadata(

@@ -245,17 +245,15 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   late final TextEditingController _name;
   late final TextEditingController _baseUrl;
   late final TextEditingController _model;
-  late final TextEditingController _imageModel;
   late final TextEditingController _secret;
+  String _imageModel = '';
   String _reasoningEffort = 'default';
   String _wireApi = 'responses';
   String _contextWindowMode = defaultContextWindowMode;
   bool _isDefault = false;
   bool _saving = false;
   bool _loadingModels = false;
-  bool _loadingImageModels = false;
   List<String> _models = const [];
-  List<String> _imageModels = const [];
   Map<String, ProviderModelMetadata> _modelMetadata = const {};
   String? _error;
 
@@ -266,15 +264,21 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _name = TextEditingController(text: profile?.name);
     _baseUrl = TextEditingController(text: profile?.baseUrl);
     _model = TextEditingController(text: profile?.model);
-    _imageModel = TextEditingController(
-      text: profile == null ? '' : widget.controller.imageModelFor(profile.id),
-    );
+    _imageModel = profile == null
+        ? ''
+        : widget.controller.imageModelFor(profile.id);
     _secret = TextEditingController();
     _reasoningEffort = profile?.reasoningEffort ?? 'default';
     _wireApi = profile?.wireApi ?? 'responses';
     _contextWindowMode = normalizeContextWindowMode(profile?.contextWindowMode);
     _isDefault = profile?.isDefault ?? false;
     _modelMetadata = profile?.modelMetadata ?? const {};
+    _models = {
+      for (final key in _modelMetadata.keys)
+        if (key.trim().isNotEmpty) key.trim(),
+      for (final metadata in _modelMetadata.values)
+        if (metadata.model.trim().isNotEmpty) metadata.model.trim(),
+    }.toList()..sort();
   }
 
   @override
@@ -282,9 +286,24 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _name.dispose();
     _baseUrl.dispose();
     _model.dispose();
-    _imageModel.dispose();
     _secret.dispose();
     super.dispose();
+  }
+
+  List<String> get _defaultModelOptions {
+    final models = <String>{
+      ..._models,
+      if (_model.text.trim().isNotEmpty) _model.text.trim(),
+    };
+    return models.toList()..sort();
+  }
+
+  List<String> get _imageModelOptions {
+    final models = <String>{
+      ..._models,
+      if (_imageModel.trim().isNotEmpty) _imageModel.trim(),
+    };
+    return models.toList()..sort();
   }
 
   ProviderProfile _draftProfile() {
@@ -338,7 +357,6 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                     baseUrl: 'https://api.openai.com/v1',
                     model: 'gpt-5.6-luna',
                     wireApi: 'responses',
-                    imageModel: defaultImageModel,
                   ),
                 ),
                 _ProviderPresetButton(
@@ -363,32 +381,54 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 16),
             TextFormField(
               controller: _name,
               decoration: const InputDecoration(labelText: '名称'),
               validator: _required,
             ),
+            const SizedBox(height: 14),
             TextFormField(
               controller: _baseUrl,
               keyboardType: TextInputType.url,
               decoration: const InputDecoration(labelText: 'Base URL'),
               validator: _required,
             ),
+            const SizedBox(height: 14),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: TextFormField(
-                    controller: _model,
-                    decoration: const InputDecoration(labelText: '默认模型'),
-                    validator: _required,
-                    onChanged: (_) => setState(() {}),
-                  ),
+                  child: _models.isEmpty
+                      ? TextFormField(
+                          controller: _model,
+                          decoration: const InputDecoration(labelText: '默认模型'),
+                          validator: _required,
+                          onChanged: (_) => setState(() {}),
+                        )
+                      : DropdownButtonFormField<String>(
+                          initialValue:
+                              _defaultModelOptions.contains(_model.text.trim())
+                              ? _model.text.trim()
+                              : null,
+                          decoration: const InputDecoration(labelText: '默认模型'),
+                          items: [
+                            for (final model in _defaultModelOptions)
+                              DropdownMenuItem(
+                                value: model,
+                                child: Text(model),
+                              ),
+                          ],
+                          onChanged: (value) {
+                            if (value != null) {
+                              setState(() => _model.text = value);
+                            }
+                          },
+                        ),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
-                  tooltip: '读取模型列表',
+                  tooltip: '刷新模型列表',
                   onPressed: _loadingModels ? null : _loadModels,
                   icon: _loadingModels
                       ? const SizedBox.square(
@@ -399,61 +439,29 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 ),
               ],
             ),
-            if (_models.isNotEmpty)
-              DropdownButtonFormField<String>(
-                initialValue: _models.contains(_model.text)
-                    ? _model.text
-                    : null,
-                decoration: const InputDecoration(labelText: '已发现模型'),
-                items: [
-                  for (final model in _models)
-                    DropdownMenuItem(value: model, child: Text(model)),
-                ],
-                onChanged: (value) {
-                  if (value != null) setState(() => _model.text = value);
-                },
-              ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: TextFormField(
-                    controller: _imageModel,
-                    decoration: const InputDecoration(
-                      labelText: '图片模型',
-                      helperText: '没有生图能力的供应商请选择“无”',
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  tooltip: '获取图片模型',
-                  onPressed: _loadingImageModels ? null : _loadImageModels,
-                  icon: _loadingImageModels
-                      ? const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.image_search_outlined),
-                ),
-              ],
-            ),
+            const SizedBox(height: 14),
             DropdownButtonFormField<String>(
-              initialValue: _imageModel.text.trim().isEmpty
+              initialValue: _imageModel.trim().isEmpty
                   ? ''
-                  : _imageModels.contains(_imageModel.text.trim())
-                  ? _imageModel.text.trim()
-                  : null,
-              decoration: const InputDecoration(labelText: '图片模型选择'),
+                  : _imageModelOptions.contains(_imageModel.trim())
+                  ? _imageModel.trim()
+                  : '',
+              decoration: InputDecoration(
+                labelText: '图片模型',
+                helperText: _models.isEmpty
+                    ? '先刷新模型列表；没有生图能力请选择“无”'
+                    : '从同一模型列表中手动指定，应用不会猜测模型能力',
+              ),
               items: [
                 const DropdownMenuItem(value: '', child: Text('无')),
-                for (final model in _imageModels)
+                for (final model in _imageModelOptions)
                   DropdownMenuItem(value: model, child: Text(model)),
               ],
               onChanged: (value) {
-                if (value != null) setState(() => _imageModel.text = value);
+                if (value != null) setState(() => _imageModel = value);
               },
             ),
+            const SizedBox(height: 14),
             DropdownButtonFormField<String>(
               initialValue: wireApiOptions.contains(_wireApi)
                   ? _wireApi
@@ -467,6 +475,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 if (value != null) setState(() => _wireApi = value);
               },
             ),
+            const SizedBox(height: 14),
             DropdownButtonFormField<String>(
               initialValue: _reasoningEffort,
               decoration: InputDecoration(
@@ -487,6 +496,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 if (value != null) setState(() => _reasoningEffort = value);
               },
             ),
+            const SizedBox(height: 14),
             DropdownButtonFormField<String>(
               initialValue: _contextWindowMode,
               decoration: const InputDecoration(labelText: '上下文窗口'),
@@ -503,11 +513,13 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 }
               },
             ),
+            const SizedBox(height: 10),
             Text(
               '默认使用 Codex 的 context_window；扩展使用模型提供的 '
               'max_context_window。模型没有更大上限时两档相同。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            const SizedBox(height: 14),
             TextFormField(
               controller: _secret,
               obscureText: true,
@@ -522,6 +534,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 return null;
               },
             ),
+            const SizedBox(height: 10),
             SwitchListTile.adaptive(
               contentPadding: EdgeInsets.zero,
               title: const Text('设为默认供应商'),
@@ -529,7 +542,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
               onChanged: (value) => setState(() => _isDefault = value),
             ),
             if (_error != null) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: 14),
               Text(
                 _error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
@@ -570,7 +583,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         secret: _secret.text,
         isDefault: _isDefault,
         modelMetadata: _modelMetadata,
-        imageModel: _imageModel.text,
+        imageModel: _imageModel,
       );
       try {
         await widget.controller.loadProviderModelMetadata(saved);
@@ -617,7 +630,10 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       );
       if (mounted) {
         setState(() {
-          _models = [for (final item in metadata) item.model];
+          _models = {
+            for (final item in metadata)
+              if (item.model.trim().isNotEmpty) item.model.trim(),
+          }.toList()..sort();
           _modelMetadata = {
             ..._modelMetadata,
             for (final item in metadata)
@@ -629,35 +645,6 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       if (mounted) setState(() => _error = '读取模型失败：$error');
     } finally {
       if (mounted) setState(() => _loadingModels = false);
-    }
-  }
-
-  Future<void> _loadImageModels() async {
-    final profile = ProviderProfile(
-      id: widget.existing?.id ?? 'image-model-test',
-      name: _name.text.trim().isEmpty ? '图片模型测试' : _name.text.trim(),
-      baseUrl: _baseUrl.text.trim(),
-      model: _model.text.trim().isEmpty ? 'unknown' : _model.text.trim(),
-      reasoningEffort: _reasoningEffort,
-      wireApi: _wireApi,
-      contextWindowMode: _contextWindowMode,
-      apiKeyRef: widget.existing?.apiKeyRef,
-      isDefault: _isDefault,
-    );
-    setState(() {
-      _loadingImageModels = true;
-      _error = null;
-    });
-    try {
-      final models = await widget.controller.loadProviderImageModels(
-        profile,
-        secret: _secret.text.isEmpty ? null : _secret.text,
-      );
-      if (mounted) setState(() => _imageModels = models);
-    } catch (error) {
-      if (mounted) setState(() => _error = '读取图片模型失败：$error');
-    } finally {
-      if (mounted) setState(() => _loadingImageModels = false);
     }
   }
 
@@ -673,7 +660,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       _baseUrl.text = baseUrl;
       _model.text = model;
       _wireApi = wireApi;
-      _imageModel.text = imageModel;
+      _imageModel = imageModel;
       _reasoningEffort = defaultReasoningEffort;
       _models = const [];
       _modelMetadata = const {};

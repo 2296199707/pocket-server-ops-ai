@@ -86,6 +86,31 @@ void main() {
     reloaded.dispose();
   });
 
+  test('floating capsule size and length allow 20 percent', () async {
+    final database = MemoryAppDatabase();
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await controller.load();
+
+    await controller.setFloatingCapsuleScale(0.1);
+    await controller.setFloatingCapsuleLengthScale(0.1);
+
+    expect(controller.floatingCapsuleScale, 0.2);
+    expect(controller.floatingCapsuleLengthScale, 0.2);
+
+    final reloaded = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+    );
+    await reloaded.load();
+    expect(reloaded.floatingCapsuleScale, 0.2);
+    expect(reloaded.floatingCapsuleLengthScale, 0.2);
+    controller.dispose();
+    reloaded.dispose();
+  });
+
   test('document module is enabled by default and can be disabled', () async {
     final database = MemoryAppDatabase();
     final controller = AppController(

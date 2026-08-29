@@ -24,37 +24,46 @@ class ProvidersPage extends StatelessWidget {
             : ListView.separated(
                 padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
                 itemCount: controller.providers.length + 1,
-                separatorBuilder: (_, _) => const Divider(height: 1),
+                separatorBuilder: (_, _) => const Divider(height: 20),
                 itemBuilder: (context, index) {
                   if (index == 0) {
                     return _ImageProviderTile(controller: controller);
                   }
                   final provider = controller.providers[index - 1];
-                  return ListTile(
-                    leading: const CircleAvatar(
-                      child: Icon(Icons.smart_toy_outlined),
-                    ),
-                    title: Text(provider.name),
-                    subtitle: Text(
-                      '${provider.model} · ${wireApiLabel(provider.wireApi)} · '
-                      '推理${reasoningEffortLabel(provider.reasoningEffort)}',
-                    ),
-                    trailing: PopupMenuButton<String>(
-                      tooltip: '供应商操作',
-                      onSelected: (value) {
-                        if (value == 'edit') {
-                          showProviderEditor(context, controller, provider);
-                        } else if (value == 'test') {
-                          _testProvider(context, provider);
-                        } else {
-                          _deleteProvider(context, provider);
-                        }
-                      },
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(value: 'test', child: Text('测试连接')),
-                        PopupMenuItem(value: 'edit', child: Text('编辑')),
-                        PopupMenuItem(value: 'delete', child: Text('删除')),
-                      ],
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 6,
+                      ),
+                      leading: const CircleAvatar(
+                        child: Icon(Icons.smart_toy_outlined),
+                      ),
+                      title: Text(provider.name),
+                      subtitle: Text(
+                        '${provider.model} · ${wireApiLabel(provider.wireApi)} · '
+                        '推理${reasoningEffortLabel(provider.reasoningEffort)}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: PopupMenuButton<String>(
+                        tooltip: '供应商操作',
+                        onSelected: (value) {
+                          if (value == 'edit') {
+                            showProviderEditor(context, controller, provider);
+                          } else if (value == 'test') {
+                            _testProvider(context, provider);
+                          } else {
+                            _deleteProvider(context, provider);
+                          }
+                        },
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(value: 'test', child: Text('测试连接')),
+                          PopupMenuItem(value: 'edit', child: Text('编辑')),
+                          PopupMenuItem(value: 'delete', child: Text('删除')),
+                        ],
+                      ),
                     ),
                   );
                 },
@@ -128,38 +137,107 @@ class _ImageProviderTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final selected = controller.imageProviderId ?? 'follow-default';
     final selectedProvider = selected == 'follow-default'
-        ? null
+        ? controller.providers
+              .where((provider) => provider.isDefault)
+              .firstOrNull
         : controller.providers
               .where((provider) => provider.id == selected)
               .firstOrNull;
     final imageModel = selectedProvider == null
         ? ''
-        : controller.imageModelFor(selectedProvider.id);
-    return ListTile(
-      leading: const CircleAvatar(child: Icon(Icons.image_outlined)),
-      title: const Text('生图供应商'),
-      subtitle: Text(
-        selectedProvider == null
-            ? 'Agent 调用 image.generate 时使用，可跟随默认供应商'
-            : '图片模型：${imageModel.isEmpty ? '无' : imageModel}',
-      ),
-      trailing: DropdownButton<String>(
-        value: selected,
-        underline: const SizedBox.shrink(),
-        items: [
-          const DropdownMenuItem(value: 'follow-default', child: Text('跟随默认')),
-          for (final provider in controller.providers)
-            DropdownMenuItem(value: provider.id, child: Text(provider.name)),
-        ],
-        onChanged: (value) {
-          if (value == null) return;
-          unawaited(
-            controller.setImageProviderId(
-              value == 'follow-default' ? null : value,
+        : controller.imageModelFor(selectedProvider.id).trim();
+    final modelOptions = selectedProvider == null
+        ? const <String>[]
+        : _imageModelOptions(controller, selectedProvider);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const CircleAvatar(child: Icon(Icons.image_outlined)),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  '生图供应商',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              DropdownButton<String>(
+                value: selected,
+                underline: const SizedBox.shrink(),
+                items: [
+                  const DropdownMenuItem(
+                    value: 'follow-default',
+                    child: Text('跟随默认'),
+                  ),
+                  for (final provider in controller.providers)
+                    DropdownMenuItem(
+                      value: provider.id,
+                      child: Text(provider.name),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  unawaited(
+                    controller.setImageProviderId(
+                      value == 'follow-default' ? null : value,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (selectedProvider == null)
+            const Padding(
+              padding: EdgeInsets.only(left: 56),
+              child: Text('选择供应商后，在这里选择图片模型；没有生图能力请选择“无”'),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.only(left: 56),
+              child: DropdownButtonFormField<String>(
+                initialValue: modelOptions.contains(imageModel)
+                    ? imageModel
+                    : '',
+                decoration: const InputDecoration(
+                  labelText: '图片模型',
+                  helperText: '从该供应商已获取的模型列表中手动选择',
+                ),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('无')),
+                  for (final model in modelOptions)
+                    DropdownMenuItem(value: model, child: Text(model)),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  unawaited(
+                    controller.setImageModel(selectedProvider.id, value),
+                  );
+                },
+              ),
             ),
-          );
-        },
+        ],
       ),
     );
   }
+}
+
+List<String> _imageModelOptions(
+  AppController controller,
+  ProviderProfile provider,
+) {
+  final models = <String>{
+    if (provider.model.trim().isNotEmpty) provider.model.trim(),
+    for (final key in provider.modelMetadata.keys)
+      if (key.trim().isNotEmpty) key.trim(),
+    for (final metadata in provider.modelMetadata.values)
+      if (metadata.model.trim().isNotEmpty) metadata.model.trim(),
+  };
+  final selected = controller.imageModelFor(provider.id).trim();
+  if (selected.isNotEmpty) models.add(selected);
+  return models.toList()..sort();
 }

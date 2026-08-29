@@ -143,29 +143,4 @@ void main() {
     expect(requests, 2);
     expect(models.single.model, 'model-1');
   });
-
-  test(
-    'listImageModels selects image model ids from the provider catalog',
-    () async {
-      final client = MockClient(
-        (_) async => Response(
-          jsonEncode({
-            'data': [
-              {'id': 'gpt-5.6-luna'},
-              {'id': 'gpt-image-1'},
-              {'id': 'gpt-image-2'},
-              {'id': 'dall-e-3'},
-            ],
-          }),
-          200,
-        ),
-      );
-      addTearDown(client.close);
-
-      final models = await ProviderConnectionTester(client: client)
-          .listImageModels(_profile('https://provider.example/v1'), 'secret');
-
-      expect(models, ['gpt-image-2', 'gpt-image-1', 'dall-e-3']);
-    },
-  );
 }

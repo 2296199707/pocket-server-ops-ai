@@ -9,7 +9,6 @@ const wireApiOptions = <String>['responses', 'chat-completions'];
 
 const defaultContextWindowMode = 'default';
 const maximumContextWindowMode = 'maximum';
-const defaultImageModel = 'gpt-image-2';
 const contextWindowModeOptions = <String>[
   defaultContextWindowMode,
   maximumContextWindowMode,

@@ -1766,9 +1766,9 @@ class _FloatingCapsuleScaleSettingsTile extends StatelessWidget {
                     child: Text('整体 ${(scale * 100).round()}%'),
                   ),
                   Slider(
-                    min: 0.75,
+                    min: 0.2,
                     max: 1.4,
-                    divisions: 13,
+                    divisions: 24,
                     value: scale,
                     label: '${(scale * 100).round()}%',
                     onChanged: (next) => setState(() => scale = next),
@@ -1778,9 +1778,9 @@ class _FloatingCapsuleScaleSettingsTile extends StatelessWidget {
                     child: Text('长度 ${(length * 100).round()}%'),
                   ),
                   Slider(
-                    min: 0.75,
+                    min: 0.2,
                     max: 1.4,
-                    divisions: 13,
+                    divisions: 24,
                     value: length,
                     label: '${(length * 100).round()}%',
                     onChanged: (next) => setState(() => length = next),

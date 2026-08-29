@@ -22,6 +22,7 @@ void main() {
         jsonEncode({
           'data': [
             {'id': 'saved-model'},
+            {'id': 'image-model'},
           ],
         }),
         200,
@@ -43,6 +44,8 @@ void main() {
     );
     await tester.tap(find.byTooltip('添加 AI 供应商'));
     await tester.pumpAndSettle();
+    expect(find.byTooltip('获取图片模型'), findsNothing);
+    expect(find.byTooltip('刷新模型列表'), findsOneWidget);
 
     Finder input(String label) => find.byWidgetPredicate((widget) {
       return widget is TextField && widget.decoration?.labelText == label;
@@ -54,10 +57,25 @@ void main() {
     await tester.drag(find.byType(ListView).last, const Offset(0, -500));
     await tester.pumpAndSettle();
     await tester.enterText(input('API Key'), 'secret');
+    await tester.ensureVisible(find.text('设为默认供应商'));
+    await tester.tap(find.text('设为默认供应商'));
+    await tester.pump();
     await tester.tap(find.text('保存').last);
     await tester.pumpAndSettle();
 
     expect(modelRequests, 1);
     expect(controller.providers.single.modelMetadata, contains('saved-model'));
+    expect(controller.providers.single.modelMetadata, contains('image-model'));
+    expect(find.text('图片模型'), findsOneWidget);
+
+    await tester.tap(find.byType(DropdownButtonFormField<String>));
+    await tester.pumpAndSettle();
+    expect(find.text('image-model'), findsOneWidget);
+    await tester.tap(find.text('image-model').last);
+    await tester.pumpAndSettle();
+    expect(
+      controller.imageModelFor(controller.providers.single.id),
+      'image-model',
+    );
   });
 }
