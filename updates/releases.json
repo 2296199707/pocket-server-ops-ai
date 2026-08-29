@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.3-beta.27",
+      "title": "PocketServerOps AI v1.0.3-beta.27",
+      "notes": "按供应商模型目录显示推理强度；模型选择器默认折叠、推理强度默认展开；保存供应商时加载并缓存模型元数据，只有手动刷新才重新请求；无能力元数据时不猜测固定推理枚举。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.27",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.3-beta.27/pocket-server-ops-ai-v1.0.3-beta.27-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-29T04:55:09Z"
+    },
+    {
       "version": "1.0.3-beta.26",
       "title": "PocketServerOps AI v1.0.3-beta.26",
       "notes": "Add persistent server directory cache, lightweight status-script change detection, and on-demand preload for changed small text files.",

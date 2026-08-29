@@ -1162,8 +1162,13 @@
 - 定向测试：`test/domain/models_test.dart` 验证模型只声明 `low/high` 时不生成
   `medium`；`test/provider_connection_tester_test.dart` 验证 Codex 字段、sub2api
   `reasoningEfforts` 和 `client_version`；`test/ui/chat_page_test.dart` 验证模型折叠和推理
-  列表精确显示。当前修复已通过 33 项定向测试和 `flutter analyze --no-pub`，随本次
-  `1.0.3-beta.27` 提交并发布。
+  列表精确显示。当前修复已通过 33 项定向测试和 `flutter analyze --no-pub`。
+- 发布结果：功能与版本提交为 `4bc758c`，版本为 `1.0.3-beta.27+36`；已创建 GitHub
+  Pre-release `v1.0.3-beta.27`，标签指向 `beta`，并上传
+  `pocket-server-ops-ai-v1.0.3-beta.27-release.apk`。APK 大小 `78,275,935` bytes，
+  SHA-256 `7cbfc1ae70634dc2f3a43f87926f1e1475e7caf726e9570bd4b9577dba54766b`。
+  APK 路径：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.27-release.apk`；
+  Release 地址：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.27`。
 
 ## 9. 发现记录模板
 
