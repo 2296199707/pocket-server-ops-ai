@@ -12,6 +12,7 @@ import '../local/local_preview.dart';
 import '../local/project_files.dart';
 import '../ssh/resumable_file_download.dart';
 import '../ssh/resumable_file_upload.dart';
+import '../ssh/remote_process.dart';
 import '../ssh/ssh_connection.dart';
 import 'ai_protocol.dart';
 
@@ -67,26 +68,46 @@ class AgentTool {
 
 class RemoteAgentTools {
   RemoteAgentTools(
-    this._connection, {
+    SshConnection connection, {
     this.workingDirectory,
     this.project,
     this.projectFiles,
     this.localAccess,
-  });
+    this.reconnect,
+    this.remoteTaskRecoveryEnabled = true,
+  }) : _connection = connection {
+    _processController = RemoteProcessController(
+      connection,
+      reconnect: reconnect,
+      onConnectionChanged: (value) => _connection = value,
+    );
+  }
 
-  final SshConnection _connection;
+  SshConnection _connection;
   final String? workingDirectory;
   Project? project;
   ProjectFileStore? projectFiles;
   LocalFileAccessStore? localAccess;
+  final RemoteConnectionReconnector? reconnect;
+  bool remoteTaskRecoveryEnabled;
+  late final RemoteProcessController _processController;
   final Map<String, _ManagedProcess> _processes = {};
   final List<Future<SshCommandStream>> _startingProcesses = [];
   Future<void>? _closeFuture;
   var _closing = false;
 
-  bool get isClosed => _connection.isClosed;
+  bool get isClosed => _closing;
 
   SshConnection get connection => _connection;
+
+  void updateConnection(SshConnection connection) {
+    _connection = connection;
+    _processController.updateConnection(connection);
+  }
+
+  void setRemoteTaskRecoveryEnabled(bool enabled) {
+    remoteTaskRecoveryEnabled = enabled;
+  }
 
   void configureContext({
     required Project? project,
@@ -100,11 +121,16 @@ class RemoteAgentTools {
 
   List<AgentTool> get tools => [
     AgentTool(
-      definition: const AiToolDefinition(
+      definition: AiToolDefinition(
         name: 'terminal.exec',
-        description:
-            'Run a short shell command on the selected server with a '
-            'two-minute timeout.',
+        description: remoteTaskRecoveryEnabled
+            ? 'Run a short shell command on the selected server with a '
+                  'two-minute timeout. The command is recorded as a remote job '
+                  'so a broken SSH channel can be reopened without running it '
+                  'twice.'
+            : 'Run a short shell command on the selected server with a '
+                  'two-minute timeout on the current SSH connection. If the '
+                  'connection breaks, do not replay the command.',
         parameters: {
           'type': 'object',
           'required': ['command'],
@@ -120,9 +146,14 @@ class RemoteAgentTools {
       writesRemoteState: true,
     ),
     AgentTool(
-      definition: const AiToolDefinition(
+      definition: AiToolDefinition(
         name: 'terminal.start',
-        description: 'Start a long-running shell command.',
+        description: remoteTaskRecoveryEnabled
+            ? 'Start a long-running shell command. Non-PTY jobs keep a remote '
+                  'process record and can be polled after reconnecting.'
+            : 'Start a long-running shell command on the current SSH '
+                  'connection. The process cannot be recovered after a '
+                  'connection break.',
         parameters: {
           'type': 'object',
           'required': ['command'],
@@ -332,33 +363,102 @@ class RemoteAgentTools {
   ];
 
   Future<Object?> _exec(Map<String, Object?> arguments) async {
-    final result = await _connection.run(
-      _requiredString(arguments, 'command'),
+    if (!remoteTaskRecoveryEnabled) {
+      final result = await _connection.run(
+        _requiredString(arguments, 'command'),
+        workingDirectory:
+            _optionalString(arguments, 'working_directory') ?? workingDirectory,
+        input: _optionalString(arguments, 'input'),
+      );
+      return {
+        'exit_code': result.exitCode,
+        'stdout_truncated': result.stdoutTruncated,
+        'stderr_truncated': result.stderrTruncated,
+        'stdout': result.stdout,
+        'stderr': result.stderr,
+      };
+    }
+    final process = await _processController.start(
+      command: _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
-      input: _optionalString(arguments, 'input'),
+      initialInput: _optionalString(arguments, 'input') ?? '',
     );
+    final stdout = SshOutputBuffer();
+    final stderr = SshOutputBuffer();
+    var stdoutOffset = 0;
+    var stderrOffset = 0;
+    final deadline = DateTime.now().add(const Duration(minutes: 2));
+    RemoteProcessSnapshot? finalSnapshot;
+    while (true) {
+      final remaining = deadline.difference(DateTime.now()).inMilliseconds;
+      if (remaining <= 0) {
+        try {
+          await _processController.stop(process.id);
+        } catch (_) {}
+        throw const SshCommandTimeout(Duration(minutes: 2));
+      }
+      final snapshot = await _processController.poll(
+        process.id,
+        stdoutOffset: stdoutOffset,
+        stderrOffset: stderrOffset,
+        waitMs: remaining.clamp(
+          0,
+          RemoteProcessController.maxPollWaitMilliseconds,
+        ),
+      );
+      stdout.add(snapshot.stdout);
+      stderr.add(snapshot.stderr);
+      stdoutOffset = snapshot.stdoutOffset;
+      stderrOffset = snapshot.stderrOffset;
+      finalSnapshot = snapshot;
+      final outputComplete =
+          snapshot.stdoutTotalBytes == null ||
+          stdoutOffset >= snapshot.stdoutTotalBytes!;
+      final errorComplete =
+          snapshot.stderrTotalBytes == null ||
+          stderrOffset >= snapshot.stderrTotalBytes!;
+      if (snapshot.done && outputComplete && errorComplete) break;
+    }
+    final snapshot = finalSnapshot;
+    if (snapshot.failed && snapshot.exitCode == null) {
+      throw StateError(snapshot.error ?? '远程命令状态未知');
+    }
     return {
-      'exit_code': result.exitCode,
-      'stdout_truncated': result.stdoutTruncated,
-      'stderr_truncated': result.stderrTruncated,
-      'stdout': result.stdout,
-      'stderr': result.stderr,
+      'exit_code': snapshot.exitCode,
+      'stdout_truncated': stdout.truncated,
+      'stderr_truncated': stderr.truncated,
+      'stdout': stdout.value,
+      'stderr': stderr.value,
     };
   }
 
   Future<Object?> _start(Map<String, Object?> arguments) async {
+    if (!remoteTaskRecoveryEnabled || arguments['pty'] == true) {
+      return _startInteractive(arguments);
+    }
+    final process = await _processController.start(
+      command: _requiredString(arguments, 'command'),
+      workingDirectory:
+          _optionalString(arguments, 'working_directory') ?? workingDirectory,
+    );
+    return {'process_id': process.id, 'persistent': true};
+  }
+
+  Future<Object?> _startInteractive(Map<String, Object?> arguments) async {
     _removeCompletedProcesses();
     if (_closing) throw StateError('远程工具正在关闭');
-    if (_processes.length + _startingProcesses.length >= _maxManagedProcesses) {
+    if (_processes.length + _startingProcesses.length >=
+        RemoteProcessController.maxManagedProcesses) {
       throw StateError('托管进程数量已达到上限（$_maxManagedProcesses），请先停止不再使用的进程');
     }
     final processId = 'process-${DateTime.now().microsecondsSinceEpoch}';
+    final pty = arguments['pty'] == true;
     final pending = _connection.execute(
       _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
-      pty: arguments['pty'] == true,
+      pty: pty,
     );
     _startingProcesses.add(pending);
     try {
@@ -368,7 +468,11 @@ class RemoteAgentTools {
         throw StateError('远程工具正在关闭');
       }
       _processes[processId] = _ManagedProcess(stream);
-      return {'process_id': processId};
+      return {
+        'process_id': processId,
+        'persistent': false,
+        if (pty) 'pty': true,
+      };
     } finally {
       _startingProcesses.remove(pending);
     }
@@ -386,34 +490,85 @@ class RemoteAgentTools {
         'must not exceed $_maxPollWaitMilliseconds',
       );
     }
-    final process = _process(arguments);
-    await process.wait(
-      timeout: Duration(milliseconds: waitMs),
+    final process = _processes[processId];
+    if (process != null) {
+      await process.wait(
+        timeout: Duration(milliseconds: waitMs),
+        stdoutOffset: stdoutOffset,
+        stderrOffset: stderrOffset,
+      );
+      return {
+        'process_id': processId,
+        ...process.snapshot(
+          stdoutOffset: stdoutOffset,
+          stderrOffset: stderrOffset,
+        ),
+      };
+    }
+    if (!_canUsePersistentProcess(processId)) {
+      throw StateError('服务器任务断线恢复已关闭，当前进程只能在原 SSH 连接中继续使用');
+    }
+    final snapshot = await _processController.poll(
+      processId,
       stdoutOffset: stdoutOffset,
       stderrOffset: stderrOffset,
+      waitMs: waitMs,
     );
     return {
       'process_id': processId,
-      ...process.snapshot(
-        stdoutOffset: stdoutOffset,
-        stderrOffset: stderrOffset,
-      ),
+      'stdout_offset': snapshot.stdoutOffset,
+      'stderr_offset': snapshot.stderrOffset,
+      if (snapshot.stdoutTotalBytes != null)
+        'stdout_total_bytes': snapshot.stdoutTotalBytes,
+      if (snapshot.stderrTotalBytes != null)
+        'stderr_total_bytes': snapshot.stderrTotalBytes,
+      'stdout_truncated': false,
+      'stderr_truncated': false,
+      'done': snapshot.done,
+      'failed': snapshot.failed,
+      if (snapshot.error != null) 'error': snapshot.error,
+      'exit_code': snapshot.exitCode,
+      'stdout': snapshot.stdout,
+      'stderr': snapshot.stderr,
     };
   }
 
   Future<Object?> _write(Map<String, Object?> arguments) async {
-    final process = _process(arguments);
-    process.stream.writeText(_requiredString(arguments, 'input'));
-    return {'process_id': _requiredString(arguments, 'process_id')};
+    final processId = _requiredString(arguments, 'process_id');
+    final process = _processes[processId];
+    if (process != null) {
+      process.stream.writeText(_requiredString(arguments, 'input'));
+    } else {
+      if (!_canUsePersistentProcess(processId)) {
+        throw StateError('服务器任务断线恢复已关闭，当前进程只能在原 SSH 连接中继续使用');
+      }
+      await _processController.write(
+        processId,
+        _requiredString(arguments, 'input'),
+      );
+    }
+    return {'process_id': processId};
   }
 
   Future<Object?> _stop(Map<String, Object?> arguments) async {
-    final process = _process(arguments);
-    await process.stop();
+    final processId = _requiredString(arguments, 'process_id');
+    final process = _processes[processId];
+    if (process != null) {
+      await process.stop();
+      return {
+        'process_id': processId,
+        'stopped': process.failure == null,
+        if (process.failure != null) 'error': process.failureDescription,
+      };
+    }
+    if (!_canUsePersistentProcess(processId)) {
+      throw StateError('服务器任务断线恢复已关闭，当前进程只能在原 SSH 连接中继续使用');
+    }
+    final snapshot = await _processController.stop(processId);
     return {
-      'process_id': _requiredString(arguments, 'process_id'),
-      'stopped': process.failure == null,
-      if (process.failure != null) 'error': process.failureDescription,
+      'process_id': processId,
+      'stopped': snapshot.done && !snapshot.failed,
+      if (snapshot.error != null) 'error': snapshot.error,
     };
   }
 
@@ -616,12 +771,8 @@ class RemoteAgentTools {
     return path_util.posix.join(directory, filePath);
   }
 
-  _ManagedProcess _process(Map<String, Object?> arguments) {
-    final id = _requiredString(arguments, 'process_id');
-    final process = _processes[id];
-    if (process == null) throw StateError('Unknown process: $id');
-    return process;
-  }
+  bool _canUsePersistentProcess(String processId) =>
+      remoteTaskRecoveryEnabled || _processController.hasHandle(processId);
 
   Future<void> close() {
     final existing = _closeFuture;
@@ -641,6 +792,7 @@ class RemoteAgentTools {
       for (final process in _processes.values) process.close(),
     ], eagerError: false);
     _processes.clear();
+    await _processController.close();
   }
 
   Future<void> _closeStartingProcess(Future<SshCommandStream> pending) async {
@@ -661,7 +813,8 @@ class RemoteAgentTools {
 
   bool get hasRunningProcesses =>
       _startingProcesses.isNotEmpty ||
-      _processes.values.any((value) => !value.done);
+      _processes.values.any((value) => !value.done) ||
+      _processController.hasRunningProcesses;
 
   static String _requiredString(Map<String, Object?> arguments, String key) {
     final value = arguments[key];

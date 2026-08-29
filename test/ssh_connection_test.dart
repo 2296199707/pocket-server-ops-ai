@@ -171,7 +171,10 @@ void main() {
     'terminal start counts concurrent channel opens in the 64 limit',
     () async {
       final connection = _FakeConnection();
-      final tools = RemoteAgentTools(connection);
+      final tools = RemoteAgentTools(
+        connection,
+        remoteTaskRecoveryEnabled: false,
+      );
       final start = tools.tools.singleWhere(
         (tool) => tool.definition.name == 'terminal.start',
       );
@@ -202,7 +205,10 @@ void main() {
     final connection = _FakeConnection(
       stream: SshCommandStream(harness.session),
     );
-    final tools = RemoteAgentTools(connection);
+    final tools = RemoteAgentTools(
+      connection,
+      remoteTaskRecoveryEnabled: false,
+    );
     final start = tools.tools.singleWhere(
       (tool) => tool.definition.name == 'terminal.start',
     );

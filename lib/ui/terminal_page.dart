@@ -13,17 +13,20 @@ class TerminalPage extends StatefulWidget {
   const TerminalPage({
     required this.controller,
     required this.server,
+    this.taskId,
     super.key,
   });
 
   final AppController controller;
   final ServerProfile server;
+  final String? taskId;
 
   @override
   State<TerminalPage> createState() => _TerminalPageState();
 }
 
 class _TerminalPageState extends State<TerminalPage> {
+  late ServerProfile _server;
   late final Terminal _terminal = Terminal(maxLines: 10000);
   late final TerminalController _terminalController = TerminalController();
 
@@ -47,9 +50,10 @@ class _TerminalPageState extends State<TerminalPage> {
   @override
   void initState() {
     super.initState();
+    _server = widget.server;
     _fileManagerPath =
-        widget.server.defaultWorkingDirectory?.trim().isNotEmpty == true
-        ? widget.server.defaultWorkingDirectory!
+        _server.defaultWorkingDirectory?.trim().isNotEmpty == true
+        ? _server.defaultWorkingDirectory!
         : '/';
     _terminal.onOutput = _onTerminalOutput;
     _terminal.onResize = (width, height, _, _) {
@@ -62,11 +66,41 @@ class _TerminalPageState extends State<TerminalPage> {
     };
     if (_preview) {
       _terminal.write('\$ ');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_initialize());
+      });
     } else {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) unawaited(_connect());
+        if (mounted) unawaited(_initialize());
       });
     }
+  }
+
+  Task? get _boundTask {
+    final id = widget.taskId;
+    return id == null ? null : widget.controller.taskForId(id);
+  }
+
+  List<ServerProfile> get _availableServers =>
+      widget.controller.serversForTask(_boundTask);
+
+  Future<void> _initialize() async {
+    final initialServerId = _server.id;
+    final selected = await widget.controller.resolveServerForFeature(
+      task: _boundTask,
+      feature: 'terminal',
+      fallbackServerId: _server.id,
+    );
+    if (!mounted) return;
+    if (_server.id == initialServerId &&
+        selected != null &&
+        selected.id != _server.id) {
+      setState(() {
+        _server = selected;
+        _fileManagerPath = _defaultServerPath(selected);
+      });
+    }
+    if (!_preview) await _connect();
   }
 
   @override
@@ -85,7 +119,7 @@ class _TerminalPageState extends State<TerminalPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('${widget.server.name} · 终端'),
+            Text('${_server.name} · 终端'),
             Text(
               _statusLabel,
               style: Theme.of(context).textTheme.labelSmall
@@ -94,6 +128,30 @@ class _TerminalPageState extends State<TerminalPage> {
           ],
         ),
         actions: [
+          if (_availableServers.length > 1)
+            PopupMenuButton<String>(
+              tooltip: '切换服务器',
+              icon: const Icon(Icons.swap_horiz_rounded),
+              onSelected: (id) => unawaited(_switchServer(id)),
+              itemBuilder: (context) => [
+                for (final server in _availableServers)
+                  PopupMenuItem(
+                    value: server.id,
+                    child: Row(
+                      children: [
+                        Icon(
+                          server.id == _server.id
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_unchecked,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(child: Text(server.name)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
           IconButton(
             tooltip: '文件管理器',
             onPressed: _openFileDrawer,
@@ -245,12 +303,10 @@ class _TerminalPageState extends State<TerminalPage> {
       _connecting = true;
       _disconnected = false;
     });
-    _terminal.write(
-      '\r\n[正在连接 ${widget.server.host}:${widget.server.port}]\r\n',
-    );
+    _terminal.write('\r\n[正在连接 ${_server.host}:${_server.port}]\r\n');
     try {
       final session = await widget.controller.openServerTerminal(
-        widget.server,
+        _server,
         width: _terminalWidth,
         height: _terminalHeight,
         onFirstHostKey: _confirmHostKey,
@@ -276,7 +332,7 @@ class _TerminalPageState extends State<TerminalPage> {
       );
       setState(() => _connecting = false);
       session.stream.resizeTerminal(_terminalWidth, _terminalHeight);
-      final directory = widget.server.defaultWorkingDirectory?.trim();
+      final directory = _server.defaultWorkingDirectory?.trim();
       if (directory != null && directory.isNotEmpty) {
         session.stream.writeText('cd -- ${_quote(directory)}\n');
       }
@@ -319,7 +375,7 @@ class _TerminalPageState extends State<TerminalPage> {
     if (mounted) setState(() => _previewRunning = true);
     try {
       final result = await widget.controller.runServerCommand(
-        widget.server,
+        _server,
         command,
         onFirstHostKey: _confirmHostKey,
       );
@@ -353,7 +409,8 @@ class _TerminalPageState extends State<TerminalPage> {
           height: height,
           child: FileManagerPage(
             controller: widget.controller,
-            server: widget.server,
+            server: _server,
+            taskId: widget.taskId,
             initialPath: _fileManagerPath,
             onCdToDirectory: (path) {
               _cdToDirectory(path);
@@ -381,6 +438,47 @@ class _TerminalPageState extends State<TerminalPage> {
       return;
     }
     _session?.stream.writeText('cd -- ${_quote(directory)}\n');
+  }
+
+  String _defaultServerPath(ServerProfile server) {
+    final path = server.defaultWorkingDirectory?.trim();
+    return path == null || path.isEmpty ? '/' : path;
+  }
+
+  Future<void> _switchServer(String id) async {
+    if (_connecting || id == _server.id) return;
+    ServerProfile? selected;
+    for (final server in _availableServers) {
+      if (server.id == id) {
+        selected = server;
+        break;
+      }
+    }
+    if (selected == null) return;
+    try {
+      await widget.controller.setServerForFeature(
+        task: _boundTask,
+        feature: 'terminal',
+        serverId: selected.id,
+      );
+      await _closeSession();
+      if (!mounted) return;
+      setState(() {
+        _server = selected!;
+        _fileManagerPath =
+            _server.defaultWorkingDirectory?.trim().isNotEmpty == true
+            ? _server.defaultWorkingDirectory!
+            : '/';
+        _disconnected = false;
+      });
+      _terminal.write('\r\n[已切换到 ${_server.name}，正在重新连接]\r\n');
+      if (!_preview) unawaited(_connect());
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换服务器失败：$error')));
+      }
+    }
   }
 
   Future<bool> _confirmHostKey(SshHostKey key) async {

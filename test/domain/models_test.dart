@@ -188,6 +188,28 @@ void main() {
       ),
       ['default', 'low', 'high', 'medium'],
     );
+    final legacyProvider = provider.copyWith(reasoningEffort: ' xhigh ');
+    expect(legacyProvider.reasoningEffort, 'xhigh');
+    expect(
+      reasoningEffortValuesForModel(
+        legacyProvider,
+        'model-a',
+        preserveCurrent: legacyProvider.reasoningEffort,
+      ),
+      ['default', 'low', 'high', 'xhigh'],
+    );
+    final customProvider = provider.copyWith(
+      customReasoningEfforts: [' medium ', 'medium', 'xhigh'],
+    );
+    expect(reasoningEffortValuesForModel(customProvider, 'model-a'), [
+      'default',
+      'low',
+      'high',
+      'medium',
+      'xhigh',
+    ]);
+    final roundTripped = ProviderProfile.fromMap(customProvider.toMap());
+    expect(roundTripped.customReasoningEfforts, ['medium', 'xhigh']);
     expect(reasoningEffortValuesForModel(provider, 'unknown-model'), [
       'default',
       'low',

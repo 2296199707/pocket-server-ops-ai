@@ -7,6 +7,11 @@ import 'dart:convert';
 const defaultReasoningEffort = 'default';
 const genericReasoningEffortValues = <String>['low', 'high', 'max'];
 
+String normalizeReasoningEffort(String? value) {
+  final normalized = value?.trim() ?? '';
+  return normalized.isEmpty ? defaultReasoningEffort : normalized;
+}
+
 const defaultSubagentMaxConcurrentThreads = 4;
 const defaultSubagentMaxRecursionDepth = 1;
 const subagentMaxConcurrentThreadsRange = (1, 16);
@@ -215,12 +220,14 @@ String resolveWorkMode({
   required String mode,
   String? projectId,
   String? serverId,
+  List<String> serverIds = const [],
 }) {
   final selected = workMode?.trim();
   if (selected != null && workModeOptions.contains(selected)) return selected;
   if (mode == 'chat') return 'chat';
   final hasProject = projectId?.isNotEmpty == true;
-  final hasServer = serverId?.isNotEmpty == true;
+  final hasServer =
+      serverId?.isNotEmpty == true || serverIds.any((id) => id.isNotEmpty);
   if (hasProject && hasServer) return 'collaborative';
   if (hasServer) return 'server';
   return 'local';
@@ -319,6 +326,7 @@ class ProviderProfile {
   final String baseUrl;
   final String model;
   final String reasoningEffort;
+  final List<String> customReasoningEfforts;
   final String wireApi;
   final String contextWindowMode;
   final String? apiKeyRef;
@@ -331,6 +339,7 @@ class ProviderProfile {
     required this.baseUrl,
     required this.model,
     this.reasoningEffort = 'default',
+    this.customReasoningEfforts = const [],
     this.wireApi = 'responses',
     this.contextWindowMode = defaultContextWindowMode,
     required this.apiKeyRef,
@@ -344,7 +353,12 @@ class ProviderProfile {
       name: map['name'] as String,
       baseUrl: map['baseUrl'] as String,
       model: map['model'] as String,
-      reasoningEffort: map['reasoningEffort'] as String? ?? 'default',
+      reasoningEffort: normalizeReasoningEffort(
+        map['reasoningEffort'] as String?,
+      ),
+      customReasoningEfforts: _readCustomReasoningEfforts(
+        map['customReasoningEfforts'] ?? map['custom_reasoning_efforts'],
+      ),
       wireApi: map['wireApi'] as String? ?? 'responses',
       contextWindowMode: normalizeContextWindowMode(
         map['contextWindowMode'] as String?,
@@ -360,7 +374,8 @@ class ProviderProfile {
     'name': name,
     'baseUrl': baseUrl,
     'model': model,
-    'reasoningEffort': reasoningEffort,
+    'reasoningEffort': normalizeReasoningEffort(reasoningEffort),
+    'customReasoningEfforts': jsonEncode(customReasoningEfforts),
     'wireApi': wireApi,
     'contextWindowMode': normalizeContextWindowMode(contextWindowMode),
     'apiKeyRef': apiKeyRef,
@@ -375,6 +390,7 @@ class ProviderProfile {
     String? baseUrl,
     String? model,
     String? reasoningEffort,
+    List<String>? customReasoningEfforts,
     String? wireApi,
     String? contextWindowMode,
     String? apiKeyRef,
@@ -386,7 +402,11 @@ class ProviderProfile {
       name: name ?? this.name,
       baseUrl: baseUrl ?? this.baseUrl,
       model: model ?? this.model,
-      reasoningEffort: reasoningEffort ?? this.reasoningEffort,
+      reasoningEffort: reasoningEffort == null
+          ? this.reasoningEffort
+          : normalizeReasoningEffort(reasoningEffort),
+      customReasoningEfforts:
+          customReasoningEfforts ?? this.customReasoningEfforts,
       wireApi: wireApi ?? this.wireApi,
       contextWindowMode: contextWindowMode ?? this.contextWindowMode,
       apiKeyRef: apiKeyRef ?? this.apiKeyRef,
@@ -450,10 +470,14 @@ class ProviderModelMetadata {
     return ProviderModelMetadata(
       model: map['model'] as String,
       contextWindowTokens: _readOptionalInt(
-        map['contextWindowTokens'] ?? map['context_window'],
+        map['contextWindowTokens'] ??
+            map['context_window'] ??
+            _nestedValue(map['limit'], 'context'),
       ),
       maxContextWindowTokens: _readOptionalInt(
-        map['maxContextWindowTokens'] ?? map['max_context_window'],
+        map['maxContextWindowTokens'] ??
+            map['max_context_window'] ??
+            _nestedValue(map['limit'], 'max_context'),
       ),
       effectiveContextWindowPercent:
           _readOptionalInt(
@@ -485,7 +509,9 @@ class ProviderModelMetadata {
         reasoning: _readOptionalBool(map['reasoning']),
       ),
       inputModalities: _readOptionalStringList(
-        map['inputModalities'] ?? map['input_modalities'],
+        map['inputModalities'] ??
+            map['input_modalities'] ??
+            _nestedValue(map['modalities'], 'input'),
       ),
       truncationPolicy: ProviderTruncationPolicy.fromMap(
         map['truncationPolicy'] ?? map['truncation_policy'],
@@ -794,6 +820,11 @@ int? _readOptionalInt(Object? value) {
 String? _readOptionalString(Object? value) =>
     value is String && value.isNotEmpty ? value : null;
 
+Object? _nestedValue(Object? value, String key) {
+  if (value is Map) return value[key];
+  return null;
+}
+
 bool? _readOptionalBool(Object? value) => value is bool ? value : null;
 
 List<String>? _readOptionalStringList(Object? value) {
@@ -977,14 +1008,57 @@ List<String> reasoningEffortValuesForModel(
     // that the provider declared no adjustable reasoning levels.
     values.addAll(genericReasoningEffortValues);
   }
-  if (preserveCurrent != null &&
-      preserveCurrent.trim().isNotEmpty &&
-      !values.contains(preserveCurrent)) {
-    // Keep an old explicit setting visible until the user replaces it. The
-    // UI marks it as unconfirmed when the provider did not advertise it.
-    values.add(preserveCurrent);
+  final customEfforts = normalizeCustomReasoningEfforts(
+    provider.customReasoningEfforts,
+  );
+  for (final effort in customEfforts) {
+    final normalized = effort.trim();
+    if (normalized.isNotEmpty && !values.contains(normalized)) {
+      values.add(normalized);
+    }
+  }
+  // Keep an already persisted explicit value visible until the user replaces
+  // it. This matters when an older app version stored a value that the new
+  // model catalog does not advertise: omitting it would make a Dropdown have
+  // an invalid initial value and would silently change the next request.
+  final current = preserveCurrent?.trim();
+  if (current != null && current.isNotEmpty && !values.contains(current)) {
+    values.add(current);
   }
   return values;
+}
+
+List<String> normalizeCustomReasoningEfforts(Iterable<String> values) {
+  final normalized = <String>[];
+  for (final value in values) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty || trimmed == defaultReasoningEffort) continue;
+    if (!normalized.contains(trimmed)) normalized.add(trimmed);
+  }
+  return List.unmodifiable(normalized);
+}
+
+bool isCustomReasoningEffort(ProviderProfile provider, String value) {
+  final normalized = value.trim();
+  return normalized.isNotEmpty &&
+      normalizeCustomReasoningEfforts(provider.customReasoningEfforts)
+          .contains(normalized);
+}
+
+List<String> _readCustomReasoningEfforts(Object? value) {
+  Object? decoded = value;
+  if (value is String) {
+    try {
+      decoded = jsonDecode(value);
+    } on FormatException {
+      return const [];
+    }
+  }
+  if (decoded is! List) return const [];
+  return normalizeCustomReasoningEfforts([
+    for (final item in decoded)
+      if (item is String) item,
+  ]);
 }
 
 class Task {
@@ -993,6 +1067,11 @@ class Task {
   final String? workMode;
   final String? projectId;
   final String? serverId;
+
+  /// Servers bound to this conversation, in the order selected by the user.
+  /// [serverId] remains the active server for the current Agent turn and is
+  /// kept for compatibility with older task records.
+  final List<String> serverIds;
   final String? providerId;
   final String? reviewProviderId;
   final String? reviewModelOverride;
@@ -1016,6 +1095,7 @@ class Task {
     this.workMode,
     this.projectId,
     required this.serverId,
+    this.serverIds = const [],
     required this.providerId,
     this.reviewProviderId,
     this.reviewModelOverride,
@@ -1036,6 +1116,7 @@ class Task {
 
   factory Task.fromMap(Map<String, Object?> map) {
     final serverId = map['serverId'] as String?;
+    final serverIds = _readTaskServerIds(map['serverIds'], fallback: serverId);
     final mode =
         map['mode'] as String? ?? (serverId == null ? 'chat' : 'agent');
     return Task(
@@ -1047,6 +1128,7 @@ class Task {
       workMode: mode == 'chat' ? 'chat' : map['workMode'] as String?,
       projectId: map['projectId'] as String?,
       serverId: serverId,
+      serverIds: serverIds,
       providerId: map['providerId'] as String?,
       reviewProviderId: map['reviewProviderId'] as String?,
       reviewModelOverride: map['reviewModelOverride'] as String?,
@@ -1076,6 +1158,7 @@ class Task {
     'workMode': workMode,
     'projectId': projectId,
     'serverId': serverId,
+    'serverIds': jsonEncode(serverIds),
     'providerId': providerId,
     'reviewProviderId': reviewProviderId,
     'reviewModelOverride': reviewModelOverride,
@@ -1099,6 +1182,7 @@ class Task {
     Object? workMode = _taskFieldUnset,
     Object? projectId = _taskFieldUnset,
     String? serverId,
+    Object? serverIds = _taskFieldUnset,
     String? providerId,
     Object? reviewProviderId = _taskFieldUnset,
     Object? reviewModelOverride = _taskFieldUnset,
@@ -1126,6 +1210,9 @@ class Task {
           ? this.projectId
           : projectId as String?,
       serverId: serverId ?? this.serverId,
+      serverIds: identical(serverIds, _taskFieldUnset)
+          ? this.serverIds
+          : _readTaskServerIds(serverIds),
       providerId: providerId ?? this.providerId,
       reviewProviderId: identical(reviewProviderId, _taskFieldUnset)
           ? this.reviewProviderId
@@ -1161,10 +1248,36 @@ class Task {
     mode: mode,
     projectId: projectId,
     serverId: serverId,
+    serverIds: serverIds,
   );
 }
 
 const _taskFieldUnset = Object();
+
+List<String> _readTaskServerIds(Object? value, {String? fallback}) {
+  Object? decoded = value;
+  if (value is String && value.trim().isNotEmpty) {
+    try {
+      decoded = jsonDecode(value);
+    } on FormatException {
+      decoded = const [];
+    }
+  }
+  final ids = <String>[];
+  if (decoded is Iterable) {
+    for (final item in decoded) {
+      if (item is String) {
+        final id = item.trim();
+        if (id.isNotEmpty && !ids.contains(id)) ids.add(id);
+      }
+    }
+  }
+  final active = fallback?.trim();
+  if (active != null && active.isNotEmpty && !ids.contains(active)) {
+    ids.insert(0, active);
+  }
+  return List.unmodifiable(ids);
+}
 
 class TaskEvent {
   final String eventId;
@@ -1288,6 +1401,22 @@ class ServerDisk {
   final String used;
   final String available;
   final int? usedPercent;
+
+  Map<String, Object?> toMap() => {
+    'mount': mount,
+    'total': total,
+    'used': used,
+    'available': available,
+    'usedPercent': usedPercent,
+  };
+
+  factory ServerDisk.fromMap(Map<String, Object?> map) => ServerDisk(
+    mount: map['mount'] as String? ?? '/',
+    total: map['total'] as String? ?? 'unknown',
+    used: map['used'] as String? ?? 'unknown',
+    available: map['available'] as String? ?? 'unknown',
+    usedPercent: _readOptionalInt(map['usedPercent']),
+  );
 }
 
 class ServerNetwork {
@@ -1300,6 +1429,18 @@ class ServerNetwork {
   final String interfaceName;
   final int receivedBytes;
   final int transmittedBytes;
+
+  Map<String, Object?> toMap() => {
+    'interfaceName': interfaceName,
+    'receivedBytes': receivedBytes,
+    'transmittedBytes': transmittedBytes,
+  };
+
+  factory ServerNetwork.fromMap(Map<String, Object?> map) => ServerNetwork(
+    interfaceName: map['interfaceName'] as String? ?? 'unknown',
+    receivedBytes: _readOptionalInt(map['receivedBytes']) ?? 0,
+    transmittedBytes: _readOptionalInt(map['transmittedBytes']) ?? 0,
+  );
 }
 
 class ServerDashboard {
@@ -1332,4 +1473,51 @@ class ServerDashboard {
   final List<ServerDisk> disks;
   final ServerNetwork? network;
   final int? processCount;
+
+  factory ServerDashboard.fromJson(String value) {
+    final decoded = jsonDecode(value);
+    if (decoded is! Map) throw const FormatException('服务器状态缓存格式无效');
+    final map = Map<String, Object?>.from(decoded);
+    final rawDisks = map['disks'];
+    final rawNetwork = map['network'];
+    return ServerDashboard(
+      hostname: map['hostname'] as String? ?? 'unknown',
+      os: map['os'] as String? ?? 'unknown',
+      kernel: map['kernel'] as String? ?? 'unknown',
+      uptime: map['uptime'] as String? ?? 'unknown',
+      load: map['load'] as String? ?? 'unknown',
+      cpu: map['cpu'] as String? ?? 'unknown',
+      cpuUsage: _readOptionalInt(map['cpuUsage']),
+      memory: map['memory'] as String? ?? 'unknown',
+      disk: map['disk'] as String? ?? 'unknown',
+      statusScriptInstalled: map['statusScriptInstalled'] == true,
+      disks: rawDisks is List
+          ? [
+              for (final item in rawDisks)
+                if (item is Map)
+                  ServerDisk.fromMap(Map<String, Object?>.from(item)),
+            ]
+          : const [],
+      network: rawNetwork is Map
+          ? ServerNetwork.fromMap(Map<String, Object?>.from(rawNetwork))
+          : null,
+      processCount: _readOptionalInt(map['processCount']),
+    );
+  }
+
+  String toJson() => jsonEncode({
+    'hostname': hostname,
+    'os': os,
+    'kernel': kernel,
+    'uptime': uptime,
+    'load': load,
+    'cpu': cpu,
+    'cpuUsage': cpuUsage,
+    'memory': memory,
+    'disk': disk,
+    'statusScriptInstalled': statusScriptInstalled,
+    'disks': [for (final item in disks) item.toMap()],
+    'network': network?.toMap(),
+    'processCount': processCount,
+  });
 }

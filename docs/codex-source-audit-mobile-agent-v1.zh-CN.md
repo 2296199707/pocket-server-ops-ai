@@ -1156,7 +1156,9 @@
   若供应商拒绝该查询，再读取普通 `/models` 清单。`ProviderModelMetadata` 同时解析
   `supported_reasoning_levels` 和 sub2api 使用的 `reasoningEfforts`，并保存描述与默认值。
   聊天模型抽屉默认折叠，推理强度默认展开；有供应商列表时只显示该模型明确返回的值，
-  没有列表时只显示“智能/模型默认”。旧的显式设置不会被静默删除，会标记为目录未确认。
+  没有列表时显示 `Default / Low / High / Max` 这套最小兜底值。供应商设置中配置的自定义
+  值会追加到当前模型选项；旧版本已经保存但目录没有声明的显式值仍保留为当前选项，并标记
+  为目录未确认，不会被静默删除。
 - 供应商设置页采用同一规则；保存供应商仍只在保存流程请求一次模型目录，聊天抽屉的刷新
   按钮才会再次请求，不会因打开模型选择器自动请求。
 - 定向测试：`test/domain/models_test.dart` 验证模型只声明 `low/high` 时不生成
@@ -1468,3 +1470,108 @@ Mobile 实现：<path>:<symbol 或行号>
 - 发布前验证：`flutter analyze --no-pub` 通过；发布相关定向测试 97 项全部通过；release APK 构建通过；构建输出、Gradle 缓存和 APK 均位于 `/www` 数据盘。
 - APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.1-release.apk`；大小 `78,554,467` bytes；SHA-256 `16c05b54a98b2034593c8bb871f3764e5908dda3dfa913df67fc8b5bd0528c69`。
 - 发布结果：待推送后创建 GitHub Pre-release `v1.0.4-beta.1`，标签指向 `beta` 分支。
+
+### 2026-08-29：服务器任务远端记录与断线恢复开关
+
+- `terminal.start` 的非 PTY 任务不再只依赖手机内存：服务器用户目录下的
+  `~/.cache/pocket-server-ops/processes/<process_id>` 保存 stdout、stderr、状态、退出码、
+  PID、进程组和 stdin FIFO。任务事件仍保存模型看到的 `process_id`，应用重启后重新创建
+  工具即可按该 ID 定位记录并读取已有输出。
+- `terminal.exec` 使用同一套远端作业记录后轮询完成。SSH 通道失败时只重新连接并继续读取
+  原作业，不再次执行原命令；启动请求在同一 `process_id` 下用命令、工作目录、PTY 标志和
+  初始输入的非敏感指纹保证重试不会重复启动。`terminal.write` 不对结果不确定的 FIFO
+  写入自动重放，避免输入重复。
+- 同一手机 Agent 内相同 `process_id` 的并发启动会共享一个启动 Future；服务器端意图指纹先
+  写临时文件再原子改名，避免并发读取半写入指纹而误报命令冲突。不同指纹仍然直接报错。
+- PTY 任务保留旧的当前通道语义并明确返回 `persistent: false`；没有服务器端
+  `tmux/screen` 依赖时不伪装成可恢复 PTY。文件传输的原有重试和断点续传不由本开关控制。
+- 设置新增“服务器任务断线恢复”，默认开启。关闭后 `terminal.exec` 回到一次性 SSH
+  `run`，`terminal.start` 回到手机内存中的当前通道进程；已有同一工具实例中的远端作业仍
+  可完成或停止，应用重启后需重新开启该设置才能恢复其远端记录。该开关不保存命令、密码、
+  私钥或 API Key。
+- 相关实现：`lib/ssh/remote_process.dart`、`lib/agent/agent_tools.dart`、
+  `lib/app_controller.dart`、`lib/ui/home_shell.dart`。
+- 定向测试：`test/remote_process_test.dart` 覆盖新连接轮询、并发重复启动不重复执行、
+  关闭开关后的直连回退和 `terminal.exec` 断线重连；`test/ssh_connection_test.dart` 保留旧路径
+  的 PTY/通道失败回归；`test/ui/settings_page_test.dart` 覆盖开关持久化。三组测试与
+  `flutter analyze` 均通过。
+- 当前结论：`需修复`已处理。后续只有远端作业协议、任务事件持久化、该设置或上述测试改变时，
+  才重新审查本条；不因普通 UI 或供应商模型变化重复查询。
+
+### 2026-08-29：多服务器对话绑定与独立缓存实现
+
+本轮按上面的审查结论完成了最小实现，语义固定为“允许列表 + 当前活动服务器”：
+
+- `Task.serverIds` 保存对话允许使用的服务器顺序，`Task.serverId` 继续保存当前 Agent
+  活动服务器并兼容旧数据；数据库升级到 14。旧任务读取时会把原有单个 `serverId`
+  还原为一个元素的列表。子代理继承同一允许列表和活动服务器。
+- Agent 每一轮仍只向当前活动服务器提供远程工具；终端、服务器文件管理器、仪表盘和聊天
+  状态入口只显示当前对话允许的服务器。切换 Agent 服务器会保留对话历史并记录配置变更，
+  不会隐式同时操作多台服务器。
+- 服务器选择按“对话 + 功能”持久化：`agent`、`terminal`、`files`、`dashboard` 分开记忆。
+  没有历史选择时使用候选列表第一台；已删除或解绑的选择自动回退到第一台可用服务器，
+  并把回退结果写回设置。选择写入按功能串行，快速连续切换不会因异步写入完成顺序反转。
+- 目录缓存按服务器身份（ID、主机、端口、用户名）和远程路径分开保存，内存与 SQLite
+  最多保留 256 个最近访问目录；仪表盘也按服务器身份持久保存。服务器页面切换时先显示
+  对应快照，再在后台用状态脚本指纹探测，未变化不重新读取目录。相同服务器的并发仪表盘
+  请求共享一个 Future。
+- 文件管理器切换期间不再因为后台刷新而禁止切换或清空目标视图；每次目录请求带服务器和
+  请求序号，旧服务器较慢的 SSH 响应不能覆盖当前服务器。修改时间排序缓存也按服务器
+  隔离。仪表盘和聊天底部状态条同样在切换时先显示目标服务器缓存。
+- 服务器名称、默认工作目录或认证凭据变化不会无条件清空仍然有效的目录缓存；只有主机、
+  端口或用户名变化时才清理旧服务器身份缓存。缓存不保存密码、私钥、API Key 或文件内容
+  （小型文本预加载仍只保存在当前进程内存）。
+- 相关实现：`lib/domain/models.dart`、`lib/storage/app_database.dart`、
+  `lib/app_controller.dart`、`lib/ui/chat_page.dart`、`lib/ui/file_manager_page.dart`、
+  `lib/ui/server_dashboard_page.dart`、`lib/ui/terminal_page.dart`。
+- 定向证据：`test/app_controller_test.dart` 新增多服务器选择/目录与仪表盘快照隔离、
+  并发仪表盘请求复用、跨控制器持久恢复和旧任务兼容测试；该文件当前 53 项通过，
+  `flutter analyze --no-pub` 通过；聊天/设置 UI 定向测试通过。当前 debug APK 构建通过，
+  位于 `/www/mobile-agent-build/app/outputs/flutter-apk/app-debug.apk`，大小
+  `202572851` bytes，SHA-256 `9c08d702a6e235b695d731573804a2959f8d1db00f6016c825e2dfbbaabbf727`。
+  这是未发布的本地验证产物，不提前记录发布版本或 Release。
+
+当前结论：多服务器绑定、功能级选择持久化和按服务器缓存已实现。后续只有服务器选择、
+  目录/仪表盘缓存、页面异步生命周期或对应测试改变时才重新审查本条，不因普通模型或 UI
+修改重复查询。
+
+### 2026-08-29：供应商自定义推理值与模型能力缓存收尾
+
+- Codex 模型目录仍以模型级 `default_reasoning_level` 和
+  `supported_reasoning_levels` 为能力来源；Mobile 不把 `medium`、`xhigh` 等固定值强加给
+  所有模型。供应商只返回模型 ID 时使用最小 `Default / Low / High / Max` 兜底；目录明确
+  返回空列表时只保留 `Default`。
+- 供应商设置增加 `customReasoningEfforts` 列表。设置页用 `+` 增加一行、用 `-` 删除单行，
+  保存时去除空值、两端空格、重复值和 `default` 哨兵。该列表存入 SQLite providers 表，
+  数据库从 v14 升级到 v15；API Key 仍只通过安全凭据存储保存。
+- 对话模型页和子代理模型页只读该列表：当前供应商配置过自定义值时追加显示并标记“自定义”，
+  没有配置时不显示这些值，也没有删除入口。旧版本已经保存的非标准推理值会继续作为当前
+  选项保留，避免 Dropdown 初始值无效或下一次请求被静默改写。
+- 模型列表只在保存供应商或用户点击“刷新模型列表”时请求；打开模型抽屉不请求。默认模型和
+  图片模型共用同一次已缓存目录，图片模型保留“无”，由用户明确选择，客户端不猜测模型
+  是否支持生图。
+- `/models?client_version=0.150.0` 用于协商 Codex 风格能力字段；若供应商拒绝该查询，
+  只回退到同一供应商的普通 `/models` 目录，不改变用户选择的 Responses 或 Chat Completions
+  协议。OpenCode Zen 在官方地址 `opencode.ai/zen/...` 下额外读取公开的
+  `https://models.opencode.ai/api.json` 能力目录，仅补全已由认证模型列表返回的模型；目录
+  不可用时仍使用已保存模型。DeepSeek 没有可依赖的通用动态推理强度接口，继续使用目录值、
+  `Default / Low / High / Max` 兜底和供应商手动自定义值。
+- OpenAI 预设已改为官方 `https://api.openai.com/v1`、Responses 协议和官方文档示例模型
+  `gpt-5.6`；不再把第三方地址放进官方预设。DeepSeek 使用
+  `https://api.deepseek.com/v1` 的 Chat Completions；OpenCode 使用
+  `https://opencode.ai/zen/go/v1` 的 Chat Completions；通用预设保持空 Base URL，要求
+  用户填写自己的兼容地址。
+- 本轮实现文件：`lib/domain/models.dart`、`lib/storage/app_database.dart`、
+  `lib/app_controller.dart`、`lib/ui/profile_sheets.dart`、`lib/ui/chat_page.dart`、
+  `lib/providers/provider_connection_tester.dart`。修复了旧推理值下拉初始值问题，并保持
+  Responses/Chat Completions、上下文压缩、历史和工具执行架构不变。
+- 验证：`flutter analyze --no-pub` 通过；模型、供应商、连接和聊天定向测试 38 项通过。
+  版本 `1.0.4-beta.2+39` 的 debug APK 已在数据盘构建：
+  `/www/mobile-agent-build/app/outputs/flutter-apk/app-debug.apk`，大小
+  `202576009` bytes，SHA-256
+  `9ac72377c64efd620dd2486703c72b356ff6481e4390b41f9ff14c83d10faeb0`。
+  本轮未提交、未推送、未创建 beta Release。
+
+当前结论：供应商推理能力同步、自定义推理值和统一模型/图片模型选择已编码；下一步只做
+  最终测试、数据盘构建和 diff 审查。后续只有模型目录协议、上述实现或对应测试改变时才
+  重新审查本条，不因普通 UI 或模型名称变化重复查询。

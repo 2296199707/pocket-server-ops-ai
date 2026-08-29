@@ -474,6 +474,75 @@ void main() {
     },
   );
 
+  testWidgets(
+    'model and subagent pickers show configured supplier reasoning values',
+    (tester) async {
+      tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final controller = AppController(
+        database: MemoryAppDatabase(),
+        credentials: MemoryCredentialStore(),
+        providerUsageClient: ProviderUsageClient(
+          client: MockClient((_) async => http.Response('', 404)),
+        ),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveProvider(
+        name: '带自定义推理供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'model-a',
+        secret: 'test-key',
+        isDefault: true,
+        customReasoningEfforts: const ['medium'],
+        modelMetadata: {
+          'model-a': const ProviderModelMetadata(
+            model: 'model-a',
+            supportedReasoningLevels: [
+              ProviderReasoningLevel(effort: 'low'),
+              ProviderReasoningLevel(effort: 'high'),
+            ],
+          ),
+        },
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ChatPage(
+              controller: controller,
+              taskId: null,
+              onTaskActivated: (_) {},
+              onOpenSettings: () {},
+              onConfirmTool: (_, _, _) async => true,
+              onConfirmHostKey: (_, _) async => true,
+              onUserInfoRequest: (_, _) async => null,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('model-a'));
+      await tester.pumpAndSettle();
+      expect(find.text('自定义：medium'), findsOneWidget);
+
+      await tester.dragUntilVisible(
+        find.text('子代理模型设置'),
+        find.byType(ListView).last,
+        const Offset(0, -200),
+      );
+      await tester.tap(find.text('子代理模型设置'));
+      await tester.pumpAndSettle();
+      await tester.dragUntilVisible(
+        find.text('自定义：medium'),
+        find.byType(ListView).last,
+        const Offset(0, -200),
+      );
+      expect(find.text('自定义：medium'), findsOneWidget);
+      expect(find.byTooltip('删除自定义推理值'), findsNothing);
+    },
+  );
+
   testWidgets('Responses context details expose manual compaction', (
     tester,
   ) async {

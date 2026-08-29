@@ -158,6 +158,61 @@ void main() {
     },
   );
 
+  test(
+    'enriches OpenCode Zen model ids from its public capability catalog',
+    () async {
+      var catalogRequests = 0;
+      final client = MockClient((request) async {
+        if (request.url.host == 'models.opencode.ai') {
+          catalogRequests++;
+          return Response(
+            jsonEncode({
+              'opencode-go': {
+                'models': {
+                  'deepseek-v4-pro': {
+                    'reasoning': true,
+                    'reasoning_options': [
+                      {
+                        'type': 'effort',
+                        'values': ['high', 'max'],
+                      },
+                    ],
+                    'limit': {'context': 1000000},
+                    'modalities': {
+                      'input': ['text'],
+                    },
+                  },
+                },
+              },
+            }),
+            200,
+          );
+        }
+        return Response(
+          jsonEncode({
+            'data': [
+              {'id': 'deepseek-v4-pro'},
+            ],
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
+
+      final models = await ProviderConnectionTester(
+        client: client,
+      ).listModelMetadata(_profile('https://opencode.ai/zen/go/v1'), 'secret');
+
+      expect(catalogRequests, 1);
+      expect(
+        models.single.supportedReasoningLevels?.map((level) => level.effort),
+        ['high', 'max'],
+      );
+      expect(models.single.contextWindowTokens, 1000000);
+      expect(models.single.inputModalities, ['text']);
+    },
+  );
+
   test('falls back to the standard model list when catalog negotiation is rejected', () async {
     var requests = 0;
     final client = MockClient((request) async {

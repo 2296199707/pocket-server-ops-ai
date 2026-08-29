@@ -255,6 +255,8 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   bool _loadingModels = false;
   List<String> _models = const [];
   Map<String, ProviderModelMetadata> _modelMetadata = const {};
+  final List<TextEditingController> _customReasoningInputs = [];
+  final List<String> _customReasoningValues = [];
   String? _error;
 
   @override
@@ -273,6 +275,10 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _contextWindowMode = normalizeContextWindowMode(profile?.contextWindowMode);
     _isDefault = profile?.isDefault ?? false;
     _modelMetadata = profile?.modelMetadata ?? const {};
+    for (final effort in profile?.customReasoningEfforts ?? const []) {
+      _customReasoningInputs.add(TextEditingController(text: effort));
+      _customReasoningValues.add(effort);
+    }
     _models = {
       for (final key in _modelMetadata.keys)
         if (key.trim().isNotEmpty) key.trim(),
@@ -287,8 +293,15 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     _baseUrl.dispose();
     _model.dispose();
     _secret.dispose();
+    for (final input in _customReasoningInputs) {
+      input.dispose();
+    }
     super.dispose();
   }
+
+  List<String> get _customReasoningEfforts => normalizeCustomReasoningEfforts(
+    _customReasoningInputs.map((input) => input.text),
+  );
 
   List<String> get _defaultModelOptions {
     final models = <String>{
@@ -313,6 +326,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       baseUrl: _baseUrl.text.trim(),
       model: _model.text.trim(),
       reasoningEffort: _reasoningEffort,
+      customReasoningEfforts: _customReasoningEfforts,
       wireApi: _wireApi,
       contextWindowMode: _contextWindowMode,
       apiKeyRef: widget.existing?.apiKeyRef,
@@ -362,7 +376,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                   onPressed: () => _applyPreset(
                     name: 'OpenAI',
                     baseUrl: 'https://api.openai.com/v1',
-                    model: 'gpt-5.6-luna',
+                    model: 'gpt-5.6',
                     wireApi: 'responses',
                   ),
                 ),
@@ -383,6 +397,16 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                     baseUrl: 'https://opencode.ai/zen/go/v1',
                     model: '',
                     wireApi: 'chat-completions',
+                    imageModel: '',
+                  ),
+                ),
+                _ProviderPresetButton(
+                  label: '通用',
+                  onPressed: () => _applyPreset(
+                    name: '通用 OpenAI 兼容',
+                    baseUrl: '',
+                    model: '',
+                    wireApi: 'responses',
                     imageModel: '',
                   ),
                 ),
@@ -500,6 +524,54 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                 if (value != null) setState(() => _reasoningEffort = value);
               },
             ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '自定义推理值',
+                    style: Theme.of(context).textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '添加自定义推理值',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _addCustomReasoningEffort,
+                  icon: const Icon(Icons.add_circle_outline),
+                ),
+              ],
+            ),
+            Text(
+              '仅供应商未提供的自定义值需要填写；保存时忽略空值和重复值。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            for (var index = 0; index < _customReasoningInputs.length; index++)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _customReasoningInputs[index],
+                        decoration: InputDecoration(
+                          labelText: '自定义推理值 ${index + 1}',
+                          hintText: '例如 medium 或供应商自定义值',
+                        ),
+                        onChanged: (value) =>
+                            _onCustomReasoningChanged(index, value),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '删除自定义推理值',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _removeCustomReasoningEffort(index),
+                      icon: const Icon(Icons.remove_circle_outline),
+                    ),
+                  ],
+                ),
+              ),
             const SizedBox(height: 14),
             DropdownButtonFormField<String>(
               initialValue: _contextWindowMode,
@@ -582,6 +654,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         baseUrl: _baseUrl.text.trim(),
         model: _model.text.trim(),
         reasoningEffort: _reasoningEffort,
+        customReasoningEfforts: _customReasoningEfforts,
         wireApi: _wireApi,
         contextWindowMode: _contextWindowMode,
         secret: _secret.text,
@@ -622,6 +695,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       contextWindowMode: _contextWindowMode,
       apiKeyRef: widget.existing?.apiKeyRef,
       isDefault: _isDefault,
+      customReasoningEfforts: _customReasoningEfforts,
     );
     setState(() {
       _loadingModels = true;
@@ -666,12 +740,53 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       _wireApi = wireApi;
       _imageModel = imageModel;
       _reasoningEffort = defaultReasoningEffort;
+      for (final input in _customReasoningInputs) {
+        input.dispose();
+      }
+      _customReasoningInputs.clear();
+      _customReasoningValues.clear();
       _models = const [];
       _modelMetadata = const {};
     });
   }
 
+  void _addCustomReasoningEffort() {
+    setState(() {
+      _customReasoningInputs.add(TextEditingController());
+      _customReasoningValues.add('');
+    });
+  }
+
+  void _onCustomReasoningChanged(int index, String value) {
+    final previous = _customReasoningValues[index].trim();
+    _customReasoningValues[index] = value;
+    final previousStillConfigured = _customReasoningInputs.asMap().entries.any(
+      (entry) => entry.key != index && entry.value.text.trim() == previous,
+    );
+    if (_reasoningEffort == previous && !previousStillConfigured) {
+      _reasoningEffort = value.trim().isEmpty
+          ? defaultReasoningEffort
+          : value.trim();
+    }
+    setState(() {});
+  }
+
+  void _removeCustomReasoningEffort(int index) {
+    final input = _customReasoningInputs.removeAt(index);
+    _customReasoningValues.removeAt(index);
+    final removed = input.text.trim();
+    input.dispose();
+    if (_reasoningEffort == removed &&
+        !_customReasoningInputs.any((item) => item.text.trim() == removed)) {
+      _reasoningEffort = defaultReasoningEffort;
+    }
+    setState(() {});
+  }
+
   String _reasoningOptionLabel(String effort) {
+    if (_customReasoningEfforts.contains(effort.trim())) {
+      return '自定义：$effort';
+    }
     final defaultLevel = _selectedModelMetadata?.defaultReasoningLevel;
     if (effort == defaultReasoningEffort && defaultLevel != null) {
       return '${reasoningEffortLabel(effort)}（目录默认：$defaultLevel）';
@@ -713,7 +828,12 @@ class _SheetFrame extends StatelessWidget {
         top: 16,
         bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
       ),
-      child: child,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+        ),
+        child: child,
+      ),
     );
   }
 }

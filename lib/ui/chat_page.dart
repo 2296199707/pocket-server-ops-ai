@@ -66,6 +66,7 @@ class ChatPageState extends State<ChatPage> {
   String? _reviewProviderId;
   String? _reviewModelOverride;
   String? _serverId;
+  List<String> _serverIds = const [];
   String _mode = 'chat';
   String _workMode = 'chat';
   String _executionMode = 'confirm';
@@ -109,6 +110,7 @@ class ChatPageState extends State<ChatPage> {
         _reviewProviderId = null;
         _reviewModelOverride = null;
         _serverId = null;
+        _serverIds = const [];
         _workMode = 'chat';
         _mode = 'chat';
         _executionMode = _agentAutoExecute ? 'auto' : 'confirm';
@@ -208,6 +210,7 @@ class ChatPageState extends State<ChatPage> {
           mode: _mode,
           projectId: _projectId,
           serverId: _serverId,
+          serverIds: _serverIds,
         );
     final usesLocal = workModeUsesLocal(workMode);
     final usesServer = workModeUsesServer(workMode);
@@ -215,7 +218,11 @@ class ChatPageState extends State<ChatPage> {
     final serverId = task == null ? _serverId : task.serverId;
     final project = widget.controller.projectFor(projectId);
     final activeProject = usesLocal ? project : null;
-    final boundServer = usesServer ? _serverFor(serverId) : null;
+    final serverCandidates = widget.controller.serversForTask(task);
+    final boundServer = usesServer
+        ? _serverFor(serverId) ??
+              (serverCandidates.isEmpty ? null : serverCandidates.first)
+        : null;
     final contextUsage = task == null
         ? null
         : widget.controller.contextUsageFor(task, provider: provider);
@@ -252,6 +259,9 @@ class ChatPageState extends State<ChatPage> {
               ? null
               : widget.controller.providerUsageFor(provider.id),
           onProviderTap: running ? null : _selectProvider,
+          onServerTap: !usesServer || serverCandidates.length < 2 || running
+              ? null
+              : _selectActiveServer,
           onEdit: running ? null : _editContext,
         ),
         if (task?.status == 'unknown')
@@ -435,6 +445,14 @@ class ChatPageState extends State<ChatPage> {
                                               _reasoningEffortOverride ??
                                               provider?.reasoningEffort ??
                                               'default',
+                                          customReasoning:
+                                              provider != null &&
+                                              isCustomReasoningEffort(
+                                                provider,
+                                                task?.reasoningEffortOverride ??
+                                                    _reasoningEffortOverride ??
+                                                    provider.reasoningEffort,
+                                              ),
                                           onTap: running
                                               ? null
                                               : _selectModelAndReasoning,
@@ -639,32 +657,16 @@ class ChatPageState extends State<ChatPage> {
     return null;
   }
 
-  ServerProfile? get _toolServer {
+  Future<ServerProfile?> _resolveToolServer(String feature) async {
     final task = _currentTask;
-    final taskServer =
-        task != null && workModeUsesServer(task.effectiveWorkMode)
-        ? _serverFor(task.serverId)
-        : null;
-    if (taskServer != null) return taskServer;
-    final selectedWorkMode = resolveWorkMode(
-      workMode: _workMode,
-      mode: _mode,
-      projectId: _projectId,
-      serverId: _serverId,
+    final selected = await widget.controller.resolveServerForFeature(
+      task: task,
+      feature: feature,
+      fallbackServerId: feature == 'agent' ? task?.serverId ?? _serverId : null,
     );
-    final selectedServer = workModeUsesServer(selectedWorkMode)
-        ? _serverFor(_serverId)
-        : null;
-    if (selectedServer != null) return selectedServer;
-    return widget.controller.servers.length == 1
-        ? widget.controller.servers.single
-        : null;
-  }
-
-  Future<ServerProfile?> _resolveToolServer() async {
-    final selected = _toolServer;
     if (selected != null) return selected;
-    final servers = widget.controller.servers;
+    if (!mounted) return null;
+    final servers = widget.controller.serversForTask(task);
     if (servers.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -681,7 +683,7 @@ class ChatPageState extends State<ChatPage> {
           children: [
             const ListTile(
               title: Text('选择服务器'),
-              subtitle: Text('此选择只用于打开服务器工具，不会改变当前对话模式'),
+              subtitle: Text('当前对话绑定的服务器；切换后下次打开仍会记住'),
             ),
             for (final server in servers)
               ListTile(
@@ -699,23 +701,31 @@ class ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _openTerminalFromTools() async {
-    final server = await _resolveToolServer();
+    final server = await _resolveToolServer('terminal');
     if (server == null || !mounted) return;
+    final task = _currentTask;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            TerminalPage(controller: widget.controller, server: server),
+        builder: (_) => TerminalPage(
+          controller: widget.controller,
+          server: server,
+          taskId: task?.id,
+        ),
       ),
     );
   }
 
   Future<void> _openFilesFromTools() async {
-    final server = await _resolveToolServer();
+    final server = await _resolveToolServer('files');
     if (server == null || !mounted) return;
+    final task = _currentTask;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            FileManagerPage(controller: widget.controller, server: server),
+        builder: (_) => FileManagerPage(
+          controller: widget.controller,
+          server: server,
+          taskId: task?.id,
+        ),
       ),
     );
   }
@@ -749,10 +759,25 @@ class ChatPageState extends State<ChatPage> {
   }
 
   void _openServerDashboard(ServerProfile server) {
+    unawaited(_openServerDashboardForTask(server));
+  }
+
+  Future<void> _openServerDashboardForTask(ServerProfile fallback) async {
+    final task = _currentTask;
+    final server =
+        await widget.controller.resolveServerForFeature(
+          task: task,
+          feature: 'dashboard',
+        ) ??
+        fallback;
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            ServerDashboardPage(controller: widget.controller, server: server),
+        builder: (_) => ServerDashboardPage(
+          controller: widget.controller,
+          server: server,
+          taskId: task?.id,
+        ),
       ),
     );
   }
@@ -893,6 +918,7 @@ class ChatPageState extends State<ChatPage> {
           mode: task.mode,
           workMode: task.effectiveWorkMode,
           serverId: task.serverId,
+          serverIds: task.serverIds,
           providerId: selected,
           workingDirectory: task.workingDirectory,
           executionMode: task.executionMode,
@@ -915,6 +941,62 @@ class ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> _selectActiveServer() async {
+    final task = _currentTask;
+    if (task == null) {
+      await _editContext();
+      return;
+    }
+    final candidates = widget.controller.serversForTask(task);
+    if (candidates.length < 2) return;
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('切换当前服务器'),
+              subtitle: Text('只切换当前 Agent 使用的服务器，绑定列表和对话历史不变'),
+            ),
+            for (final server in candidates)
+              ListTile(
+                leading: Icon(
+                  server.id == task.serverId
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text(server.name),
+                subtitle: Text(
+                  '${server.username}@${server.host}:${server.port}',
+                ),
+                onTap: () => Navigator.pop(context, server.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || selected == task.serverId || !mounted) return;
+    try {
+      final updated = await widget.controller.setTaskActiveServer(
+        task,
+        selected,
+      );
+      if (mounted) {
+        setState(() => _serverId = updated.serverId);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已切换到 ${_serverFor(updated.serverId)?.name}')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换服务器失败：$error')));
+      }
+    }
+  }
+
   Future<void> _selectWorkMode() async {
     final task = _currentTask;
     if (task != null && widget.controller.isTaskRunning(task.id)) return;
@@ -925,6 +1007,7 @@ class ChatPageState extends State<ChatPage> {
           mode: _mode,
           projectId: _projectId,
           serverId: _serverId,
+          serverIds: _serverIds,
         );
     final selected = await showModalBottomSheet<String>(
       context: context,
@@ -955,7 +1038,8 @@ class ChatPageState extends State<ChatPage> {
 
     final serverId = task == null ? _serverId : task.serverId;
     if (workModeUsesServer(selected) &&
-        (serverId == null || serverId.isEmpty)) {
+        (serverId == null || serverId.isEmpty) &&
+        widget.controller.serversForTask(task).isEmpty) {
       await _editContext(workModeOverride: selected);
       return;
     }
@@ -976,6 +1060,7 @@ class ChatPageState extends State<ChatPage> {
         workMode: selected,
         projectId: task.projectId,
         serverId: task.serverId,
+        serverIds: task.serverIds,
         providerId: task.providerId,
         reviewProviderId: task.reviewProviderId,
         reviewModelOverride: task.reviewModelOverride,
@@ -1009,6 +1094,7 @@ class ChatPageState extends State<ChatPage> {
           mode: _mode,
           projectId: _projectId,
           serverId: _serverId,
+          serverIds: _serverIds,
         );
     final result = await showModalBottomSheet<_ConversationConfig>(
       context: context,
@@ -1020,6 +1106,13 @@ class ChatPageState extends State<ChatPage> {
           taskId: task?.id,
           providerId: task?.providerId ?? _effectiveProviderId,
           serverId: task == null ? _serverId : task.serverId,
+          serverIds: task == null
+              ? (_serverIds.isNotEmpty
+                    ? _serverIds
+                    : _serverId == null
+                    ? const []
+                    : [_serverId!])
+              : task.serverIds,
           reviewProviderId: task?.reviewProviderId,
           reviewModelOverride: task?.reviewModelOverride,
           mode: taskModeForWorkMode(initialWorkMode),
@@ -1044,6 +1137,7 @@ class ChatPageState extends State<ChatPage> {
           workMode: result.workMode,
           projectId: task.projectId,
           serverId: result.serverId,
+          serverIds: result.serverIds,
           providerId: result.providerId,
           reviewProviderId: result.reviewProviderId ?? '',
           reviewModelOverride: result.reviewModelOverride ?? '',
@@ -1058,6 +1152,7 @@ class ChatPageState extends State<ChatPage> {
           _reviewProviderId = updated.reviewProviderId;
           _reviewModelOverride = updated.reviewModelOverride;
           _serverId = updated.serverId;
+          _serverIds = updated.serverIds;
           _mode = updated.mode;
           _workMode = updated.effectiveWorkMode;
           _executionMode = updated.executionMode;
@@ -1093,6 +1188,7 @@ class ChatPageState extends State<ChatPage> {
       _reviewProviderId = result.reviewProviderId;
       _reviewModelOverride = result.reviewModelOverride;
       _serverId = result.serverId;
+      _serverIds = result.serverIds;
       _mode = result.mode;
       _workMode = result.workMode;
       _executionMode = result.executionMode;
@@ -1209,6 +1305,9 @@ class ChatPageState extends State<ChatPage> {
               if (subagentModel.trim().isNotEmpty) subagentModel,
             }.toList()..sort();
             String? reasoningSubtitle(String effort) {
+              if (isCustomReasoningEffort(provider, effort)) {
+                return '供应商自定义值';
+              }
               if (effort == defaultReasoningEffort) {
                 final defaultLevel = selectedMetadata?.defaultReasoningLevel;
                 return defaultLevel == null
@@ -1232,6 +1331,9 @@ class ChatPageState extends State<ChatPage> {
             }
 
             String subagentReasoningSubtitle(String effort) {
+              if (isCustomReasoningEffort(subagentProvider, effort)) {
+                return '供应商自定义值';
+              }
               if (effort == defaultReasoningEffort) {
                 final defaultLevel = subagentMetadata?.defaultReasoningLevel;
                 return followsParentProvider &&
@@ -1503,9 +1605,14 @@ class ChatPageState extends State<ChatPage> {
                                       ),
                                       const SizedBox(width: 8),
                                       Text(
-                                        _reasoningMenuLabel(
-                                          selectedReasoningEffort,
-                                        ),
+                                        isCustomReasoningEffort(
+                                              provider,
+                                              selectedReasoningEffort,
+                                            )
+                                            ? '自定义：$selectedReasoningEffort'
+                                            : _reasoningMenuLabel(
+                                                selectedReasoningEffort,
+                                              ),
                                         style: Theme.of(context)
                                             .textTheme
                                             .labelLarge
@@ -1549,7 +1656,13 @@ class ChatPageState extends State<ChatPage> {
                                 const SizedBox(height: 4),
                                 for (final effort in effortOptions)
                                   _ModelPickerChoice(
-                                    title: _reasoningMenuLabel(effort),
+                                    title:
+                                        isCustomReasoningEffort(
+                                          provider,
+                                          effort,
+                                        )
+                                        ? '自定义：$effort'
+                                        : _reasoningMenuLabel(effort),
                                     subtitle: reasoningSubtitle(effort),
                                     selected: effort == selectedReasoningEffort,
                                     onTap: () => setSheetState(
@@ -1779,6 +1892,11 @@ class ChatPageState extends State<ChatPage> {
                                         ? followsParentProvider
                                               ? '继承父代理'
                                               : '模型默认'
+                                        : isCustomReasoningEffort(
+                                            subagentProvider,
+                                            effort,
+                                          )
+                                        ? '自定义：$effort'
                                         : _reasoningMenuLabel(effort),
                                     subtitle: subagentReasoningSubtitle(effort),
                                     selected:
@@ -1972,6 +2090,7 @@ class ChatPageState extends State<ChatPage> {
         mode: task.mode,
         workMode: task.effectiveWorkMode,
         serverId: task.serverId,
+        serverIds: task.serverIds,
         providerId: task.providerId,
         workingDirectory: task.workingDirectory,
         executionMode: task.executionMode,
@@ -2009,9 +2128,13 @@ class ChatPageState extends State<ChatPage> {
           mode: _mode,
           projectId: _projectId,
           serverId: _serverId,
+          serverIds: _serverIds,
         );
     if (workModeUsesServer(workMode) &&
-        (_currentTask?.serverId ?? _serverId) == null) {
+        ((_currentTask?.serverId ?? _serverId) == null &&
+            (currentTask == null
+                ? _serverIds.isEmpty
+                : widget.controller.serversForTask(currentTask).isEmpty))) {
       await _editContext(workModeOverride: workMode);
       if (!mounted) return;
       workMode =
@@ -2021,9 +2144,13 @@ class ChatPageState extends State<ChatPage> {
             mode: _mode,
             projectId: _projectId,
             serverId: _serverId,
+            serverIds: _serverIds,
           );
       if (workModeUsesServer(workMode) &&
-          (_currentTask?.serverId ?? _serverId) == null) {
+          ((_currentTask?.serverId ?? _serverId) == null &&
+              (currentTask == null
+                  ? _serverIds.isEmpty
+                  : widget.controller.serversForTask(currentTask).isEmpty))) {
         return;
       }
     }
@@ -2039,6 +2166,7 @@ class ChatPageState extends State<ChatPage> {
           workMode: workMode,
           projectId: _projectId,
           serverId: _serverId,
+          serverIds: _serverIds,
           providerId: providerId,
           reviewProviderId: _reviewProviderId,
           reviewModelOverride: _reviewModelOverride,
@@ -2124,6 +2252,7 @@ class _ConversationConfig {
     required this.taskId,
     required this.providerId,
     required this.serverId,
+    required this.serverIds,
     required this.reviewProviderId,
     required this.reviewModelOverride,
     required this.mode,
@@ -2137,6 +2266,7 @@ class _ConversationConfig {
   final String? taskId;
   final String? providerId;
   final String? serverId;
+  final List<String> serverIds;
   final String? reviewProviderId;
   final String? reviewModelOverride;
   final String mode;
@@ -2165,6 +2295,7 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
   late final ScrollController _scroll = ScrollController();
   late String? _providerId = widget.initial.providerId;
   late String? _serverId = widget.initial.serverId;
+  late List<String> _serverIds = List<String>.of(widget.initial.serverIds);
   late String? _reviewProviderId = widget.initial.reviewProviderId;
   late String _reviewModelOverride = widget.initial.reviewModelOverride ?? '';
   late String _workMode = widget.initial.workMode;
@@ -2179,7 +2310,31 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
   @override
   void initState() {
     super.initState();
+    if (workModeUsesServer(_workMode)) {
+      if (_serverIds.isEmpty && widget.controller.servers.isNotEmpty) {
+        _serverIds = [widget.controller.servers.first.id];
+      }
+      if (_serverId == null && _serverIds.isNotEmpty) {
+        _serverId = _serverIds.first;
+      }
+    }
     unawaited(_loadReviewModels());
+  }
+
+  void _toggleServer(String serverId, bool selected) {
+    setState(() {
+      if (selected) {
+        if (!_serverIds.contains(serverId)) _serverIds.add(serverId);
+        _serverId ??= serverId;
+      } else {
+        _serverIds.remove(serverId);
+        if (_serverIds.isEmpty) {
+          _serverId = null;
+        } else if (_serverId == serverId) {
+          _serverId = _serverIds.first;
+        }
+      }
+    });
   }
 
   @override
@@ -2283,6 +2438,12 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
                   if (value != null) {
                     setState(() {
                       _workMode = value;
+                      if (workModeUsesServer(value) &&
+                          _serverIds.isEmpty &&
+                          widget.controller.servers.isNotEmpty) {
+                        _serverIds = [widget.controller.servers.first.id];
+                        _serverId = _serverIds.first;
+                      }
                     });
                   }
                 },
@@ -2295,23 +2456,46 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
                 ),
                 const SizedBox(height: 4),
                 if (workModeUsesServer(_workMode)) ...[
-                  DropdownButtonFormField<String>(
-                    initialValue: _serverId ?? '',
-                    decoration: const InputDecoration(labelText: '目标服务器'),
-                    items: [
-                      const DropdownMenuItem(value: '', child: Text('选择目标服务器')),
-                      for (final server in widget.controller.servers)
-                        DropdownMenuItem(
-                          value: server.id,
-                          child: Text(server.name),
-                        ),
-                    ],
-                    onChanged: (value) => setState(
-                      () => _serverId = value == null || value.isEmpty
-                          ? null
-                          : value,
-                    ),
+                  Text(
+                    '绑定服务器（可多选）',
+                    style: Theme.of(context).textTheme.labelLarge,
                   ),
+                  if (widget.controller.servers.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Text('请先添加目标服务器'),
+                    )
+                  else
+                    for (final server in widget.controller.servers)
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        value: _serverIds.contains(server.id),
+                        title: Text(server.name),
+                        subtitle: Text(
+                          '${server.username}@${server.host}:${server.port}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onChanged: (value) =>
+                            _toggleServer(server.id, value == true),
+                      ),
+                  if (_serverIds.isNotEmpty)
+                    DropdownButtonFormField<String>(
+                      initialValue: _serverIds.contains(_serverId)
+                          ? _serverId
+                          : _serverIds.first,
+                      decoration: const InputDecoration(labelText: '当前活动服务器'),
+                      items: [
+                        for (final server in widget.controller.servers)
+                          if (_serverIds.contains(server.id))
+                            DropdownMenuItem(
+                              value: server.id,
+                              child: Text(server.name),
+                            ),
+                      ],
+                      onChanged: (value) => setState(() => _serverId = value),
+                    ),
                   TextField(
                     controller: _directory,
                     decoration: const InputDecoration(labelText: '工作目录（可选）'),
@@ -2423,7 +2607,8 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
               const SizedBox(height: 20),
               FilledButton(
                 onPressed: () {
-                  if (workModeUsesServer(_workMode) && _serverId == null) {
+                  if (workModeUsesServer(_workMode) &&
+                      (_serverId == null || _serverIds.isEmpty)) {
                     return;
                   }
                   Navigator.pop(
@@ -2432,6 +2617,7 @@ class _ConversationSetupSheetState extends State<_ConversationSetupSheet> {
                       taskId: widget.initial.taskId,
                       providerId: _providerId,
                       serverId: _serverId,
+                      serverIds: List.unmodifiable(_serverIds),
                       reviewProviderId: _workMode != 'chat'
                           ? _reviewProviderId
                           : null,
@@ -2486,6 +2672,7 @@ class _ContextBar extends StatelessWidget {
     required this.provider,
     required this.usage,
     required this.onProviderTap,
+    required this.onServerTap,
     required this.onEdit,
   });
 
@@ -2495,6 +2682,7 @@ class _ContextBar extends StatelessWidget {
   final ProviderProfile? provider;
   final ProviderUsageSnapshot? usage;
   final VoidCallback? onProviderTap;
+  final VoidCallback? onServerTap;
   final VoidCallback? onEdit;
 
   @override
@@ -2546,6 +2734,18 @@ class _ContextBar extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (onServerTap != null)
+                  IconButton(
+                    tooltip: '切换当前服务器',
+                    onPressed: onServerTap,
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 30,
+                      height: 30,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.swap_horiz_rounded, size: 16),
+                  ),
                 const SizedBox(width: 4),
                 ConstrainedBox(
                   constraints: BoxConstraints(maxWidth: providerWidth),
@@ -2786,18 +2986,22 @@ class _ModelReasoningPill extends StatelessWidget {
   const _ModelReasoningPill({
     required this.model,
     required this.reasoningEffort,
+    this.customReasoning = false,
     required this.onTap,
   });
 
   final String? model;
   final String reasoningEffort;
+  final bool customReasoning;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final modelText = _shortModelName(model ?? '未配置模型');
-    final effortText = _reasoningMenuLabel(reasoningEffort);
+    final effortText = customReasoning
+        ? '自定义：$reasoningEffort'
+        : _reasoningMenuLabel(reasoningEffort);
     return Material(
       color: colors.surfaceContainerHighest,
       shape: RoundedRectangleBorder(
@@ -3492,10 +3696,13 @@ class _ServerStatusSummaryState extends State<_ServerStatusSummary> {
   ServerDashboard? _dashboard;
   Timer? _refreshTimer;
   bool _loading = false;
+  String? _loadingServerId;
+  int _loadRequest = 0;
 
   @override
   void initState() {
     super.initState();
+    _dashboard = widget.controller.cachedServerDashboard(widget.server);
     _refreshTimer = Timer.periodic(_refreshInterval, (_) => _load());
     unawaited(_load());
   }
@@ -3504,7 +3711,7 @@ class _ServerStatusSummaryState extends State<_ServerStatusSummary> {
   void didUpdateWidget(covariant _ServerStatusSummary oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.server.id != oldWidget.server.id) {
-      _dashboard = null;
+      _dashboard = widget.controller.cachedServerDashboard(widget.server);
       unawaited(_load());
     }
   }
@@ -3516,18 +3723,26 @@ class _ServerStatusSummaryState extends State<_ServerStatusSummary> {
   }
 
   Future<void> _load() async {
-    if (_loading) return;
+    if (_loading && _loadingServerId == widget.server.id) return;
+    final server = widget.server;
+    final request = ++_loadRequest;
     _loading = true;
+    _loadingServerId = server.id;
     try {
       final dashboard = await widget.controller.loadServerDashboard(
-        widget.server,
+        server,
         onFirstHostKey: widget.onFirstHostKey,
       );
-      if (mounted) setState(() => _dashboard = dashboard);
+      if (mounted && widget.server.id == server.id) {
+        setState(() => _dashboard = dashboard);
+      }
     } catch (_) {
       // The full dashboard remains the place to inspect a connection error.
     } finally {
-      _loading = false;
+      if (request == _loadRequest) {
+        _loading = false;
+        _loadingServerId = null;
+      }
     }
   }
 

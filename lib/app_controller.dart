@@ -141,6 +141,9 @@ class AppController extends ChangeNotifier {
   final Map<String, String> _taskProgressLabels = {};
   final Set<String> _foregroundServiceTasks = {};
   final Map<String, ServerDashboard> _dashboardCache = {};
+  final Map<String, Future<ServerDashboard>> _dashboardLoads = {};
+  final Map<String, String> _serverSelections = {};
+  final Map<String, Future<void>> _serverSelectionWrites = {};
   final Map<String, bool> _sidebarExpanded = {};
   Future<void> _loadTail = Future<void>.value();
   int _idSequence = 0;
@@ -156,6 +159,7 @@ class AppController extends ChangeNotifier {
   double _floatingCapsuleScale = 1.0;
   double _floatingCapsuleLengthScale = 1.0;
   bool _documentModuleEnabled = true;
+  bool _remoteTaskRecoveryEnabled = true;
   SubagentSettings _subagentSettings = const SubagentSettings();
   String? _imageProviderId;
   String? _lastDashboardServerId;
@@ -176,6 +180,7 @@ class AppController extends ChangeNotifier {
   double get floatingCapsuleScale => _floatingCapsuleScale;
   double get floatingCapsuleLengthScale => _floatingCapsuleLengthScale;
   bool get documentModuleEnabled => _documentModuleEnabled;
+  bool get remoteTaskRecoveryEnabled => _remoteTaskRecoveryEnabled;
   SubagentSettings get subagentSettings => _subagentSettings;
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
@@ -268,6 +273,129 @@ class AppController extends ChangeNotifier {
       if (task.id == taskId) return task;
     }
     return null;
+  }
+
+  /// Returns the configured servers available to a conversation. A task with
+  /// a server binding is intentionally limited to that binding; callers with
+  /// no task (the global server pages) can use every configured server.
+  List<ServerProfile> serversForTask(Task? task) {
+    if (task == null) return List.unmodifiable(_servers);
+    final ids = task.serverIds.isNotEmpty
+        ? task.serverIds
+        : task.serverId == null
+        ? const <String>[]
+        : [task.serverId!];
+    return List.unmodifiable([
+      for (final id in ids)
+        for (final server in _servers)
+          if (server.id == id) server,
+    ]);
+  }
+
+  ServerProfile? serverForId(String? serverId) {
+    if (serverId == null || serverId.isEmpty) return null;
+    for (final server in _servers) {
+      if (server.id == serverId) return server;
+    }
+    return null;
+  }
+
+  /// Resolves a server for a feature without making a network request. The
+  /// first call may read one small persisted setting; subsequent switches use
+  /// this in-memory selection and the existing per-server data caches.
+  Future<ServerProfile?> resolveServerForFeature({
+    Task? task,
+    required String feature,
+    String? fallbackServerId,
+  }) async {
+    final candidates = serversForTask(task);
+    if (candidates.isEmpty) return null;
+    final taskId = task?.id;
+    final key = _serverSelectionSettingKey(taskId, feature);
+    var selectedId = _serverSelections[key];
+    if (selectedId == null) {
+      selectedId = await _database.readSetting(key);
+      if (selectedId == null && taskId == null && feature == 'dashboard') {
+        selectedId = _lastDashboardServerId;
+      }
+      if (selectedId == null && fallbackServerId != null) {
+        selectedId = fallbackServerId;
+      }
+      if (selectedId != null && selectedId.trim().isNotEmpty) {
+        _serverSelections[key] = selectedId.trim();
+      }
+    }
+    for (final server in candidates) {
+      if (server.id == selectedId) return server;
+    }
+    final first = candidates.first;
+    _serverSelections[key] = first.id;
+    await _persistServerSelection(key, first.id);
+    return first;
+  }
+
+  Future<void> setServerForFeature({
+    Task? task,
+    required String feature,
+    required String serverId,
+  }) async {
+    final candidates = serversForTask(task);
+    if (!candidates.any((server) => server.id == serverId)) {
+      throw StateError('服务器未绑定到当前对话');
+    }
+    final key = _serverSelectionSettingKey(task?.id, feature);
+    _serverSelections[key] = serverId;
+    await _persistServerSelection(key, serverId);
+    if (task == null && feature == 'dashboard') {
+      await setLastDashboardServer(serverId);
+    }
+  }
+
+  Future<void> _persistServerSelection(String key, String serverId) async {
+    final previous = _serverSelectionWrites[key];
+    final write = (previous ?? Future<void>.value())
+        .catchError((_) {})
+        .then<void>((_) => _database.writeSetting(key, serverId));
+    _serverSelectionWrites[key] = write;
+    try {
+      await write;
+    } finally {
+      if (identical(_serverSelectionWrites[key], write)) {
+        _serverSelectionWrites.remove(key);
+      }
+    }
+  }
+
+  /// Changes the server used by the Agent itself. The binding list remains
+  /// intact, while the active server is persisted in the task and in the
+  /// feature selection cache.
+  Future<Task> setTaskActiveServer(Task task, String serverId) async {
+    if (!serversForTask(task).any((server) => server.id == serverId)) {
+      throw StateError('服务器未绑定到当前对话');
+    }
+    final updated = task.serverId == serverId
+        ? task
+        : await updateTaskConfiguration(
+            taskId: task.id,
+            mode: task.mode,
+            workMode: task.effectiveWorkMode,
+            projectId: task.projectId,
+            serverId: serverId,
+            serverIds: task.serverIds,
+            providerId: task.providerId,
+            reviewProviderId: task.reviewProviderId,
+            reviewModelOverride: task.reviewModelOverride,
+            workingDirectory: task.workingDirectory,
+            executionMode: task.executionMode,
+            modelOverride: task.modelOverride,
+            reasoningEffortOverride: task.reasoningEffortOverride,
+          );
+    await setServerForFeature(
+      task: updated,
+      feature: 'agent',
+      serverId: serverId,
+    );
+    return updated;
   }
 
   bool hasActiveSubagents(String rootTaskId) {
@@ -428,6 +556,20 @@ class AppController extends ChangeNotifier {
     _loadError = null;
     _notify();
     _servers = await _database.loadServers();
+    _dashboardCache.clear();
+    for (final server in _servers) {
+      final value = await _database.readSetting(
+        _dashboardCacheSettingKey(server),
+      );
+      if (value == null || value.trim().isEmpty) continue;
+      try {
+        _dashboardCache[_dashboardCacheKey(server)] = ServerDashboard.fromJson(
+          value,
+        );
+      } on Object {
+        // A stale or incomplete cache is ignored; the next probe replaces it.
+      }
+    }
     final directoryCaches = await _database.loadServerDirectoryCaches();
     _directoryCache.clear();
     _directoryCacheRecords.clear();
@@ -465,6 +607,8 @@ class AppController extends ChangeNotifier {
             .toDouble();
     _documentModuleEnabled =
         (await _database.readSetting(_documentModuleSetting)) != 'false';
+    _remoteTaskRecoveryEnabled =
+        (await _database.readSetting(_remoteTaskRecoverySetting)) != 'false';
     _sidebarExpanded['other'] = await _readSidebarExpandedSetting('other');
     for (final project in _projects) {
       final sectionId = 'project:${project.id}';
@@ -711,6 +855,7 @@ class AppController extends ChangeNotifier {
     String? workMode,
     String? projectId,
     String? serverId,
+    List<String>? serverIds,
     String? providerId,
     String? reviewProviderId,
     String? reviewModelOverride,
@@ -728,10 +873,14 @@ class AppController extends ChangeNotifier {
       mode: mode,
       projectId: projectId,
       serverId: serverId,
+      serverIds: serverIds ?? const [],
     );
     final normalizedMode = taskModeForWorkMode(normalizedWorkMode);
-    if (workModeUsesServer(normalizedWorkMode) &&
-        (serverId == null || serverId.isEmpty)) {
+    final normalizedServerIds = _normalizeServerIds(
+      serverIds,
+      fallback: serverId,
+    );
+    if (workModeUsesServer(normalizedWorkMode) && normalizedServerIds.isEmpty) {
       throw ArgumentError('服务器工作模式需要选择目标服务器');
     }
     final requestedExecutionMode =
@@ -746,7 +895,11 @@ class AppController extends ChangeNotifier {
       mode: normalizedMode,
       workMode: normalizedWorkMode,
       projectId: projectId,
-      serverId: normalizedMode == 'agent' ? serverId : null,
+      serverId:
+          normalizedMode == 'agent' && workModeUsesServer(normalizedWorkMode)
+          ? serverId ?? normalizedServerIds.first
+          : null,
+      serverIds: normalizedServerIds,
       providerId: providerId,
       reviewProviderId: normalizedMode == 'agent'
           ? _normalizeOptionalValue(reviewProviderId)
@@ -778,6 +931,7 @@ class AppController extends ChangeNotifier {
       workMode: source.effectiveWorkMode,
       projectId: source.projectId,
       serverId: source.serverId,
+      serverIds: source.serverIds,
       providerId: source.providerId,
       reviewProviderId: source.reviewProviderId,
       reviewModelOverride: source.reviewModelOverride,
@@ -863,6 +1017,18 @@ class AppController extends ChangeNotifier {
       enabled ? 'true' : 'false',
     );
     _documentModuleEnabled = enabled;
+    _notify();
+  }
+
+  Future<void> setRemoteTaskRecoveryEnabled(bool enabled) async {
+    await _database.writeSetting(
+      _remoteTaskRecoverySetting,
+      enabled ? 'true' : 'false',
+    );
+    _remoteTaskRecoveryEnabled = enabled;
+    for (final tools in _phoneTools.values) {
+      tools.setRemoteTaskRecoveryEnabled(enabled);
+    }
     _notify();
   }
 
@@ -977,6 +1143,7 @@ class AppController extends ChangeNotifier {
     String? workMode,
     String? projectId,
     required String? serverId,
+    List<String>? serverIds,
     required String? providerId,
     String? reviewProviderId,
     String? reviewModelOverride,
@@ -1007,14 +1174,30 @@ class AppController extends ChangeNotifier {
       mode: mode,
       projectId: normalizedProjectId,
       serverId: serverId,
+      serverIds: serverIds ?? current.serverIds,
     );
     final normalizedMode = taskModeForWorkMode(normalizedWorkMode);
-    if (workModeUsesServer(normalizedWorkMode) &&
-        (serverId == null || serverId.isEmpty)) {
+    final normalizedServerIds = _normalizeServerIds(
+      serverIds ?? current.serverIds,
+      fallback: serverIds == null ? serverId ?? current.serverId : serverId,
+    );
+    if (workModeUsesServer(normalizedWorkMode) && normalizedServerIds.isEmpty) {
       throw ArgumentError('服务器工作模式需要选择目标服务器');
     }
     final normalizedExecutionMode = _normalizeExecutionMode(executionMode);
-    final normalizedServerId = normalizedMode == 'agent' ? serverId : null;
+    final requestedServerId =
+        serverId ??
+        (normalizedServerIds.contains(current.serverId)
+            ? current.serverId
+            : null);
+    final normalizedServerId =
+        normalizedMode == 'agent' && workModeUsesServer(normalizedWorkMode)
+        ? requestedServerId ?? normalizedServerIds.first
+        : null;
+    if (workModeUsesServer(normalizedWorkMode) &&
+        (normalizedServerId == null || normalizedServerId.isEmpty)) {
+      throw ArgumentError('服务器工作模式需要选择目标服务器');
+    }
     final normalizedWorkingDirectory = normalizedMode == 'agent'
         ? workingDirectory
         : null;
@@ -1065,6 +1248,7 @@ class AppController extends ChangeNotifier {
     final targetChanged =
         current.projectId != normalizedProjectId ||
         current.serverId != normalizedServerId ||
+        !_sameStringList(current.serverIds, normalizedServerIds) ||
         current.workingDirectory != normalizedWorkingDirectory;
     final modelChanged = previousModel != nextModel;
     final configurationChanged =
@@ -1083,6 +1267,7 @@ class AppController extends ChangeNotifier {
       workMode: normalizedWorkMode,
       projectId: normalizedProjectId,
       serverId: normalizedServerId,
+      serverIds: normalizedServerIds,
       providerId: providerId,
       reviewProviderId: normalizedReviewProviderId,
       reviewModelOverride: normalizedReviewModelOverride,
@@ -1091,6 +1276,11 @@ class AppController extends ChangeNotifier {
       title: current.title,
       workingDirectory: normalizedWorkingDirectory,
       executionMode: normalizedExecutionMode,
+      isSubagent: current.isSubagent,
+      parentTaskId: current.parentTaskId,
+      rootTaskId: current.rootTaskId,
+      agentDepth: current.agentDepth,
+      agentName: current.agentName,
       status: current.status,
       createdAt: current.createdAt,
       updatedAt: now,
@@ -1139,6 +1329,8 @@ class AppController extends ChangeNotifier {
             'project_id': normalizedProjectId,
             'previous_server_id': current.serverId,
             'server_id': normalizedServerId,
+            'previous_server_ids': current.serverIds,
+            'server_ids': normalizedServerIds,
             'previous_working_directory': current.workingDirectory,
             'working_directory': normalizedWorkingDirectory,
           },
@@ -1466,15 +1658,27 @@ class AppController extends ChangeNotifier {
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
               localAccess: localAccess,
+              remoteTaskRecoveryEnabled: _remoteTaskRecoveryEnabled,
             );
             temporaryRemoteTools = remoteTools;
           } else {
             workingDirectory =
                 task.workingDirectory ?? server.defaultWorkingDirectory;
+            if (remoteTools.connection.isClosed) {
+              final replacement = await _sshPool.acquire(
+                task.id,
+                () => _connectServer(server, onFirstHostKey: onFirstHostKey),
+              );
+              await _saveObservedHostKey(server, replacement.hostKey);
+              remoteTools.updateConnection(replacement);
+            }
             remoteTools.configureContext(
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
               localAccess: localAccess,
+            );
+            remoteTools.setRemoteTaskRecoveryEnabled(
+              _remoteTaskRecoveryEnabled,
             );
           }
           tools.addAll(
@@ -1878,25 +2082,46 @@ class AppController extends ChangeNotifier {
               (_) => throw StateError('SSH connection cancelled'),
             ),
           ]);
-          await _saveObservedHostKey(server, connection.hostKey);
+          final connected = connection;
+          await _saveObservedHostKey(server, connected.hostKey);
           workingDirectory =
               task.workingDirectory ?? server.defaultWorkingDirectory;
+          Future<SshConnection> reconnectServer() async {
+            final replacement = await _sshPool.acquire(
+              task.id,
+              () => _connectServer(
+                server,
+                onFirstHostKey: waitingHostKey,
+                onUserInfoRequest: waitingUserInfo,
+              ),
+            );
+            await _saveObservedHostKey(server, replacement.hostKey);
+            connection = replacement;
+            return replacement;
+          }
+
           remoteTools = _phoneTools[task.id];
           if (remoteTools == null || remoteTools.isClosed) {
             await remoteTools?.close();
             remoteTools = RemoteAgentTools(
-              connection,
+              connected,
               workingDirectory: workingDirectory,
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
               localAccess: localAccess,
+              reconnect: reconnectServer,
+              remoteTaskRecoveryEnabled: _remoteTaskRecoveryEnabled,
             );
             _phoneTools[task.id] = remoteTools;
           } else {
+            remoteTools.updateConnection(connected);
             remoteTools.configureContext(
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
               localAccess: localAccess,
+            );
+            remoteTools.setRemoteTaskRecoveryEnabled(
+              _remoteTaskRecoveryEnabled,
             );
           }
           tools.addAll(
@@ -1916,8 +2141,9 @@ class AppController extends ChangeNotifier {
           workingDirectory: useServerTools ? workingDirectory : null,
         );
         if (useServerTools && connection != null) {
+          final connected = connection;
           final instructions = await _remoteInstructions.load(
-            connection,
+            connected!,
             workingDirectory,
           );
           if (instructions != null) {
@@ -2033,6 +2259,18 @@ class AppController extends ChangeNotifier {
           if (type == 'task.unknown') remoteOperationStarted = true;
           eventQueue = eventQueue.then((_) async {
             var eventPayload = payload;
+            if (useServerTools &&
+                task.serverId != null &&
+                const {
+                  'tool.started',
+                  'tool.completed',
+                  'tool.failed',
+                  'review.started',
+                  'review.completed',
+                }.contains(type) &&
+                !eventPayload.containsKey('server_id')) {
+              eventPayload = {...eventPayload, 'server_id': task.serverId};
+            }
             _ContextUsageEvent? contextUsageEvent;
             if (type == 'assistant.completed') {
               try {
@@ -2283,6 +2521,7 @@ class AppController extends ChangeNotifier {
       workMode: parent.effectiveWorkMode,
       projectId: parent.projectId,
       serverId: parent.serverId,
+      serverIds: parent.serverIds,
       providerId: provider.id,
       reviewProviderId: parent.reviewProviderId,
       reviewModelOverride: parent.reviewModelOverride,
@@ -2792,7 +3031,7 @@ class AppController extends ChangeNotifier {
       fingerprint: current.fingerprint,
       entries: current.entries,
       cachedAt: current.cachedAt,
-      checkedAt: now,
+      checkedAt: current.checkedAt,
       accessedAt: now,
     );
     _directoryCacheRecords[cacheKey] = updated;
@@ -3659,6 +3898,27 @@ class AppController extends ChangeNotifier {
     ServerProfile profile, {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
   }) async {
+    final cacheKey = _dashboardCacheKey(profile);
+    final pending = _dashboardLoads[cacheKey];
+    if (pending != null) return pending;
+    final request = _loadServerDashboard(
+      profile,
+      onFirstHostKey: onFirstHostKey,
+    );
+    _dashboardLoads[cacheKey] = request;
+    try {
+      return await request;
+    } finally {
+      if (identical(_dashboardLoads[cacheKey], request)) {
+        _dashboardLoads.remove(cacheKey);
+      }
+    }
+  }
+
+  Future<ServerDashboard> _loadServerDashboard(
+    ServerProfile profile, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
     if (previewMode) {
       const dashboard = ServerDashboard(
         hostname: 'preview-server',
@@ -3695,6 +3955,14 @@ class AppController extends ChangeNotifier {
         processCount: 42,
       );
       _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
+      unawaited(
+        _database
+            .writeSetting(
+              _dashboardCacheSettingKey(profile),
+              dashboard.toJson(),
+            )
+            .catchError((_) {}),
+      );
       return dashboard;
     }
     final dashboard = await _withServerConnection(profile, (connection) async {
@@ -3705,6 +3973,11 @@ class AppController extends ChangeNotifier {
       return _parseDashboard(result.stdout);
     }, onFirstHostKey: onFirstHostKey);
     _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
+    unawaited(
+      _database
+          .writeSetting(_dashboardCacheSettingKey(profile), dashboard.toJson())
+          .catchError((_) {}),
+    );
     return dashboard;
   }
 
@@ -3744,6 +4017,8 @@ class AppController extends ChangeNotifier {
     final authTypeChanged = existing != null && existing.authType != authType;
     final endpointChanged =
         existing != null && (existing.host != host || existing.port != port);
+    final dashboardIdentityChanged =
+        existing != null && (endpointChanged || existing.username != username);
     final defaultWorkingDirectory = workingDirectory.isEmpty
         ? null
         : workingDirectory;
@@ -3767,13 +4042,16 @@ class AppController extends ChangeNotifier {
     }
     if (connectionSettingsChanged) {
       if (_tasks.any(
-        (task) => task.serverId == id && _taskRuns.containsKey(task.id),
+        (task) =>
+            (task.serverIds.contains(id) || task.serverId == id) &&
+            _taskRuns.containsKey(task.id),
       )) {
         throw StateError('服务器任务正在运行，不能修改连接设置');
       }
       await Future.wait([
         for (final task in _tasks)
-          if (task.serverId == id) _releasePhoneTask(task.id),
+          if (task.serverIds.contains(id) || task.serverId == id)
+            _releasePhoneTask(task.id),
       ]);
     }
     if (secret.isNotEmpty) {
@@ -3825,18 +4103,34 @@ class AppController extends ChangeNotifier {
         defaultWorkingDirectory: defaultWorkingDirectory,
       ),
     ]..sort((left, right) => left.name.compareTo(right.name));
-    _invalidateServerDirectoryCacheById(id);
+    final previousProfile = existing;
+    final directoryIdentityChanged =
+        existing != null && (endpointChanged || existing.username != username);
+    if (directoryIdentityChanged) {
+      _invalidateServerDirectoryCacheById(id);
+    }
+    if (dashboardIdentityChanged) {
+      _dashboardCache.removeWhere((key, _) => key.startsWith('$id\u0000'));
+      await _database.writeSetting(
+        _dashboardCacheSettingKey(previousProfile!),
+        '',
+      );
+    }
     _notify();
   }
 
   Future<void> deleteServer(ServerProfile profile) async {
-    if (_tasks.any((task) => task.serverId == profile.id)) {
+    if (_tasks.any(
+      (task) =>
+          task.serverIds.contains(profile.id) || task.serverId == profile.id,
+    )) {
       throw StateError('服务器仍被历史任务使用，请先删除相关任务');
     }
     await _database.deleteServer(profile.id);
     if (_lastDashboardServerId == profile.id) {
       await setLastDashboardServer(null);
     }
+    await _database.writeSetting(_dashboardCacheSettingKey(profile), '');
     if (profile.credentialRef != null) {
       await _credentials.delete(profile.credentialRef!);
     }
@@ -3848,6 +4142,7 @@ class AppController extends ChangeNotifier {
         if (item.id != profile.id) item,
     ];
     _invalidateServerDirectoryCache(profile);
+    _dashboardCache.remove(_dashboardCacheKey(profile));
     _notify();
   }
 
@@ -3862,6 +4157,7 @@ class AppController extends ChangeNotifier {
     required String secret,
     required bool isDefault,
     Map<String, ProviderModelMetadata>? modelMetadata,
+    List<String>? customReasoningEfforts,
     String? imageModel,
   }) async {
     final previousProviders = List<ProviderProfile>.unmodifiable(_providers);
@@ -3873,12 +4169,16 @@ class AppController extends ChangeNotifier {
       throw ArgumentError('首次保存供应商时必须填写 API Key');
     }
     if (isDefault) await _database.clearProviderDefaults();
+    final savedCustomReasoningEfforts = normalizeCustomReasoningEfforts(
+      customReasoningEfforts ?? existing?.customReasoningEfforts ?? const [],
+    );
     final saved = ProviderProfile(
       id: id,
       name: name,
       baseUrl: baseUrl,
       model: model,
-      reasoningEffort: reasoningEffort,
+      reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+      customReasoningEfforts: savedCustomReasoningEfforts,
       wireApi: wireApi,
       contextWindowMode: normalizeContextWindowMode(
         contextWindowMode ?? existing?.contextWindowMode,
@@ -4145,6 +4445,7 @@ class AppController extends ChangeNotifier {
         'tool_description': tool.definition.description,
         'arguments': redactReviewInput(arguments),
         'server_id': task.serverId,
+        'server_ids': task.serverIds,
         'working_directory': task.workingDirectory,
       });
       final response = await client.complete(
@@ -4463,6 +4764,10 @@ class AppController extends ChangeNotifier {
     }
     if (workModeUsesServer(workMode)) {
       final directory = workingDirectory ?? task.workingDirectory ?? 'not set';
+      final boundServerIds = task.serverIds.isEmpty && task.serverId != null
+          ? [task.serverId!]
+          : task.serverIds;
+      final activeServer = serverForId(task.serverId);
       final phoneDownloadRule = project == null
           ? 'The phone destination requires user approval.'
           : 'A destination outside the current phone project requires user '
@@ -4470,6 +4775,10 @@ class AppController extends ChangeNotifier {
                 'project does not. Other execution modes keep their existing '
                 'approval flow.';
       scopes.add(
+        'This conversation is bound to ${boundServerIds.length} server(s). '
+        'The active server is "${activeServer?.name ?? task.serverId ?? 'not set'}" '
+        '(${task.serverId ?? 'not set'}); operate only on that active server '
+        'unless the user explicitly changes the active server in the app. '
         'The selected server working directory is $directory. Use '
         'terminal.exec for short commands; use terminal.start, terminal.poll, '
         'terminal.write, and terminal.stop for long-running commands. Use '
@@ -5635,6 +5944,38 @@ class AppController extends ChangeNotifier {
   static String _dashboardCacheKey(ServerProfile profile) =>
       [profile.id, profile.host, profile.port, profile.username].join('\u0000');
 
+  static List<String> _normalizeServerIds(
+    Iterable<String>? values, {
+    String? fallback,
+  }) {
+    final ids = <String>[];
+    for (final value in values ?? const <String>[]) {
+      final id = value.trim();
+      if (id.isNotEmpty && !ids.contains(id)) ids.add(id);
+    }
+    final active = fallback?.trim();
+    if (active != null && active.isNotEmpty && !ids.contains(active)) {
+      ids.insert(0, active);
+    }
+    return List.unmodifiable(ids);
+  }
+
+  static bool _sameStringList(List<String> left, List<String> right) {
+    if (left.length != right.length) return false;
+    for (var index = 0; index < left.length; index++) {
+      if (left[index] != right[index]) return false;
+    }
+    return true;
+  }
+
+  static String _serverSelectionSettingKey(String? taskId, String feature) {
+    final scope = taskId == null || taskId.isEmpty ? 'global' : taskId;
+    return 'server_selection:$scope:$feature';
+  }
+
+  static String _dashboardCacheSettingKey(ServerProfile profile) =>
+      'dashboard_cache:${_dashboardCacheKey(profile)}';
+
   static ServerDashboard _parseDashboard(String output) {
     final values = <String, String>{};
     for (final line in output.split('\n')) {
@@ -5772,6 +6113,7 @@ const _floatingCapsuleSetting = 'floating_capsule_enabled';
 const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
 const _floatingCapsuleLengthScaleSetting = 'floating_capsule_length_scale';
 const _documentModuleSetting = 'document_module_enabled';
+const _remoteTaskRecoverySetting = 'remote_task_recovery_enabled';
 const _fontScaleSetting = 'font_scale';
 const _subagentSettingsSetting = 'subagent_settings';
 const _imageProviderSetting = 'image_provider_id';

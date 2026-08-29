@@ -356,18 +356,27 @@ class _HomeShellState extends State<HomeShell> {
                 ],
               ),
             ),
-            ListTile(
-              dense: true,
-              visualDensity: _compactDrawerDensity,
-              minTileHeight: 36,
-              minVerticalPadding: 0,
-              minLeadingWidth: 20,
-              horizontalTitleGap: 6,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-              leading: const Icon(Icons.add_comment_outlined, size: 18),
-              title: const Text('新对话', style: _drawerTitleStyle),
-              selected: _selectedIndex == 0 && _activeTaskId == null,
-              onTap: _openNewConversationPicker,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 7),
+              child: SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: FilledButton.icon(
+                  onPressed: _openNewConversationPicker,
+                  icon: const Icon(Icons.add_comment_outlined, size: 20),
+                  label: const Text(
+                    '新建对话',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  style: FilledButton.styleFrom(
+                    alignment: Alignment.centerLeft,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ),
             ),
             const Divider(height: 1),
             Expanded(
@@ -1576,7 +1585,21 @@ class ServersPage extends StatelessWidget {
   }
 
   void _openTerminal(BuildContext context, ServerProfile server) {
-    Navigator.of(context).push(
+    unawaited(_openTerminalForServer(context, server));
+  }
+
+  Future<void> _openTerminalForServer(
+    BuildContext context,
+    ServerProfile server,
+  ) async {
+    try {
+      await controller.setServerForFeature(
+        feature: 'terminal',
+        serverId: server.id,
+      );
+    } catch (_) {}
+    if (!context.mounted) return;
+    await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => TerminalPage(controller: controller, server: server),
       ),
@@ -1584,7 +1607,21 @@ class ServersPage extends StatelessWidget {
   }
 
   void _openDashboard(BuildContext context, ServerProfile server) {
-    Navigator.of(context).push(
+    unawaited(_openDashboardForServer(context, server));
+  }
+
+  Future<void> _openDashboardForServer(
+    BuildContext context,
+    ServerProfile server,
+  ) async {
+    try {
+      await controller.setServerForFeature(
+        feature: 'dashboard',
+        serverId: server.id,
+      );
+    } catch (_) {}
+    if (!context.mounted) return;
+    await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
             ServerDashboardPage(controller: controller, server: server),
@@ -1593,7 +1630,21 @@ class ServersPage extends StatelessWidget {
   }
 
   void _openFiles(BuildContext context, ServerProfile server) {
-    Navigator.of(context).push(
+    unawaited(_openFilesForServer(context, server));
+  }
+
+  Future<void> _openFilesForServer(
+    BuildContext context,
+    ServerProfile server,
+  ) async {
+    try {
+      await controller.setServerForFeature(
+        feature: 'files',
+        serverId: server.id,
+      );
+    } catch (_) {}
+    if (!context.mounted) return;
+    await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => FileManagerPage(controller: controller, server: server),
       ),
@@ -1642,7 +1693,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 9,
+              itemCount: 10,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1671,23 +1722,37 @@ class SettingsPage extends StatelessWidget {
                   );
                 }
                 if (index == 2) {
-                  return _FloatingCapsuleSettingsTile(controller: controller);
+                  return SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    secondary: const Icon(Icons.restart_alt_outlined),
+                    title: const Text('服务器任务断线恢复'),
+                    subtitle: const Text(
+                      '让普通命令和非交互长任务在 SSH 断开后安全重连；关闭后仅使用当前连接。',
+                    ),
+                    value: controller.remoteTaskRecoveryEnabled,
+                    onChanged: (value) {
+                      unawaited(controller.setRemoteTaskRecoveryEnabled(value));
+                    },
+                  );
                 }
                 if (index == 3) {
+                  return _FloatingCapsuleSettingsTile(controller: controller);
+                }
+                if (index == 4) {
                   return _FloatingCapsuleScaleSettingsTile(
                     controller: controller,
                   );
                 }
-                if (index == 4) {
+                if (index == 5) {
                   return _VersionSettingsTile(controller: controller);
                 }
-                if (index == 5) {
+                if (index == 6) {
                   return _FontScaleSettingsTile(controller: controller);
                 }
-                if (index == 6) {
+                if (index == 7) {
                   return _StorageSettingsTile(controller: controller);
                 }
-                if (index == 7) {
+                if (index == 8) {
                   return _PermissionsSettingsTile(controller: controller);
                 }
                 return _DeveloperSettingsTile(controller: controller);

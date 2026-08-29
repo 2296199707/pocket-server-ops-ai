@@ -2780,6 +2780,146 @@ void main() {
     },
   );
 
+  test('multiple server selections and snapshots stay independent', () async {
+    final database = MemoryAppDatabase();
+    final credentials = MemoryCredentialStore();
+    final connector = _FakeConnector();
+    const serverA = ServerProfile(
+      id: 'server-a',
+      name: 'A 服务器',
+      host: 'a.example.com',
+      port: 22,
+      username: 'ops',
+      authType: 'password',
+      credentialRef: 'server-a:ssh',
+      credentialPassphraseRef: null,
+      hostKey: null,
+      hostKeyFingerprint: null,
+      defaultWorkingDirectory: '/srv/a',
+    );
+    const serverB = ServerProfile(
+      id: 'server-b',
+      name: 'B 服务器',
+      host: 'b.example.com',
+      port: 22,
+      username: 'ops',
+      authType: 'password',
+      credentialRef: 'server-b:ssh',
+      credentialPassphraseRef: null,
+      hostKey: null,
+      hostKeyFingerprint: null,
+      defaultWorkingDirectory: '/srv/b',
+    );
+    await database.saveServer(serverA);
+    await database.saveServer(serverB);
+    await credentials.write(serverA.credentialRef!, 'password-a');
+    await credentials.write(serverB.credentialRef!, 'password-b');
+    connector.directoryProbeOutput =
+        'probe_version=1\n'
+        'fingerprint=100:10\n'
+        'unchanged=0\n'
+        'entry\tf\t12\t1700000000\tREADME.md\n';
+
+    final controller = AppController(
+      database: database,
+      credentials: credentials,
+      sshConnector: connector,
+    );
+    await controller.load();
+
+    expect(
+      (await controller.resolveServerForFeature(
+        feature: 'files',
+        fallbackServerId: serverA.id,
+      ))?.id,
+      serverA.id,
+    );
+    await controller.setServerForFeature(
+      feature: 'files',
+      serverId: serverB.id,
+    );
+    await controller.setServerForFeature(
+      feature: 'dashboard',
+      serverId: serverA.id,
+    );
+
+    final entriesA = await controller.listServerDirectory(
+      serverA,
+      '/srv/a',
+      forceRefresh: true,
+    );
+    final entriesB = await controller.listServerDirectory(
+      serverB,
+      '/srv/b',
+      forceRefresh: true,
+    );
+    expect(controller.cachedServerDirectory(serverA, '/srv/a'), same(entriesA));
+    expect(controller.cachedServerDirectory(serverB, '/srv/b'), same(entriesB));
+    final commandCount = connector.commands.length;
+    await controller.listServerDirectory(serverB, '/srv/b');
+    await controller.listServerDirectory(serverA, '/srv/a');
+    expect(connector.commands.length, commandCount);
+
+    final dashboards = await Future.wait([
+      controller.loadServerDashboard(serverA),
+      controller.loadServerDashboard(serverA),
+    ]);
+    expect(dashboards[0], same(dashboards[1]));
+    expect(controller.cachedServerDashboard(serverA), same(dashboards[0]));
+    final dashboardB = await controller.loadServerDashboard(serverB);
+    expect(controller.cachedServerDashboard(serverB), same(dashboardB));
+    expect(
+      connector.commands.where((command) => command.contains('status_output=')),
+      hasLength(2),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    final reloaded = AppController(
+      database: database,
+      credentials: credentials,
+      sshConnector: connector,
+    );
+    await reloaded.load();
+    expect(
+      (await reloaded.resolveServerForFeature(
+        feature: 'files',
+        fallbackServerId: serverA.id,
+      ))?.id,
+      serverB.id,
+    );
+    expect(
+      (await reloaded.resolveServerForFeature(
+        feature: 'dashboard',
+        fallbackServerId: serverB.id,
+      ))?.id,
+      serverA.id,
+    );
+    expect(reloaded.cachedServerDashboard(serverA), isNotNull);
+    expect(reloaded.cachedServerDashboard(serverB), isNotNull);
+    reloaded.dispose();
+    controller.dispose();
+  });
+
+  test('old single-server tasks gain a compatible binding list', () {
+    final old = Task(
+      id: 'old-task',
+      mode: 'agent',
+      serverId: 'server-a',
+      providerId: null,
+      title: '旧任务',
+      workingDirectory: '/srv/a',
+      executionMode: 'confirm',
+      status: 'queued',
+      createdAt: DateTime.utc(2026, 8, 29),
+      updatedAt: DateTime.utc(2026, 8, 29),
+    ).toMap()..remove('serverIds');
+
+    final restored = Task.fromMap(old);
+
+    expect(restored.serverId, 'server-a');
+    expect(restored.serverIds, ['server-a']);
+  });
+
   test('dashboard and file APIs use the direct SSH connection', () async {
     final database = MemoryAppDatabase();
     final credentials = MemoryCredentialStore();

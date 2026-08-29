@@ -122,7 +122,7 @@ class ProviderConnectionTester {
           );
         }
       }
-      return models;
+      return await _mergeOpenCodeCatalog(profile, models, requestClient);
     } on FormatException {
       throw ArgumentError('Base URL 无效');
     } finally {
@@ -136,5 +136,58 @@ class ProviderConnectionTester {
         statusCode == 405 ||
         statusCode == 406 ||
         statusCode == 415;
+  }
+
+  Future<List<ProviderModelMetadata>> _mergeOpenCodeCatalog(
+    ProviderProfile profile,
+    List<ProviderModelMetadata> models,
+    http.Client requestClient,
+  ) async {
+    final base = Uri.tryParse(profile.baseUrl.trim());
+    if (base == null ||
+        base.host.toLowerCase() != 'opencode.ai' ||
+        !base.path.toLowerCase().startsWith('/zen/')) {
+      return models;
+    }
+    final catalogKey = base.path.toLowerCase().contains('/zen/go/')
+        ? 'opencode-go'
+        : 'opencode';
+    try {
+      final response = await requestClient
+          .get(
+            Uri.parse('https://models.opencode.ai/api.json'),
+            headers: const {'Accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return models;
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) return models;
+      final rawProvider = decoded[catalogKey];
+      if (rawProvider is! Map || rawProvider['models'] is! Map) {
+        return models;
+      }
+      final rawCatalog = rawProvider['models'] as Map;
+      final catalog = <String, ProviderModelMetadata>{};
+      for (final entry in rawCatalog.entries) {
+        if (entry.key is! String || entry.value is! Map) continue;
+        final model = (entry.key as String).trim();
+        if (model.isEmpty) continue;
+        catalog[model] = ProviderModelMetadata.fromMap({
+          ...Map<String, Object?>.from(entry.value as Map),
+          'model': model,
+          'source': 'opencode-catalog',
+        });
+      }
+      return [
+        for (final model in models)
+          catalog[model.model]?.mergedWith(model) ?? model,
+      ];
+    } on Object {
+      // The public catalog is capability enrichment only. The provider's
+      // authenticated model list remains usable when it is unavailable.
+      return models;
+    }
   }
 }

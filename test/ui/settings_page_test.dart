@@ -21,6 +21,8 @@ void main() {
 
     expect(find.text('清理空间'), findsOneWidget);
     expect(find.textContaining('未被对话引用'), findsOneWidget);
+    expect(find.text('服务器任务断线恢复'), findsOneWidget);
+    expect(controller.remoteTaskRecoveryEnabled, isTrue);
   });
 
   testWidgets('settings exposes the cross-app floating capsule switch', (
@@ -131,6 +133,31 @@ void main() {
     controller.dispose();
     reloaded.dispose();
   });
+
+  test(
+    'server task recovery setting is persisted and can be disabled',
+    () async {
+      final database = MemoryAppDatabase();
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await controller.load();
+
+      expect(controller.remoteTaskRecoveryEnabled, isTrue);
+      await controller.setRemoteTaskRecoveryEnabled(false);
+
+      final reloaded = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      await reloaded.load();
+      expect(reloaded.remoteTaskRecoveryEnabled, isFalse);
+
+      controller.dispose();
+      reloaded.dispose();
+    },
+  );
 
   testWidgets('permissions page exposes the app permissions', (tester) async {
     final controller = AppController(

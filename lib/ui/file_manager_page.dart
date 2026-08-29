@@ -24,6 +24,7 @@ class FileManagerPage extends StatefulWidget {
   const FileManagerPage({
     required this.controller,
     required this.server,
+    this.taskId,
     this.initialPath,
     this.onCdToDirectory,
     super.key,
@@ -31,6 +32,7 @@ class FileManagerPage extends StatefulWidget {
 
   final AppController controller;
   final ServerProfile server;
+  final String? taskId;
   final String? initialPath;
   final ValueChanged<String>? onCdToDirectory;
 
@@ -39,6 +41,7 @@ class FileManagerPage extends StatefulWidget {
 }
 
 class _FileManagerPageState extends State<FileManagerPage> {
+  late ServerProfile _server;
   late final TextEditingController _path;
   List<SshDirectoryEntry> _entries = const [];
   bool _loading = false;
@@ -55,21 +58,32 @@ class _FileManagerPageState extends State<FileManagerPage> {
   final List<String> _clipboard = [];
   bool _clipboardMoves = false;
   final Map<String, DateTime?> _modifiedTimes = {};
+  final Map<String, String> _pathsByServer = {};
   _RemoteSortOption _sortOption = _RemoteSortOption.nameAscending;
+  int _directoryRequest = 0;
 
   @override
   void initState() {
     super.initState();
+    _server = widget.server;
     final configuredPath = widget.initialPath?.trim();
     _path = TextEditingController(
       text: configuredPath?.isNotEmpty == true
           ? configuredPath!
-          : widget.server.defaultWorkingDirectory?.trim().isNotEmpty == true
-          ? widget.server.defaultWorkingDirectory
+          : _server.defaultWorkingDirectory?.trim().isNotEmpty == true
+          ? _server.defaultWorkingDirectory
           : '/',
     );
     unawaited(_initialize());
   }
+
+  Task? get _boundTask {
+    final id = widget.taskId;
+    return id == null ? null : widget.controller.taskForId(id);
+  }
+
+  List<ServerProfile> get _availableServers =>
+      widget.controller.serversForTask(_boundTask);
 
   @override
   void dispose() {
@@ -90,11 +104,35 @@ class _FileManagerPageState extends State<FileManagerPage> {
               ),
         title: Text(
           _selected.isEmpty
-              ? '${widget.server.name} · 文件'
+              ? '${_server.name} · 文件'
               : '已选择 ${_selected.length} 项',
         ),
         actions: [
           if (_selected.isEmpty) ...[
+            if (_availableServers.length > 1)
+              PopupMenuButton<String>(
+                tooltip: '切换服务器',
+                icon: const Icon(Icons.swap_horiz_rounded),
+                onSelected: (id) => unawaited(_switchServer(id)),
+                itemBuilder: (context) => [
+                  for (final server in _availableServers)
+                    PopupMenuItem(
+                      value: server.id,
+                      child: Row(
+                        children: [
+                          Icon(
+                            server.id == _server.id
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_unchecked,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(child: Text(server.name)),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
             IconButton(
               tooltip: '上传文件',
               onPressed: _loading || _transferInProgress ? null : _upload,
@@ -302,69 +340,148 @@ class _FileManagerPageState extends State<FileManagerPage> {
   }
 
   Future<void> _initialize() async {
+    final initialServerId = _server.id;
+    final selected = await widget.controller.resolveServerForFeature(
+      task: _boundTask,
+      feature: 'files',
+      fallbackServerId: _server.id,
+    );
+    if (!mounted) return;
+    if (_server.id == initialServerId &&
+        selected != null &&
+        selected.id != _server.id) {
+      _server = selected;
+      _path.text = _defaultPath(selected);
+    }
     final saved = await _readFileManagerSortPreference(_sortPreferenceKey);
     if (!mounted) return;
     if (saved != null) {
       setState(() => _sortOption = _remoteSortOptionFromStorage(saved));
     }
-    final cached = widget.controller.cachedServerDirectory(
-      widget.server,
-      _path.text,
-    );
-    if (cached == null) {
-      await _load();
-      return;
-    }
-    final sorted = await _sortEntries(cached);
-    if (!mounted) return;
-    setState(() {
-      _entries = sorted;
-      _loading = true;
-      _error = null;
-    });
-    await _refresh(_path.text);
+    await _load();
   }
 
-  String get _sortPreferenceKey => 'server:${widget.server.id}';
+  String get _sortPreferenceKey => 'server:${_server.id}';
+
+  String _defaultPath(ServerProfile server) {
+    final configured = server.defaultWorkingDirectory?.trim();
+    return configured == null || configured.isEmpty ? '/' : configured;
+  }
+
+  bool _isCurrentDirectoryRequest(
+    int request,
+    ServerProfile server,
+    String path,
+  ) {
+    return mounted &&
+        request == _directoryRequest &&
+        _server.id == server.id &&
+        _path.text.trim() == path;
+  }
+
+  String _modifiedTimeKey(ServerProfile server, String path) =>
+      '${server.id}\u0000$path';
 
   Future<void> _load({bool forceRefresh = false}) async {
+    final server = _server;
     final path = _path.text.trim();
     if (path.isEmpty) return;
-    final cached = widget.controller.cachedServerDirectory(widget.server, path);
+    final request = ++_directoryRequest;
+    _pathsByServer[server.id] = path;
+    final cached = widget.controller.cachedServerDirectory(server, path);
     if (!forceRefresh && cached != null) {
-      final sorted = await _sortEntries(cached);
       if (mounted) {
         setState(() {
-          _entries = sorted;
+          // Keep a per-server snapshot visible while its background probe
+          // runs. A previous server's request cannot replace this view.
+          _entries = cached;
           _loading = true;
           _error = null;
         });
       }
-      await _refresh(path);
-      return;
+      final sorted = await _sortEntries(
+        cached,
+        server: server,
+        allowRemoteMetadata: false,
+      );
+      if (!_isCurrentDirectoryRequest(request, server, path)) return;
+      setState(() => _entries = sorted);
+    } else {
+      if (!_isCurrentDirectoryRequest(request, server, path)) return;
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
     }
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    await _refresh(path);
+    await _refresh(server, path, request);
   }
 
-  Future<void> _refresh(String path) async {
+  Future<void> _switchServer(String id) async {
+    if (_transferInProgress || id == _server.id) return;
+    ServerProfile? selected;
+    for (final server in _availableServers) {
+      if (server.id == id) {
+        selected = server;
+        break;
+      }
+    }
+    if (selected == null) return;
+    try {
+      _pathsByServer[_server.id] = _path.text.trim();
+      final nextPath =
+          _pathsByServer[selected.id] ??
+          (selected.defaultWorkingDirectory?.trim().isNotEmpty == true
+              ? selected.defaultWorkingDirectory!
+              : '/');
+      final cached = widget.controller.cachedServerDirectory(
+        selected,
+        nextPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        _server = selected!;
+        _path.text = nextPath;
+        // Each server owns an independent snapshot, so switching can paint
+        // immediately and refresh without rebuilding the whole page.
+        _entries = cached ?? const [];
+        _selected.clear();
+        _error = null;
+      });
+      unawaited(
+        widget.controller
+            .setServerForFeature(
+              task: _boundTask,
+              feature: 'files',
+              serverId: selected.id,
+            )
+            .catchError((_) {}),
+      );
+      await _load();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('切换服务器失败：$error')));
+      }
+    }
+  }
+
+  Future<void> _refresh(ServerProfile server, String path, int request) async {
     try {
       final entries = await widget.controller.listServerDirectory(
-        widget.server,
+        server,
         path,
         onFirstHostKey: _confirmHostKey,
         forceRefresh: true,
       );
-      _modifiedTimes.clear();
-      final sorted = await _sortEntries(entries);
-      if (mounted && _path.text.trim() == path) {
+      _modifiedTimes.removeWhere(
+        (key, _) => key.startsWith('${server.id}\u0000'),
+      );
+      final sorted = await _sortEntries(entries, server: server);
+      if (_isCurrentDirectoryRequest(request, server, path)) {
         setState(() => _entries = sorted);
       }
     } catch (error) {
-      if (mounted && _path.text.trim() == path) {
+      if (_isCurrentDirectoryRequest(request, server, path)) {
         setState(
           () => _error = _entries.isEmpty
               ? '读取目录失败：$error'
@@ -372,7 +489,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
         );
       }
     } finally {
-      if (mounted && _path.text.trim() == path) {
+      if (_isCurrentDirectoryRequest(request, server, path)) {
         setState(() => _loading = false);
       }
     }
@@ -380,6 +497,9 @@ class _FileManagerPageState extends State<FileManagerPage> {
 
   Future<void> _selectSortOption(_RemoteSortOption option) async {
     if (option == _sortOption) return;
+    final server = _server;
+    final currentPath = _path.text.trim();
+    final request = ++_directoryRequest;
     setState(() {
       _sortOption = option;
       _loading = true;
@@ -387,37 +507,55 @@ class _FileManagerPageState extends State<FileManagerPage> {
     });
     unawaited(_writeFileManagerSortPreference(_sortPreferenceKey, option.name));
     try {
-      final sorted = await _sortEntries(_entries);
-      if (mounted) setState(() => _entries = sorted);
+      final sorted = await _sortEntries(_entries, server: server);
+      if (_isCurrentDirectoryRequest(request, server, currentPath)) {
+        setState(() => _entries = sorted);
+      }
     } catch (error) {
-      if (mounted) setState(() => _error = '排序失败：$error');
+      if (_isCurrentDirectoryRequest(request, server, currentPath)) {
+        setState(() => _error = '排序失败：$error');
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (_isCurrentDirectoryRequest(request, server, currentPath)) {
+        setState(() => _loading = false);
+      }
     }
   }
 
   Future<List<SshDirectoryEntry>> _sortEntries(
-    Iterable<SshDirectoryEntry> source,
-  ) async {
+    Iterable<SshDirectoryEntry> source, {
+    required ServerProfile server,
+    bool allowRemoteMetadata = true,
+  }) async {
     if (_sortOption == _RemoteSortOption.modifiedNewest ||
         _sortOption == _RemoteSortOption.modifiedOldest) {
-      await _loadModifiedTimes(source);
+      await _loadModifiedTimes(
+        source,
+        server,
+        allowRemoteMetadata: allowRemoteMetadata,
+      );
     }
     final entries = List<SshDirectoryEntry>.of(source);
-    entries.sort(_compareEntries);
+    entries.sort((left, right) => _compareEntries(left, right, server));
     return entries;
   }
 
-  Future<void> _loadModifiedTimes(Iterable<SshDirectoryEntry> source) async {
+  Future<void> _loadModifiedTimes(
+    Iterable<SshDirectoryEntry> source,
+    ServerProfile server, {
+    required bool allowRemoteMetadata,
+  }) async {
     for (final entry in source) {
       if (entry.modified != null) {
-        _modifiedTimes[entry.path] = entry.modified;
+        _modifiedTimes[_modifiedTimeKey(server, entry.path)] = entry.modified;
       }
     }
+    if (!allowRemoteMetadata) return;
     final missing = source
         .where(
           (entry) =>
-              entry.modified == null && !_modifiedTimes.containsKey(entry.path),
+              entry.modified == null &&
+              !_modifiedTimes.containsKey(_modifiedTimeKey(server, entry.path)),
         )
         .toList(growable: false);
     if (missing.isEmpty) return;
@@ -425,7 +563,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
         'for p in ${missing.map((entry) => _shellQuote(entry.path)).join(' ')}; '
         'do stat -c %Y -- "\$p" 2>/dev/null || printf \'0\\n\'; done';
     final result = await widget.controller.runServerCommand(
-      widget.server,
+      server,
       command,
       onFirstHostKey: _confirmHostKey,
     );
@@ -437,13 +575,20 @@ class _FileManagerPageState extends State<FileManagerPage> {
       index++
     ) {
       final seconds = int.tryParse(lines[index]);
-      _modifiedTimes[missing[index].path] = seconds == null
+      _modifiedTimes[_modifiedTimeKey(
+        server,
+        missing[index].path,
+      )] = seconds == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
     }
   }
 
-  int _compareEntries(SshDirectoryEntry left, SshDirectoryEntry right) {
+  int _compareEntries(
+    SshDirectoryEntry left,
+    SshDirectoryEntry right,
+    ServerProfile server,
+  ) {
     if (left.isDirectory != right.isDirectory) {
       return left.isDirectory ? -1 : 1;
     }
@@ -455,8 +600,8 @@ class _FileManagerPageState extends State<FileManagerPage> {
       case _RemoteSortOption.modifiedNewest:
       case _RemoteSortOption.modifiedOldest:
         comparison = _compareNullable(
-          _modifiedTimes[left.path],
-          _modifiedTimes[right.path],
+          _modifiedTimes[_modifiedTimeKey(server, left.path)],
+          _modifiedTimes[_modifiedTimeKey(server, right.path)],
         );
       case _RemoteSortOption.sizeLargest:
       case _RemoteSortOption.sizeSmallest:
@@ -622,14 +767,14 @@ class _FileManagerPageState extends State<FileManagerPage> {
     try {
       if (move) {
         await widget.controller.moveServerFiles(
-          widget.server,
+          _server,
           paths,
           destination,
           onFirstHostKey: _confirmHostKey,
         );
       } else {
         await widget.controller.copyServerFiles(
-          widget.server,
+          _server,
           paths,
           destination,
           onFirstHostKey: _confirmHostKey,
@@ -660,7 +805,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     if (name == null || name.trim().isEmpty) return;
     try {
       await widget.controller.renameServerFile(
-        widget.server,
+        _server,
         entry.path,
         name,
         onFirstHostKey: _confirmHostKey,
@@ -692,7 +837,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     }
     try {
       final info = await widget.controller.statServerFile(
-        widget.server,
+        _server,
         selected.single,
         onFirstHostKey: _confirmHostKey,
       );
@@ -758,7 +903,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     });
     try {
       await widget.controller.deleteServerFiles(
-        widget.server,
+        _server,
         paths,
         onFirstHostKey: _confirmHostKey,
       );
@@ -787,11 +932,11 @@ class _FileManagerPageState extends State<FileManagerPage> {
       MaterialPageRoute<void>(
         builder: (_) => RemoteFileEditorPage(
           controller: widget.controller,
-          server: widget.server,
+          server: _server,
           path: entry.path,
           name: entry.name,
           initialContent: widget.controller.cachedServerFileContent(
-            widget.server,
+            _server,
             entry,
           ),
         ),
@@ -851,7 +996,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     });
     try {
       final downloaded = await widget.controller.downloadServerFileToProject(
-        widget.server,
+        _server,
         project,
         entry.path,
         projectPath,
@@ -917,7 +1062,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     });
     try {
       final uploaded = await widget.controller.uploadFileToServer(
-        widget.server,
+        _server,
         File(sourcePath),
         remotePath,
         onFirstHostKey: _confirmHostKey,
@@ -1091,7 +1236,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
         : '$directory/${name.trim()}';
     try {
       await widget.controller.writeServerFile(
-        widget.server,
+        _server,
         path,
         '',
         onFirstHostKey: _confirmHostKey,
@@ -1115,7 +1260,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     final path = path_util.posix.join(directory, name.trim());
     try {
       await widget.controller.createServerDirectory(
-        widget.server,
+        _server,
         path,
         onFirstHostKey: _confirmHostKey,
       );

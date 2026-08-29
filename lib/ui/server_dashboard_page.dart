@@ -12,11 +12,13 @@ class ServerDashboardPage extends StatefulWidget {
   const ServerDashboardPage({
     required this.controller,
     required this.server,
+    this.taskId,
     super.key,
   });
 
   final AppController controller;
   final ServerProfile server;
+  final String? taskId;
 
   @override
   State<ServerDashboardPage> createState() => _ServerDashboardPageState();
@@ -28,14 +30,42 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   bool _loading = false;
   bool _installing = false;
   String? _error;
+  int _loadRequest = 0;
 
   @override
   void initState() {
     super.initState();
     _server = widget.server;
     _dashboard = widget.controller.cachedServerDashboard(_server);
-    unawaited(widget.controller.setLastDashboardServer(_server.id));
-    unawaited(_load());
+    unawaited(_initialize());
+  }
+
+  Task? get _boundTask {
+    final id = widget.taskId;
+    return id == null ? null : widget.controller.taskForId(id);
+  }
+
+  List<ServerProfile> get _availableServers =>
+      widget.controller.serversForTask(_boundTask);
+
+  Future<void> _initialize() async {
+    final initialServerId = _server.id;
+    final selected = await widget.controller.resolveServerForFeature(
+      task: _boundTask,
+      feature: 'dashboard',
+      fallbackServerId: _server.id,
+    );
+    if (!mounted) return;
+    if (_server.id == initialServerId &&
+        selected != null &&
+        selected.id != _server.id) {
+      setState(() {
+        _server = selected;
+        _dashboard = widget.controller.cachedServerDashboard(selected);
+        _error = null;
+      });
+    }
+    await _load();
   }
 
   @override
@@ -44,8 +74,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
     if (widget.server.id != oldWidget.server.id) {
       _server = widget.server;
       _dashboard = widget.controller.cachedServerDashboard(_server);
-      unawaited(widget.controller.setLastDashboardServer(_server.id));
-      unawaited(_load());
+      unawaited(_initialize());
     }
   }
 
@@ -61,7 +90,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
             icon: const Icon(Icons.swap_horiz_rounded),
             onSelected: _switchServer,
             itemBuilder: (context) => [
-              for (final server in widget.controller.servers)
+              for (final server in _availableServers)
                 PopupMenuItem(
                   value: server.id,
                   child: Row(
@@ -144,20 +173,28 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   }
 
   void _switchServer(String id) {
-    if (id == _server.id || _loading) return;
-    final selected = widget.controller.servers.firstWhere(
-      (server) => server.id == id,
-    );
+    if (id == _server.id || _installing) return;
+    final selected = _availableServers.firstWhere((server) => server.id == id);
     setState(() {
       _server = selected;
       _dashboard = widget.controller.cachedServerDashboard(selected);
       _error = null;
     });
-    unawaited(widget.controller.setLastDashboardServer(selected.id));
+    unawaited(
+      widget.controller
+          .setServerForFeature(
+            task: _boundTask,
+            feature: 'dashboard',
+            serverId: selected.id,
+          )
+          .catchError((_) {}),
+    );
     unawaited(_load());
   }
 
   Future<void> _load() async {
+    final server = _server;
+    final request = ++_loadRequest;
     if (mounted) {
       setState(() {
         _loading = true;
@@ -166,14 +203,20 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
     }
     try {
       final dashboard = await widget.controller.loadServerDashboard(
-        _server,
+        server,
         onFirstHostKey: _confirmHostKey,
       );
-      if (mounted) setState(() => _dashboard = dashboard);
+      if (mounted && request == _loadRequest && _server.id == server.id) {
+        setState(() => _dashboard = dashboard);
+      }
     } catch (error) {
-      if (mounted) setState(() => _error = '读取服务器状态失败：$error');
+      if (mounted && request == _loadRequest && _server.id == server.id) {
+        setState(() => _error = '读取服务器状态失败：$error');
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && request == _loadRequest && _server.id == server.id) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -202,8 +245,11 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   void _openTerminal(BuildContext context) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            TerminalPage(controller: widget.controller, server: _server),
+        builder: (_) => TerminalPage(
+          controller: widget.controller,
+          server: _server,
+          taskId: widget.taskId,
+        ),
       ),
     );
   }
@@ -211,8 +257,11 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   void _openFiles(BuildContext context) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            FileManagerPage(controller: widget.controller, server: _server),
+        builder: (_) => FileManagerPage(
+          controller: widget.controller,
+          server: _server,
+          taskId: widget.taskId,
+        ),
       ),
     );
   }
