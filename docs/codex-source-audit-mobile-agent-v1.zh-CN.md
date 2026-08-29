@@ -1190,6 +1190,21 @@
   `ba07a04`，并上传上述 APK。Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.28`。
 
+### 2026-08-29：正式版 1.0.4 发布记录
+
+- 正式版基于已验证的 `1.0.3-beta.28` 功能基线发布，未新增功能变更；悬浮窗尺寸设置、供应商模型与图片模型统一选择等修复均保留。
+- 功能基线提交：`ba07a04`；版本提交：`4fb6817`；发布清单提交：`b4656bf`。
+- 版本：`1.0.4+37`；Android `versionName=1.0.4`，`versionCode=37`。
+- 发布前验证：`test/agent_loop_test.dart`、`test/app_controller_test.dart`、`test/ui/chat_page_test.dart`、
+  `test/updates_page_test.dart` 共 93 项通过；`flutter analyze --no-pub` 通过；release APK 构建并完成
+  manifest 版本校验。构建输出、APK、Flutter SDK、Gradle 缓存和 Dart/Flutter 包缓存均位于 `/www` 数据盘。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-release.apk`；
+  大小 `78,275,819` bytes；SHA-256
+  `07670139dbfa25a8f98dc1e443d33546603ef5373def138ec38e26ec3518516d`。
+- 发布结果：已创建 GitHub 正式 Release `v1.0.4`，标签目标为 `b4656bf1dff1702e67f85a508da1d23da4b99f0d`，
+  APK 资产状态为 `uploaded`。Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4`。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：
