@@ -1113,7 +1113,7 @@
   `78,095,407` bytes；SHA-256 `226695a90f8f52fb28c6bda078d82e759a0840a5ce8ac3833897475550fecd2a`。
   Release 地址：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.25`。
 
-### 2026-08-29：服务器目录缓存与状态脚本探测
+### 2026-08-29：服务器目录缓存与状态脚本探测 Beta 1.0.3-beta.26
 
 - 目录列表先从 SQLite 持久缓存恢复，缓存最多保留 256 个最近访问目录；缓存只保存服务器
   标识、远程路径、名称、类型、大小、修改时间、指纹和时间戳，不保存密码、私钥、API Key
@@ -1127,9 +1127,17 @@
   `1 MiB`，内容只放内存且不会自动加入 AI 上下文。
 - 服务器文件写入、上传、删除、创建、重命名和复制/移动会使受影响目录缓存失效；外部命令
   修改服务器文件则由下一次指纹探测发现。仪表盘和文件管理器继续共用同一个状态脚本安装按钮。
-- 定向验证：目录缓存跨控制器重载恢复；指纹变更直接更新目录而不调用 SFTP；脚本协议在本机
-  真实目录上验证首次列表和 unchanged 响应；`flutter analyze --no-pub` 与
-  `test/app_controller_test.dart` 通过。
+- 功能与版本提交：`3bac2ac`；版本：`1.0.3-beta.26+35`。
+- 发布前验证：目录缓存跨控制器重载恢复；指纹变更直接更新目录而不调用 SFTP；脚本协议在本机
+  真实目录上验证首次列表和 unchanged 响应；全部 191 项 Flutter 测试通过；
+  `flutter analyze --no-pub` 通过；release APK 构建通过。构建输出、APK、Flutter SDK、Gradle
+  缓存和 Dart/Flutter 包缓存均位于 `/www` 数据盘。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.3-beta.26-release.apk`；
+  大小 `78,177,327` bytes；SHA-256
+  `f293c94a2e96eb334cdeb9c57c7c442b3c0e0c0b20c24f1c1bf3a2f768f08a8e`。
+- 发布结果：已创建 GitHub Pre-release `v1.0.3-beta.26`，标签目标为 `beta` 分支提交
+  `3bac2ac`，并上传上述 APK。Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.26`。
 
 ## 9. 发现记录模板
 

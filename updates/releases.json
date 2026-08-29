@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.3-beta.26",
+      "title": "PocketServerOps AI v1.0.3-beta.26",
+      "notes": "Add persistent server directory cache, lightweight status-script change detection, and on-demand preload for changed small text files.",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.26",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.3-beta.26/pocket-server-ops-ai-v1.0.3-beta.26-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-29T03:39:37Z"
+    },
+    {
       "version": "1.0.3-beta.25",
       "title": "PocketServerOps AI v1.0.3-beta.25",
       "notes": "Complete manual local and server file management: selection, copy, paste, move, delete, rename, properties, sorting, folder creation, and external file opening.",
