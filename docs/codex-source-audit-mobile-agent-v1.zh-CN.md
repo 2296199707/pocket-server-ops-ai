@@ -1449,3 +1449,13 @@ Mobile 实现：<path>:<symbol 或行号>
 `test/chat_completions_client_test.dart` 覆盖 DeepSeek 开关、档位与
 `reasoning_content` 回放；`test/subagents_test.dart` 覆盖指定供应商、并发和递归边界。
 本节作为当前结论封存；只有这些实现或对应测试变化时才重新读取同一供应商契约。
+
+### 2026-08-29：长回复稳定性、子代理与悬浮窗点击 Beta 1.0.4-beta.1
+
+- 长回复使用流式缓冲和局部监听刷新，流式阶段不重复解析 Markdown；工具参数和结果在展开时才完整格式化，任务完成事件不再重复保存完整回复文本。完整历史和 AI 上下文仍保留。
+- 首版子代理控制面已接入：独立任务历史、供应商/模型/推理强度选择、并发线程和递归深度、消息/等待/后续任务，以及取消和关闭收敛。
+- 修复悬浮窗右侧完整显示时被误判为半隐藏的问题；贴边隐藏时仍先展开，未隐藏时点击直接进入当前对话。
+- 功能提交：`2e15f48`；版本：`1.0.4-beta.1+38`。
+- 发布前验证：`flutter analyze --no-pub` 通过；发布相关定向测试 97 项全部通过；release APK 构建通过；构建输出、Gradle 缓存和 APK 均位于 `/www` 数据盘。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.1-release.apk`；大小 `78,554,467` bytes；SHA-256 `16c05b54a98b2034593c8bb871f3764e5908dda3dfa913df67fc8b5bd0528c69`。
+- 发布结果：待推送后创建 GitHub Pre-release `v1.0.4-beta.1`，标签指向 `beta` 分支。

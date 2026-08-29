@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.4-beta.1",
+      "title": "PocketServerOps AI v1.0.4-beta.1",
+      "notes": "稳定性修复：优化长回复流式加载与历史渲染；加入 Codex 风格子代理设置和生命周期控制；修复悬浮窗在右侧未隐藏时点击无法进入对话的问题。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.1",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.4-beta.1/pocket-server-ops-ai-v1.0.4-beta.1-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-29T10:27:00Z"
+    },
+    {
       "version": "1.0.4",
       "title": "PocketServerOps AI v1.0.4",
       "notes": "正式版：包含 beta.28 已验证的悬浮窗尺寸设置、供应商模型与图片模型统一选择，以及手机端服务器运维、文件管理和长对话能力。",
