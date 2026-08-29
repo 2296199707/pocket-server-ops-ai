@@ -1139,6 +1139,32 @@
   `3bac2ac`，并上传上述 APK。Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.3-beta.26`。
 
+### 2026-08-29：模型推理强度按供应商目录同步
+
+- Codex 源码依据：固定快照 `f5420174dafba153913a3e697f89002c338dfd7e` 的
+  `codex-rs/protocol/src/openai_models.rs` 定义了模型级
+  `default_reasoning_level` 和 `supported_reasoning_levels`；推理值还允许模型定义的
+  自定义字符串，不能由客户端给所有模型套用固定枚举。快照中的 `models.json` 也以
+  `supported_reasoning_levels` 为每个模型单独声明能力。
+- 供应商目录依据：本地 sub2api 源码的 `/v1/models` 路由在带
+  `client_version` 查询参数时返回 Codex `models` 清单，普通请求只返回 OpenAI 风格的
+  `data` 模型 ID；清单中的推理字段由上游模型目录或配置提供。
+- 原问题：Mobile 虽然能解析 Codex 清单字段，但模型目录请求没有带
+  `client_version`，聊天页和供应商设置页仍使用固定的 `default/none/minimal/low/medium/high/xhigh/max`
+  列表，因此会显示供应商没有声明的推理强度。
+- 修复：`ProviderConnectionTester.listModelMetadata()` 请求模型目录时协商 Codex 清单；
+  若供应商拒绝该查询，再读取普通 `/models` 清单。`ProviderModelMetadata` 同时解析
+  `supported_reasoning_levels` 和 sub2api 使用的 `reasoningEfforts`，并保存描述与默认值。
+  聊天模型抽屉默认折叠，推理强度默认展开；有供应商列表时只显示该模型明确返回的值，
+  没有列表时只显示“智能/模型默认”。旧的显式设置不会被静默删除，会标记为目录未确认。
+- 供应商设置页采用同一规则；保存供应商仍只在保存流程请求一次模型目录，聊天抽屉的刷新
+  按钮才会再次请求，不会因打开模型选择器自动请求。
+- 定向测试：`test/domain/models_test.dart` 验证模型只声明 `low/high` 时不生成
+  `medium`；`test/provider_connection_tester_test.dart` 验证 Codex 字段、sub2api
+  `reasoningEfforts` 和 `client_version`；`test/ui/chat_page_test.dart` 验证模型折叠和推理
+  列表精确显示。当前修复已通过 33 项定向测试和 `flutter analyze --no-pub`，随本次
+  `1.0.3-beta.27` 提交并发布。
+
 ## 9. 发现记录模板
 
 每个真实问题按以下格式追加，避免重复查询和重复修复：

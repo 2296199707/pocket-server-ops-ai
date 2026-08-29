@@ -52,10 +52,10 @@ void main() {
     expect(copiedText, '这是预览模式的普通对话回复。');
 
     expect(find.text('demo-model'), findsOneWidget);
-    expect(find.text('default'), findsOneWidget);
-    await tester.tap(find.text('default'));
+    expect(find.text('智能'), findsOneWidget);
+    await tester.tap(find.text('智能'));
     await tester.pumpAndSettle();
-    expect(find.text('模型与推理强度'), findsOneWidget);
+    expect(find.text('模型与推理'), findsOneWidget);
     expect(find.text('demo-coder'), findsNothing);
 
     await tester.tap(find.text('AI 模型'));
@@ -351,7 +351,11 @@ void main() {
   ) async {
     tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
-    final modelClient = MockClient((_) async => http.Response('{}', 502));
+    var modelRequests = 0;
+    final modelClient = MockClient((_) async {
+      modelRequests++;
+      return http.Response('{}', 502);
+    });
     final controller = AppController(
       database: MemoryAppDatabase(),
       credentials: MemoryCredentialStore(),
@@ -392,10 +396,75 @@ void main() {
     await tester.tap(find.text('model-a'));
     await tester.pumpAndSettle();
 
-    expect(find.text('模型与推理强度'), findsOneWidget);
-    expect(find.text('模型列表暂时不可用，当前配置仍可使用'), findsOneWidget);
+    expect(find.text('模型与推理'), findsOneWidget);
+    expect(modelRequests, 0);
+    expect(find.text('模型列表刷新失败，继续使用已保存的模型'), findsNothing);
+    await tester.tap(find.byTooltip('刷新模型列表'));
+    await tester.pumpAndSettle();
+    expect(modelRequests, 1);
+    expect(find.text('模型列表刷新失败，继续使用已保存的模型'), findsOneWidget);
     expect(find.textContaining('读取模型或推理设置失败'), findsNothing);
   });
+
+  testWidgets(
+    'model picker only shows reasoning levels advertised by the model',
+    (tester) async {
+      tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final controller = AppController(
+        database: MemoryAppDatabase(),
+        credentials: MemoryCredentialStore(),
+        providerUsageClient: ProviderUsageClient(
+          client: MockClient((_) async => http.Response('', 404)),
+        ),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveProvider(
+        name: '精确推理供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'model-a',
+        secret: 'test-key',
+        isDefault: true,
+        modelMetadata: {
+          'model-a': const ProviderModelMetadata(
+            model: 'model-a',
+            defaultReasoningLevel: 'high',
+            supportedReasoningLevels: [
+              ProviderReasoningLevel(effort: 'low', description: '轻量'),
+              ProviderReasoningLevel(effort: 'high', description: '深度'),
+            ],
+          ),
+        },
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ChatPage(
+              controller: controller,
+              taskId: null,
+              onTaskActivated: (_) {},
+              onOpenSettings: () {},
+              onConfirmTool: (_, _, _) async => true,
+              onConfirmHostKey: (_, _) async => true,
+              onUserInfoRequest: (_, _) async => null,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('model-a'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('模型列表'), findsNothing);
+      expect(find.text('Low'), findsOneWidget);
+      expect(find.text('High'), findsOneWidget);
+      expect(find.text('Medium'), findsNothing);
+      expect(find.text('Extra High'), findsNothing);
+      expect(find.text('供应商目录默认：High'), findsOneWidget);
+    },
+  );
 
   testWidgets('Responses context details expose manual compaction', (
     tester,

@@ -287,6 +287,33 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     super.dispose();
   }
 
+  ProviderProfile _draftProfile() {
+    return ProviderProfile(
+      id: widget.existing?.id ?? 'provider-editor',
+      name: _name.text.trim(),
+      baseUrl: _baseUrl.text.trim(),
+      model: _model.text.trim(),
+      reasoningEffort: _reasoningEffort,
+      wireApi: _wireApi,
+      contextWindowMode: _contextWindowMode,
+      apiKeyRef: widget.existing?.apiKeyRef,
+      isDefault: _isDefault,
+      modelMetadata: _modelMetadata,
+    );
+  }
+
+  ProviderModelMetadata? get _selectedModelMetadata {
+    final model = _model.text.trim();
+    if (model.isEmpty) return null;
+    return resolveProviderModelMetadata(_draftProfile(), model);
+  }
+
+  List<String> get _reasoningOptions => reasoningEffortValuesForModel(
+    _draftProfile(),
+    _model.text,
+    preserveCurrent: _reasoningEffort,
+  );
+
   @override
   Widget build(BuildContext context) {
     return _SheetFrame(
@@ -356,6 +383,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
                     controller: _model,
                     decoration: const InputDecoration(labelText: '默认模型'),
                     validator: _required,
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -441,12 +469,18 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
             ),
             DropdownButtonFormField<String>(
               initialValue: _reasoningEffort,
-              decoration: const InputDecoration(labelText: '默认推理强度'),
+              decoration: InputDecoration(
+                labelText: '默认推理强度',
+                helperText:
+                    _selectedModelMetadata?.supportedReasoningLevels == null
+                    ? '供应商未返回当前模型的推理强度列表，仅可使用模型默认'
+                    : '按当前模型返回的 supported_reasoning_levels 显示',
+              ),
               items: [
-                for (final effort in reasoningEffortOptions)
+                for (final effort in _reasoningOptions)
                   DropdownMenuItem(
                     value: effort,
-                    child: Text('${reasoningEffortLabel(effort)}（$effort）'),
+                    child: Text(_reasoningOptionLabel(effort)),
                   ),
               ],
               onChanged: (value) {
@@ -525,7 +559,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       _error = null;
     });
     try {
-      await widget.controller.saveProvider(
+      final saved = await widget.controller.saveProvider(
         existing: widget.existing,
         name: _name.text.trim(),
         baseUrl: _baseUrl.text.trim(),
@@ -538,6 +572,17 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
         modelMetadata: _modelMetadata,
         imageModel: _imageModel.text,
       );
+      try {
+        await widget.controller.loadProviderModelMetadata(saved);
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            _saving = false;
+            _error = '供应商已保存，读取模型失败：$error';
+          });
+        }
+        return;
+      }
       if (mounted) Navigator.pop(context);
     } catch (error) {
       if (mounted) {
@@ -629,7 +674,18 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
       _model.text = model;
       _wireApi = wireApi;
       _imageModel.text = imageModel;
+      _reasoningEffort = defaultReasoningEffort;
+      _models = const [];
+      _modelMetadata = const {};
     });
+  }
+
+  String _reasoningOptionLabel(String effort) {
+    final defaultLevel = _selectedModelMetadata?.defaultReasoningLevel;
+    if (effort == defaultReasoningEffort && defaultLevel != null) {
+      return '${reasoningEffortLabel(effort)}（目录默认：$defaultLevel）';
+    }
+    return '${reasoningEffortLabel(effort)}（$effort）';
   }
 }
 

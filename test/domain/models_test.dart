@@ -155,6 +155,44 @@ void main() {
     },
   );
 
+  test('reasoning options follow the selected model metadata exactly', () {
+    const provider = ProviderProfile(
+      id: 'provider-reasoning',
+      name: '推理供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      apiKeyRef: 'provider-reasoning:key',
+      isDefault: true,
+      modelMetadata: {
+        'model-a': ProviderModelMetadata(
+          model: 'model-a',
+          defaultReasoningLevel: 'high',
+          supportedReasoningLevels: [
+            ProviderReasoningLevel(effort: 'low'),
+            ProviderReasoningLevel(effort: 'high'),
+          ],
+        ),
+      },
+    );
+
+    expect(reasoningEffortValuesForModel(provider, 'model-a'), [
+      'default',
+      'low',
+      'high',
+    ]);
+    expect(
+      reasoningEffortValuesForModel(
+        provider,
+        'model-a',
+        preserveCurrent: 'medium',
+      ),
+      ['default', 'low', 'high', 'medium'],
+    );
+    expect(reasoningEffortValuesForModel(provider, 'unknown-model'), [
+      'default',
+    ]);
+  });
+
   test('Codex model can switch between default and maximum windows', () {
     const metadata = ProviderModelMetadata(
       model: 'gpt-5.6-luna',
@@ -197,8 +235,10 @@ void main() {
       isDefault: true,
     );
     expect(
-      resolveProviderModelMetadata(aliasProvider, aliasProvider.model)
-          ?.maxContextWindowTokens,
+      resolveProviderModelMetadata(
+        aliasProvider,
+        aliasProvider.model,
+      )?.maxContextWindowTokens,
       872000,
     );
   });

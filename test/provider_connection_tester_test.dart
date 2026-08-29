@@ -47,6 +47,7 @@ void main() {
         .listModelMetadata(_profile('https://provider.example/v1'), 'secret');
 
     expect(request.url.path, '/v1/models');
+    expect(request.url.queryParameters['client_version'], '0.150.0');
     expect(request.headers['authorization'], 'Bearer secret');
     expect(models.single.defaultReasoningLevel, 'high');
     expect(models.single.supportedReasoningLevels?.last.effort, 'high');
@@ -82,6 +83,65 @@ void main() {
     expect(model.truncationPolicy, isNull);
     expect(model.experimentalSupportedTools, isNull);
     expect(model.supportsSearchTool, isNull);
+  });
+
+  test('parses the provider reasoningEfforts catalog form', () async {
+    final client = MockClient(
+      (_) async => Response(
+        jsonEncode({
+          'data': [
+            {
+              'id': 'model-1',
+              'reasoningEffort': 'high',
+              'reasoningEfforts': [
+                {'value': 'low', 'label': 'Low'},
+                {'value': 'high', 'label': 'High'},
+              ],
+            },
+          ],
+        }),
+        200,
+      ),
+    );
+    addTearDown(client.close);
+
+    final model =
+        (await ProviderConnectionTester(client: client).listModelMetadata(
+          _profile('https://provider.example/v1'),
+          'secret',
+        )).single;
+
+    expect(model.defaultReasoningLevel, 'high');
+    expect(model.supportedReasoningLevels?.map((level) => level.effort), [
+      'low',
+      'high',
+    ]);
+    expect(model.supportedReasoningLevels?.first.description, 'Low');
+  });
+
+  test('falls back to the standard model list when catalog negotiation is rejected', () async {
+    var requests = 0;
+    final client = MockClient((request) async {
+      requests++;
+      if (request.url.queryParameters.containsKey('client_version')) {
+        return Response('{}', 404);
+      }
+      return Response(
+        jsonEncode({
+          'data': [
+            {'id': 'model-1'},
+          ],
+        }),
+        200,
+      );
+    });
+    addTearDown(client.close);
+
+    final models = await ProviderConnectionTester(client: client)
+        .listModelMetadata(_profile('https://provider.example/v1'), 'secret');
+
+    expect(requests, 2);
+    expect(models.single.model, 'model-1');
   });
 
   test(

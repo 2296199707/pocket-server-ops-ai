@@ -1,18 +1,9 @@
 import 'dart:convert';
 
 // `default` is an app-only sentinel: omitting reasoning.effort lets the
-// selected model use its documented default. The other values are the
-// official Responses API effort values; individual models support subsets.
-const reasoningEffortOptions = <String>[
-  'default',
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-];
+// selected model use its documented default. Explicit values come from the
+// selected model's provider metadata.
+const defaultReasoningEffort = 'default';
 
 const wireApiOptions = <String>['responses', 'chat-completions'];
 
@@ -374,10 +365,16 @@ class ProviderModelMetadata {
           'auto',
       source: map['source'] as String? ?? 'manual',
       defaultReasoningLevel: _readOptionalString(
-        map['defaultReasoningLevel'] ?? map['default_reasoning_level'],
+        map['defaultReasoningLevel'] ??
+            map['default_reasoning_level'] ??
+            map['reasoningEffort'] ??
+            map['reasoning_effort'],
       ),
       supportedReasoningLevels: _readOptionalReasoningLevels(
-        map['supportedReasoningLevels'] ?? map['supported_reasoning_levels'],
+        map['supportedReasoningLevels'] ??
+            map['supported_reasoning_levels'] ??
+            map['reasoningEfforts'] ??
+            map['reasoning_efforts'],
       ),
       inputModalities: _readOptionalStringList(
         map['inputModalities'] ?? map['input_modalities'],
@@ -635,9 +632,10 @@ class ProviderReasoningLevel {
   factory ProviderReasoningLevel.fromMap(Object? value) {
     if (value is String) return ProviderReasoningLevel(effort: value);
     if (value is Map) {
-      final effort = value['effort'] ?? value['reasoning_effort'];
+      final effort =
+          value['effort'] ?? value['reasoning_effort'] ?? value['value'];
       if (effort is String && effort.isNotEmpty) {
-        final description = value['description'];
+        final description = value['description'] ?? value['label'];
         return ProviderReasoningLevel(
           effort: effort,
           description: description is String ? description : null,
@@ -828,6 +826,33 @@ class Project {
       localPath: localPath ?? this.localPath,
     );
   }
+}
+
+List<String> reasoningEffortValuesForModel(
+  ProviderProfile provider,
+  String model, {
+  String? preserveCurrent,
+}) {
+  final values = <String>[defaultReasoningEffort];
+  final levels = resolveProviderModelMetadata(
+    provider,
+    model,
+  )?.supportedReasoningLevels;
+  if (levels != null) {
+    for (final level in levels) {
+      if (level.effort.trim().isNotEmpty && !values.contains(level.effort)) {
+        values.add(level.effort);
+      }
+    }
+  }
+  if (preserveCurrent != null &&
+      preserveCurrent.trim().isNotEmpty &&
+      !values.contains(preserveCurrent)) {
+    // Keep an old explicit setting visible until the user replaces it. The
+    // UI marks it as unconfirmed when the provider did not advertise it.
+    values.add(preserveCurrent);
+  }
+  return values;
 }
 
 class Task {

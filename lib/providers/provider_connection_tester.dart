@@ -6,6 +6,8 @@ import '../agent/ai_protocol.dart';
 import '../agent/ai_client_factory.dart';
 import '../domain/models.dart';
 
+const _codexModelCatalogClientVersion = '0.150.0';
+
 class ProviderConnectionTester {
   ProviderConnectionTester({this.client});
 
@@ -77,18 +79,37 @@ class ProviderConnectionTester {
       throw ArgumentError('Base URL 不能为空');
     }
 
-    final uri = Uri.parse('$baseUrl/models');
+    final standardUri = Uri.parse('$baseUrl/models');
+    // Codex-compatible gateways use this query to return model capabilities
+    // such as supported_reasoning_levels. Ordinary OpenAI-compatible servers
+    // usually ignore the query and still return their normal data list.
+    final codexUri = standardUri.replace(
+      queryParameters: const {
+        'client_version': _codexModelCatalogClientVersion,
+      },
+    );
     final requestClient = client ?? http.Client();
     try {
-      final response = await requestClient
+      var response = await requestClient
           .get(
-            uri,
+            codexUri,
             headers: {
               'Accept': 'application/json',
               'Authorization': 'Bearer $secret',
             },
           )
           .timeout(const Duration(seconds: 10));
+      if (_shouldRetryStandardModelCatalog(response.statusCode)) {
+        response = await requestClient
+            .get(
+              standardUri,
+              headers: {
+                'Accept': 'application/json',
+                'Authorization': 'Bearer $secret',
+              },
+            )
+            .timeout(const Duration(seconds: 10));
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw StateError('供应商返回 HTTP ${response.statusCode}');
       }
@@ -127,5 +148,13 @@ class ProviderConnectionTester {
     } finally {
       if (client == null) requestClient.close();
     }
+  }
+
+  static bool _shouldRetryStandardModelCatalog(int statusCode) {
+    return statusCode == 400 ||
+        statusCode == 404 ||
+        statusCode == 405 ||
+        statusCode == 406 ||
+        statusCode == 415;
   }
 }

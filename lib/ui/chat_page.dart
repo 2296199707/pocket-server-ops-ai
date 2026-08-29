@@ -72,7 +72,6 @@ class ChatPageState extends State<ChatPage> {
   String? _workingDirectory;
   String? _modelOverride;
   String? _reasoningEffortOverride;
-  bool _loadingModels = false;
   bool _sending = false;
   List<AiAttachment> _pendingAttachments = const [];
   int _sendingGeneration = 0;
@@ -414,7 +413,7 @@ class ChatPageState extends State<ChatPage> {
                                               _reasoningEffortOverride ??
                                               provider?.reasoningEffort ??
                                               'default',
-                                          onTap: running || _loadingModels
+                                          onTap: running
                                               ? null
                                               : _selectModelAndReasoning,
                                         ),
@@ -1091,135 +1090,440 @@ class ChatPageState extends State<ChatPage> {
       widget.onOpenSettings();
       return;
     }
-    setState(() => _loadingModels = true);
-    try {
-      var modelLoadFailed = false;
-      List<String> loaded = const [];
-      try {
-        loaded = await widget.controller.loadProviderModels(provider);
-      } catch (_) {
-        modelLoadFailed = true;
-      }
-      if (!mounted) return;
-      var selectedModel =
-          task?.modelOverride ?? _modelOverride ?? provider.model;
-      var selectedReasoningEffort =
-          task?.reasoningEffortOverride ??
-          _reasoningEffortOverride ??
-          provider.reasoningEffort;
-      final models = <String>{
-        if (provider.model.trim().isNotEmpty) provider.model,
-        ...provider.modelMetadata.keys,
-        ...loaded,
-        if (selectedModel.trim().isNotEmpty) selectedModel,
-      }.toList();
-      final selected = await showModalBottomSheet<_ModelReasoningSelection>(
-        context: context,
-        showDragHandle: true,
-        isScrollControlled: true,
-        builder: (context) => StatefulBuilder(
-          builder: (context, setSheetState) => SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('模型与推理强度'),
-                    subtitle: Text(
-                      '${_shortModelName(selectedModel)} '
-                      '$selectedReasoningEffort',
-                    ),
+    var selectedModel = task?.modelOverride ?? _modelOverride ?? provider.model;
+    var selectedReasoningEffort =
+        task?.reasoningEffortOverride ??
+        _reasoningEffortOverride ??
+        provider.reasoningEffort;
+    var metadataByModel = <String, ProviderModelMetadata>{
+      ...provider.modelMetadata,
+    };
+    var models = <String>{
+      if (provider.model.trim().isNotEmpty) provider.model,
+      ...provider.modelMetadata.keys,
+      ...provider.modelMetadata.values.map((metadata) => metadata.model),
+      if (widget.controller.previewMode) ...['demo-model', 'demo-coder'],
+      if (selectedModel.trim().isNotEmpty) selectedModel,
+    }.toList();
+
+    final selected = await showModalBottomSheet<_ModelReasoningSelection>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        var modelLoadFailed = false;
+        var refreshingModels = false;
+        var modelsExpanded = false;
+
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final colors = Theme.of(context).colorScheme;
+            final sheetHeight = (MediaQuery.sizeOf(context).height * 0.76)
+                .clamp(360.0, 620.0)
+                .toDouble();
+            final selectedMetadata = resolveProviderModelMetadata(
+              provider.copyWith(modelMetadata: metadataByModel),
+              selectedModel,
+            );
+            final advertisedReasoningLevels =
+                selectedMetadata?.supportedReasoningLevels;
+            final effortOptions = reasoningEffortValuesForModel(
+              provider.copyWith(modelMetadata: metadataByModel),
+              selectedModel,
+              preserveCurrent: selectedReasoningEffort,
+            );
+            String? reasoningSubtitle(String effort) {
+              if (effort == defaultReasoningEffort) {
+                final defaultLevel = selectedMetadata?.defaultReasoningLevel;
+                return defaultLevel == null
+                    ? '使用模型默认值，不发送推理参数'
+                    : '供应商目录默认：${_reasoningMenuLabel(defaultLevel)}';
+              }
+              for (final level in advertisedReasoningLevels ?? const []) {
+                if (level.effort == effort) {
+                  return level.description ??
+                      (effort == provider.reasoningEffort ? '供应商默认' : null);
+                }
+              }
+              if (effort == provider.reasoningEffort) {
+                return advertisedReasoningLevels == null
+                    ? '已保存设置，供应商未提供能力列表'
+                    : '已保存设置，供应商目录未包含此值';
+              }
+              return advertisedReasoningLevels == null
+                  ? '当前设置，供应商未声明此值'
+                  : '当前设置，供应商目录未包含此值';
+            }
+
+            Future<void> refreshModels() async {
+              if (refreshingModels) return;
+              setSheetState(() {
+                refreshingModels = true;
+                modelLoadFailed = false;
+              });
+              try {
+                final metadata = await widget.controller
+                    .loadProviderModelMetadata(provider);
+                if (!mounted || !sheetContext.mounted) return;
+                for (final item in metadata) {
+                  final previous = metadataByModel[item.model];
+                  metadataByModel[item.model] = previous == null
+                      ? item
+                      : previous.mergedWith(item);
+                }
+                final refreshed = <String>{
+                  ...models,
+                  for (final item in metadata) item.model,
+                  if (provider.model.trim().isNotEmpty) provider.model,
+                  if (selectedModel.trim().isNotEmpty) selectedModel,
+                }.toList();
+                refreshed.sort();
+                setSheetState(() {
+                  models = refreshed;
+                  modelLoadFailed = false;
+                });
+              } catch (_) {
+                if (!mounted || !sheetContext.mounted) return;
+                setSheetState(() => modelLoadFailed = true);
+              } finally {
+                if (mounted && sheetContext.mounted) {
+                  setSheetState(() => refreshingModels = false);
+                }
+              }
+            }
+
+            return Align(
+              alignment: Alignment.bottomCenter,
+              child: Container(
+                height: sheetHeight,
+                margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(
+                    color: colors.outlineVariant.withValues(alpha: 0.9),
                   ),
-                  if (modelLoadFailed)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        '模型列表暂时不可用，当前配置仍可使用',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x22000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 6),
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Container(
+                          width: 34,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: colors.outline,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
                         ),
                       ),
-                    ),
-                  const Divider(),
-                  ExpansionTile(
-                    initiallyExpanded: false,
-                    tilePadding: EdgeInsets.zero,
-                    childrenPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: const Text('AI 模型'),
-                    subtitle: Text(
-                      _shortModelName(selectedModel),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    children: [
-                      for (final model in models)
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(
-                            model == selectedModel
-                                ? Icons.radio_button_checked
-                                : Icons.radio_button_unchecked,
-                          ),
-                          title: Text(model),
-                          subtitle: model == provider.model
-                              ? const Text('供应商默认模型')
-                              : null,
-                          onTap: () =>
-                              setSheetState(() => selectedModel = model),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.auto_awesome_outlined,
+                              size: 20,
+                              color: colors.primary,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '模型与推理',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(fontWeight: FontWeight.w700),
+                                  ),
+                                  Text(
+                                    provider.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
+                                        ?.copyWith(
+                                          color: colors.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '关闭',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => Navigator.pop(context),
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
                         ),
+                      ),
+                      Expanded(
+                        child: Scrollbar(
+                          child: ListView(
+                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: colors.primaryContainer.withValues(
+                                    alpha: 0.55,
+                                  ),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      Icons.tune_rounded,
+                                      size: 18,
+                                      color: colors.primary,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _shortModelName(selectedModel),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelLarge
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _reasoningMenuLabel(
+                                        selectedReasoningEffort,
+                                      ),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelLarge
+                                          ?.copyWith(
+                                            color: colors.primary,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (modelLoadFailed) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  '模型列表刷新失败，继续使用已保存的模型',
+                                  style: Theme.of(context).textTheme.labelSmall
+                                      ?.copyWith(color: colors.error),
+                                ),
+                              ],
+                              if (modelsExpanded) ...[
+                                const SizedBox(height: 14),
+                                const Divider(height: 24),
+                                const _ModelPickerSectionLabel(
+                                  title: '模型列表',
+                                  subtitle: '已保存的供应商模型',
+                                ),
+                                const SizedBox(height: 4),
+                                for (final model in models)
+                                  _ModelPickerChoice(
+                                    title: model,
+                                    subtitle: model == provider.model
+                                        ? '供应商默认模型'
+                                        : null,
+                                    selected: model == selectedModel,
+                                    onTap: () => setSheetState(
+                                      () => selectedModel = model,
+                                    ),
+                                  ),
+                              ],
+                              const SizedBox(height: 14),
+                              _ModelPickerSectionLabel(
+                                title: '推理强度',
+                                subtitle: '当前模型的推理参数',
+                              ),
+                              if (advertisedReasoningLevels == null) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  '供应商未返回当前模型的推理强度列表，仅提供模型默认。',
+                                  style: Theme.of(context).textTheme.labelSmall
+                                      ?.copyWith(
+                                        color: colors.onSurfaceVariant,
+                                      ),
+                                ),
+                              ] else if (advertisedReasoningLevels.isEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  '供应商声明当前模型没有可调推理强度。',
+                                  style: Theme.of(context).textTheme.labelSmall
+                                      ?.copyWith(
+                                        color: colors.onSurfaceVariant,
+                                      ),
+                                ),
+                              ],
+                              const SizedBox(height: 4),
+                              for (final effort in effortOptions)
+                                _ModelPickerChoice(
+                                  title: _reasoningMenuLabel(effort),
+                                  subtitle: reasoningSubtitle(effort),
+                                  selected: effort == selectedReasoningEffort,
+                                  onTap: () => setSheetState(
+                                    () => selectedReasoningEffort = effort,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            top: BorderSide(
+                              color: colors.outlineVariant.withValues(
+                                alpha: 0.7,
+                              ),
+                            ),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(12),
+                                onTap: () => setSheetState(
+                                  () => modelsExpanded = !modelsExpanded,
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 5,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.smart_toy_outlined,
+                                        size: 20,
+                                        color: colors.primary,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              'AI 模型',
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .titleSmall
+                                                  ?.copyWith(
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                            ),
+                                            Text(
+                                              _shortModelName(selectedModel),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .labelSmall
+                                                  ?.copyWith(
+                                                    color:
+                                                        colors.onSurfaceVariant,
+                                                  ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      Icon(
+                                        modelsExpanded
+                                            ? Icons.expand_less
+                                            : Icons.chevron_right,
+                                        color: colors.onSurfaceVariant,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '刷新模型列表',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: refreshingModels
+                                  ? null
+                                  : refreshModels,
+                              icon: refreshingModels
+                                  ? const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.refresh),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            top: BorderSide(
+                              color: colors.outlineVariant.withValues(
+                                alpha: 0.7,
+                              ),
+                            ),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text('取消'),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton.icon(
+                              onPressed: () => Navigator.pop(
+                                context,
+                                _ModelReasoningSelection(
+                                  model: selectedModel,
+                                  reasoningEffort: selectedReasoningEffort,
+                                ),
+                              ),
+                              icon: const Icon(Icons.check, size: 18),
+                              label: const Text('应用'),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
-                  const Divider(),
-                  const ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    title: Text('推理强度'),
-                  ),
-                  for (final effort in reasoningEffortOptions)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        effort == selectedReasoningEffort
-                            ? Icons.radio_button_checked
-                            : Icons.radio_button_unchecked,
-                      ),
-                      title: Text('${reasoningEffortLabel(effort)}（$effort）'),
-                      subtitle: effort == provider.reasoningEffort
-                          ? const Text('供应商默认设置')
-                          : null,
-                      onTap: () =>
-                          setSheetState(() => selectedReasoningEffort = effort),
-                    ),
-                  const SizedBox(height: 8),
-                  FilledButton(
-                    onPressed: () => Navigator.pop(
-                      context,
-                      _ModelReasoningSelection(
-                        model: selectedModel,
-                        reasoningEffort: selectedReasoningEffort,
-                      ),
-                    ),
-                    child: const Text('应用'),
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
-        ),
-      );
-      if (selected == null || !mounted) return;
-      await _saveModelAndReasoningSelection(provider, selected);
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('读取模型或推理设置失败：$error')));
-      }
-    } finally {
-      if (mounted) setState(() => _loadingModels = false);
-    }
+            );
+          },
+        );
+      },
+    );
+    if (selected == null || !mounted) return;
+    await _saveModelAndReasoningSelection(provider, selected);
   }
 
   Future<void> _saveModelAndReasoningSelection(
@@ -1910,6 +2214,106 @@ class _ContextPill extends StatelessWidget {
   }
 }
 
+class _ModelPickerSectionLabel extends StatelessWidget {
+  const _ModelPickerSectionLabel({required this.title, this.subtitle});
+
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        Text(
+          title,
+          style: Theme.of(context).textTheme.titleSmall
+              ?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        if (subtitle != null) ...[
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              subtitle!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall
+                  ?.copyWith(color: colors.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _ModelPickerChoice extends StatelessWidget {
+  const _ModelPickerChoice({
+    required this.title,
+    required this.selected,
+    required this.onTap,
+    this.subtitle,
+  });
+
+  final String title;
+  final String? subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: selected
+          ? colors.primaryContainer.withValues(alpha: 0.62)
+          : Colors.transparent,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 40),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      if (subtitle != null)
+                        Text(
+                          subtitle!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(color: colors.onSurfaceVariant),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  selected ? Icons.check_rounded : Icons.circle_outlined,
+                  size: selected ? 20 : 16,
+                  color: selected ? colors.primary : colors.outline,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ModelReasoningPill extends StatelessWidget {
   const _ModelReasoningPill({
     required this.model,
@@ -1925,9 +2329,7 @@ class _ModelReasoningPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final modelText = _shortModelName(model ?? '未配置模型');
-    final effortText = reasoningEffort == 'default'
-        ? 'default'
-        : reasoningEffort;
+    final effortText = _reasoningMenuLabel(reasoningEffort);
     return Material(
       color: colors.surfaceContainerHighest,
       shape: RoundedRectangleBorder(
@@ -2182,6 +2584,29 @@ String _shortModelName(String value) {
   if (short.isEmpty) short = compact;
   if (short.length <= 16) return short;
   return '${short.substring(0, 13)}...';
+}
+
+String _reasoningMenuLabel(String value) {
+  switch (value) {
+    case 'default':
+      return '智能';
+    case 'none':
+      return 'None';
+    case 'minimal':
+      return 'Minimal';
+    case 'low':
+      return 'Low';
+    case 'medium':
+      return 'Medium';
+    case 'high':
+      return 'High';
+    case 'xhigh':
+      return 'Extra High';
+    case 'max':
+      return 'Max';
+    default:
+      return value;
+  }
 }
 
 String _providerUsageText(ProviderUsageSnapshot? usage) {

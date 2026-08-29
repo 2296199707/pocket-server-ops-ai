@@ -3516,7 +3516,7 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> saveProvider({
+  Future<ProviderProfile> saveProvider({
     ProviderProfile? existing,
     required String name,
     required String baseUrl,
@@ -3563,6 +3563,7 @@ class AppController extends ChangeNotifier {
     _providers = providers;
     await _isolateProviderContextChanges(previousProviders, providers);
     _notify();
+    return saved;
   }
 
   Future<void> deleteProvider(ProviderProfile profile) async {
