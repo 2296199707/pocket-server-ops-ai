@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.4",
+      "title": "PocketServerOps AI v1.0.4",
+      "notes": "正式版：包含 beta.28 已验证的悬浮窗尺寸设置、供应商模型与图片模型统一选择，以及手机端服务器运维、文件管理和长对话能力。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.4/pocket-server-ops-ai-v1.0.4-release.apk",
+      "prerelease": false,
+      "published_at": "2026-08-29T06:28:44Z"
+    },
+    {
       "version": "1.0.3-beta.28",
       "title": "PocketServerOps AI v1.0.3-beta.28",
       "notes": "将悬浮窗大小与长度下限调整为 20%；优化供应商设置排版；统一从模型列表选择默认模型和图片模型，支持无选项并增加生图供应商的图片模型选择。",
