@@ -1250,6 +1250,10 @@ class ChatPageState extends State<ChatPage> {
       builder: (sheetContext) {
         var modelLoadFailed = false;
         var refreshingModels = false;
+        var reasoningLoadFailed = false;
+        var refreshingReasoning = false;
+        var subagentReasoningLoadFailed = false;
+        var refreshingSubagentReasoning = false;
         var modelPage = false;
         var subagentPage = false;
 
@@ -1381,6 +1385,63 @@ class ChatPageState extends State<ChatPage> {
               } finally {
                 if (mounted && sheetContext.mounted) {
                   setSheetState(() => refreshingModels = false);
+                }
+              }
+            }
+
+            Future<void> refreshReasoning() async {
+              if (refreshingReasoning) return;
+              setSheetState(() {
+                refreshingReasoning = true;
+                reasoningLoadFailed = false;
+              });
+              try {
+                final metadata = await widget.controller
+                    .loadProviderModelMetadata(provider);
+                if (!mounted || !sheetContext.mounted) return;
+                for (final item in metadata) {
+                  final previous = metadataByModel[item.model];
+                  metadataByModel[item.model] = previous == null
+                      ? item
+                      : previous.mergedWith(item);
+                }
+                setSheetState(() => reasoningLoadFailed = false);
+              } catch (_) {
+                if (!mounted || !sheetContext.mounted) return;
+                setSheetState(() => reasoningLoadFailed = true);
+              } finally {
+                if (mounted && sheetContext.mounted) {
+                  setSheetState(() => refreshingReasoning = false);
+                }
+              }
+            }
+
+            Future<void> refreshSubagentReasoning() async {
+              if (refreshingSubagentReasoning) return;
+              setSheetState(() {
+                refreshingSubagentReasoning = true;
+                subagentReasoningLoadFailed = false;
+              });
+              try {
+                final target = selectedSubagentProvider;
+                final metadata = await widget.controller
+                    .loadProviderModelMetadata(target);
+                if (!mounted || !sheetContext.mounted) return;
+                if (followsParentProvider) {
+                  for (final item in metadata) {
+                    final previous = metadataByModel[item.model];
+                    metadataByModel[item.model] = previous == null
+                        ? item
+                        : previous.mergedWith(item);
+                  }
+                }
+                setSheetState(() => subagentReasoningLoadFailed = false);
+              } catch (_) {
+                if (!mounted || !sheetContext.mounted) return;
+                setSheetState(() => subagentReasoningLoadFailed = true);
+              } finally {
+                if (mounted && sheetContext.mounted) {
+                  setSheetState(() => refreshingSubagentReasoning = false);
                 }
               }
             }
@@ -1625,10 +1686,40 @@ class ChatPageState extends State<ChatPage> {
                                   ),
                                 ),
                                 const SizedBox(height: 14),
-                                _ModelPickerSectionLabel(
-                                  title: '推理强度',
-                                  subtitle: '当前模型的推理参数',
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Expanded(
+                                      child: _ModelPickerSectionLabel(
+                                        title: '推理强度',
+                                        subtitle: '当前模型的推理参数',
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: '刷新推理参数',
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: refreshingReasoning
+                                          ? null
+                                          : refreshReasoning,
+                                      icon: refreshingReasoning
+                                          ? const SizedBox.square(
+                                              dimension: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(Icons.refresh_rounded),
+                                    ),
+                                  ],
                                 ),
+                                if (reasoningLoadFailed)
+                                  Text(
+                                    '推理参数刷新失败，继续使用已保存设置',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
+                                        ?.copyWith(color: colors.error),
+                                  ),
                                 if (advertisedReasoningLevels == null) ...[
                                   const SizedBox(height: 4),
                                   Text(
@@ -1875,16 +1966,46 @@ class ChatPageState extends State<ChatPage> {
                                     ),
                                   ),
                                 const SizedBox(height: 10),
-                                _ModelPickerSectionLabel(
-                                  title: '子代理推理强度',
-                                  subtitle:
-                                      followsParentProvider &&
-                                          selectedSubagentSettings.model
-                                              .trim()
-                                              .isEmpty
-                                      ? '默认继承父代理'
-                                      : '使用子代理模型的推理参数',
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: _ModelPickerSectionLabel(
+                                        title: '子代理推理强度',
+                                        subtitle:
+                                            followsParentProvider &&
+                                                selectedSubagentSettings.model
+                                                    .trim()
+                                                    .isEmpty
+                                            ? '默认继承父代理'
+                                            : '使用子代理模型的推理参数',
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: '刷新子代理推理参数',
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: refreshingSubagentReasoning
+                                          ? null
+                                          : refreshSubagentReasoning,
+                                      icon: refreshingSubagentReasoning
+                                          ? const SizedBox.square(
+                                              dimension: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(Icons.refresh_rounded),
+                                    ),
+                                  ],
                                 ),
+                                if (subagentReasoningLoadFailed)
+                                  Text(
+                                    '子代理推理参数刷新失败，继续使用已保存设置',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelSmall
+                                        ?.copyWith(color: colors.error),
+                                  ),
                                 const SizedBox(height: 4),
                                 for (final effort in subagentEffortOptions)
                                   _ModelPickerChoice(

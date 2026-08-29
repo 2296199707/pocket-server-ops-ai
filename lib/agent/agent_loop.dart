@@ -541,7 +541,10 @@ class AgentLoop {
               future.catchError((Object error, StackTrace stack) => null),
             );
           }
-          final message = '$error';
+          final message = tool.isRemote
+              ? '远程工具执行失败：$error\n'
+                    '请不要直接重复执行相同操作；先确认服务器当前状态，再决定是否重试。'
+              : '$error';
           await _emit(onEvent, 'tool.failed', {
             'id': call.id,
             'call_id': toolResultId(call),
@@ -577,25 +580,8 @@ class AgentLoop {
               error: isUnknown ? error : null,
             );
           }
-          if (callOperationStarted) {
-            const unknownMessage =
-                'Remote write tool failed; the final server state is unknown.';
-            await appendUnresolvedToolResults(
-              assistantForHistory.toolCalls,
-              unknownMessage,
-            );
-            await _emit(onEvent, 'task.unknown', {
-              'id': call.id,
-              'call_id': toolResultId(call),
-              'name': call.name,
-              'error': unknownMessage,
-            });
-            return AgentResult(
-              status: 'unknown',
-              messages: List.unmodifiable(messages),
-              error: error,
-            );
-          }
+          // Remote tool failures are returned to the model above so it can
+          // inspect the current server state before deciding what to do next.
           continue;
         }
       }

@@ -114,6 +114,7 @@ class AppController extends ChangeNotifier {
   final Map<String, SubagentTree> _subagentTrees = {};
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
+  final Map<String, RemoteAgentToolsGroup> _phoneToolGroups = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
   final Map<String, ServerDirectoryCacheRecord> _directoryCacheRecords = {};
   final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
@@ -1029,6 +1030,9 @@ class AppController extends ChangeNotifier {
     for (final tools in _phoneTools.values) {
       tools.setRemoteTaskRecoveryEnabled(enabled);
     }
+    for (final tools in _phoneToolGroups.values) {
+      tools.setRemoteTaskRecoveryEnabled(enabled);
+    }
     _notify();
   }
 
@@ -1257,6 +1261,7 @@ class AppController extends ChangeNotifier {
         configurationChanged || providerContextChanged || modelChanged;
     final remoteTargetChanged =
         current.serverId != normalizedServerId ||
+        !_sameStringList(current.serverIds, normalizedServerIds) ||
         current.workingDirectory != normalizedWorkingDirectory ||
         workModeUsesServer(current.effectiveWorkMode) !=
             workModeUsesServer(normalizedWorkMode);
@@ -1665,8 +1670,9 @@ class AppController extends ChangeNotifier {
             workingDirectory =
                 task.workingDirectory ?? server.defaultWorkingDirectory;
             if (remoteTools.connection.isClosed) {
+              final poolKey = _sshPoolKey(task.id, server.id);
               final replacement = await _sshPool.acquire(
-                task.id,
+                poolKey,
                 () => _connectServer(server, onFirstHostKey: onFirstHostKey),
               );
               await _saveObservedHostKey(server, replacement.hostKey);
@@ -1892,6 +1898,9 @@ class AppController extends ChangeNotifier {
     var requestAttachments = attachments;
     SshConnection? connection;
     RemoteAgentTools? remoteTools;
+    RemoteAgentToolsGroup? remoteToolGroup;
+    final acquiredTaskConnectionKeys = <String>{};
+    final establishedTaskConnectionKeys = <String>{};
     ProjectAgentTools? projectTools;
     LocalAgentTools? localTools;
     Project? taskProject;
@@ -2065,40 +2074,158 @@ class AppController extends ChangeNotifier {
             );
           }
         }
-        final serverId = task.serverId;
-        if (useServerTools && serverId != null && serverId.isNotEmpty) {
-          final server = _servers.firstWhere((value) => value.id == serverId);
-          final pendingConnection = _sshPool.acquire(
-            task.id,
-            () => _connectServer(
-              server,
-              onFirstHostKey: waitingHostKey,
-              onUserInfoRequest: waitingUserInfo,
+        final boundServerIds = _serverIdsForTask(task);
+        final serverId =
+            task.serverId ??
+            (boundServerIds.isEmpty ? null : boundServerIds.first);
+        if (useServerTools && boundServerIds.isEmpty) {
+          throw StateError('服务器工作模式没有目标服务器');
+        }
+        if (useServerTools && boundServerIds.length > 1) {
+          // A task may have been kept alive by an older app version with a
+          // single-server runtime. Drop that legacy cache before installing
+          // the multi-server group.
+          final legacyTools = _phoneTools.remove(task.id);
+          if (legacyTools != null) {
+            await legacyTools.close();
+            await _sshPool.release(task.id);
+          }
+          var group = _phoneToolGroups[task.id];
+          if (group != null && group.isClosed) {
+            _phoneToolGroups.remove(task.id);
+            await group.close();
+            group = null;
+          }
+          group ??= RemoteAgentToolsGroup();
+          final leaseKeys = <String, String>{};
+          for (final id in boundServerIds) {
+            final server = _servers.firstWhere((value) => value.id == id);
+            final poolKey = _sshPoolKey(task.id, id);
+            acquiredTaskConnectionKeys.add(poolKey);
+            final serverWorkingDirectory =
+                task.workingDirectory ?? server.defaultWorkingDirectory;
+            if (id == serverId) workingDirectory = serverWorkingDirectory;
+            Future<SshConnection> connectServer() async {
+              final connected = await _sshPool.acquire(
+                poolKey,
+                () => _connectServer(
+                  server,
+                  onFirstHostKey: waitingHostKey,
+                  onUserInfoRequest: waitingUserInfo,
+                ),
+              );
+              await _saveObservedHostKey(server, connected.hostKey);
+              return connected;
+            }
+
+            SshConnection? connected;
+            try {
+              connected = await Future.any<SshConnection>([
+                connectServer(),
+                cancellation.whenCancelled.then<SshConnection>(
+                  (_) => throw StateError('SSH connection cancelled'),
+                ),
+              ]);
+              establishedTaskConnectionKeys.add(poolKey);
+            } catch (_) {
+              if (cancellation.isCancelled) rethrow;
+              // Keep the remote tool available. Its first call will retry the
+              // connection and return the error to the model if it still fails.
+            }
+            leaseKeys[id] = _remoteWriteLeaseKey(
+              task,
+              id,
+              serverWorkingDirectory,
+            );
+
+            var runtime = group.runtimeFor(id);
+            if (runtime == null || runtime.isClosed) {
+              await runtime?.close();
+              runtime = RemoteAgentTools(
+                connected,
+                workingDirectory: serverWorkingDirectory,
+                project: useLocalTools ? project : null,
+                projectFiles: useLocalTools ? _projectFiles : null,
+                localAccess: localAccess,
+                connectionFactory: connectServer,
+                reconnect: _remoteTaskRecoveryEnabled ? connectServer : null,
+                remoteTaskRecoveryEnabled: _remoteTaskRecoveryEnabled,
+              );
+            } else {
+              if (connected != null) runtime.updateConnection(connected);
+              runtime.configureContext(
+                project: useLocalTools ? project : null,
+                projectFiles: useLocalTools ? _projectFiles : null,
+                localAccess: localAccess,
+              );
+              runtime.setRemoteTaskRecoveryEnabled(_remoteTaskRecoveryEnabled);
+            }
+            group.setRuntime(id, server.name, runtime, connectionKey: poolKey);
+            if (id == serverId) {
+              connection = connected;
+              workingDirectory = serverWorkingDirectory;
+            }
+          }
+          remoteToolGroup = group;
+          _phoneToolGroups[task.id] = group;
+          final groupLeaseKey = _remoteWriteLeaseKey(
+            task,
+            'multi',
+            workingDirectory,
+          );
+          tools.addAll(
+            _serializeRemoteWrites(
+              group.tools,
+              groupLeaseKey,
+              cancellation: cancellation,
+              leaseKeyForArguments: (arguments) {
+                final target = arguments['server_id'];
+                if (target is String && target.trim().isNotEmpty) {
+                  return leaseKeys[target.trim()] ?? groupLeaseKey;
+                }
+                final source = arguments['source_server_id'];
+                final destination = arguments['destination_server_id'];
+                if (source is String && destination is String) {
+                  final pair = [source.trim(), destination.trim()]..sort();
+                  return '$groupLeaseKey\u0000transfer\u0000${pair.join(String.fromCharCode(0))}';
+                }
+                return groupLeaseKey;
+              },
             ),
           );
-          connection = await Future.any<SshConnection>([
-            pendingConnection,
-            cancellation.whenCancelled.then<SshConnection>(
-              (_) => throw StateError('SSH connection cancelled'),
-            ),
-          ]);
-          final connected = connection;
-          await _saveObservedHostKey(server, connected.hostKey);
+        } else if (useServerTools && serverId != null && serverId.isNotEmpty) {
+          final server = _servers.firstWhere((value) => value.id == serverId);
+          final poolKey = _sshPoolKey(task.id, server.id);
+          acquiredTaskConnectionKeys.add(poolKey);
           workingDirectory =
               task.workingDirectory ?? server.defaultWorkingDirectory;
-          Future<SshConnection> reconnectServer() async {
-            final replacement = await _sshPool.acquire(
-              task.id,
+          Future<SshConnection> connectServer() async {
+            final connected = await _sshPool.acquire(
+              poolKey,
               () => _connectServer(
                 server,
                 onFirstHostKey: waitingHostKey,
                 onUserInfoRequest: waitingUserInfo,
               ),
             );
-            await _saveObservedHostKey(server, replacement.hostKey);
-            connection = replacement;
-            return replacement;
+            await _saveObservedHostKey(server, connected.hostKey);
+            return connected;
           }
+
+          SshConnection? connected;
+          try {
+            connected = await Future.any<SshConnection>([
+              connectServer(),
+              cancellation.whenCancelled.then<SshConnection>(
+                (_) => throw StateError('SSH connection cancelled'),
+              ),
+            ]);
+            establishedTaskConnectionKeys.add(poolKey);
+          } catch (_) {
+            if (cancellation.isCancelled) rethrow;
+            // Do not end the Agent before it can report the connection error.
+          }
+          connection = connected;
 
           remoteTools = _phoneTools[task.id];
           if (remoteTools == null || remoteTools.isClosed) {
@@ -2109,12 +2236,13 @@ class AppController extends ChangeNotifier {
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
               localAccess: localAccess,
-              reconnect: reconnectServer,
+              connectionFactory: connectServer,
+              reconnect: _remoteTaskRecoveryEnabled ? connectServer : null,
               remoteTaskRecoveryEnabled: _remoteTaskRecoveryEnabled,
             );
             _phoneTools[task.id] = remoteTools;
           } else {
-            remoteTools.updateConnection(connected);
+            if (connected != null) remoteTools.updateConnection(connected);
             remoteTools.configureContext(
               project: useLocalTools ? project : null,
               projectFiles: useLocalTools ? _projectFiles : null,
@@ -2132,23 +2260,48 @@ class AppController extends ChangeNotifier {
             ),
           );
         }
-        if (useServerTools && (serverId == null || serverId.isEmpty)) {
-          throw StateError('服务器工作模式没有目标服务器');
-        }
         systemPrompt = _systemPrompt(
           task,
           project: useLocalTools ? project : null,
           workingDirectory: useServerTools ? workingDirectory : null,
         );
-        if (useServerTools && connection != null) {
-          final connected = connection;
-          final instructions = await _remoteInstructions.load(
-            connected!,
-            workingDirectory,
-          );
-          if (instructions != null) {
-            systemPrompt =
-                '$systemPrompt\n\n--- project-doc ---\n\n$instructions';
+        if (useServerTools && remoteToolGroup != null) {
+          final documents = <String>[];
+          for (final entry in remoteToolGroup.runtimes.entries) {
+            final runtimeConnection = entry.value.connectionOrNull;
+            if (runtimeConnection == null || runtimeConnection.isClosed) {
+              continue;
+            }
+            try {
+              final instructions = await _remoteInstructions.load(
+                runtimeConnection,
+                entry.value.workingDirectory,
+              );
+              if (instructions != null) {
+                documents.add(
+                  '--- project-doc: ${entry.key} ---\n\n$instructions',
+                );
+              }
+            } catch (_) {
+              // Project instructions are optional; a transient SSH read
+              // failure must be handled by the Agent's remote tools.
+            }
+          }
+          if (documents.isNotEmpty) {
+            systemPrompt = '$systemPrompt\n\n${documents.join('\n\n')}';
+          }
+        } else if (useServerTools && connection != null) {
+          try {
+            final instructions = await _remoteInstructions.load(
+              connection,
+              workingDirectory,
+            );
+            if (instructions != null) {
+              systemPrompt =
+                  '$systemPrompt\n\n--- project-doc ---\n\n$instructions';
+            }
+          } catch (_) {
+            // Project instructions are optional and must not abort the Agent.
           }
         }
         final rootTaskId = task.rootTaskId ?? task.id;
@@ -2222,6 +2375,7 @@ class AppController extends ChangeNotifier {
       );
 
       var eventQueue = Future<void>.value();
+      final toolServerIdsByCall = <String, List<String>>{};
       final result = await loop.run(
         prompt: prompt,
         attachments: requestAttachments,
@@ -2259,8 +2413,19 @@ class AppController extends ChangeNotifier {
           if (type == 'task.unknown') remoteOperationStarted = true;
           eventQueue = eventQueue.then((_) async {
             var eventPayload = payload;
+            final eventCallId = eventPayload['call_id'] ?? eventPayload['id'];
+            final directServerIds = _serverIdsFromEventPayload(eventPayload);
+            if (type == 'tool.started' && eventCallId is String) {
+              if (directServerIds.isNotEmpty) {
+                toolServerIdsByCall[eventCallId] = directServerIds;
+              }
+            }
+            final eventServerIds = directServerIds.isNotEmpty
+                ? directServerIds
+                : eventCallId is String
+                ? toolServerIdsByCall[eventCallId] ?? const <String>[]
+                : const <String>[];
             if (useServerTools &&
-                task.serverId != null &&
                 const {
                   'tool.started',
                   'tool.completed',
@@ -2269,7 +2434,16 @@ class AppController extends ChangeNotifier {
                   'review.completed',
                 }.contains(type) &&
                 !eventPayload.containsKey('server_id')) {
-              eventPayload = {...eventPayload, 'server_id': task.serverId};
+              if (eventServerIds.length == 1) {
+                eventPayload = {
+                  ...eventPayload,
+                  'server_id': eventServerIds.single,
+                };
+              } else if (eventServerIds.length > 1) {
+                eventPayload = {...eventPayload, 'server_ids': eventServerIds};
+              } else if (task.serverId != null) {
+                eventPayload = {...eventPayload, 'server_id': task.serverId};
+              }
             }
             _ContextUsageEvent? contextUsageEvent;
             if (type == 'assistant.completed') {
@@ -2352,9 +2526,18 @@ class AppController extends ChangeNotifier {
       }
       if (client != null) closeAiClient(client);
       if (task.mode == 'agent') {
-        final keepRemoteTools = remoteTools?.hasRunningProcesses ?? false;
-        if (connection == null && cancellation.isCancelled) {
-          _sshPool.abort(task.id);
+        final keepRemoteTools =
+            (remoteToolGroup?.hasRunningProcesses ?? false) ||
+            (remoteTools?.hasRunningProcesses ?? false);
+        if (cancellation.isCancelled) {
+          for (final key in acquiredTaskConnectionKeys.difference(
+            establishedTaskConnectionKeys,
+          )) {
+            _sshPool.abort(key);
+          }
+          // Keep compatibility with a connection left by an older app
+          // version, whose pool key was only the task id.
+          if (connection == null) _sshPool.abort(task.id);
         }
         if (!keepRemoteTools) {
           try {
@@ -2573,6 +2756,7 @@ class AppController extends ChangeNotifier {
     List<AgentTool> tools,
     String leaseKey, {
     required AgentCancellation cancellation,
+    String Function(Map<String, Object?> arguments)? leaseKeyForArguments,
   }) {
     return [
       for (final tool in tools)
@@ -2586,16 +2770,23 @@ class AppController extends ChangeNotifier {
             userApprovalRequired: tool.userApprovalRequired,
             isRemote: tool.isRemote,
             writesRemoteState: tool.writesRemoteState,
-            call: (arguments) => _remoteWriteQueue.run(
-              leaseKey,
-              () => tool.call(arguments),
-              cancellation: cancellation,
-            ),
-            callWithOperationStart: (arguments, onOperationStarted) =>
-                _remoteWriteQueue.run(leaseKey, () {
-                  onOperationStarted();
-                  return tool.call(arguments);
-                }, cancellation: cancellation),
+            call: (arguments) {
+              final operationLeaseKey =
+                  leaseKeyForArguments?.call(arguments) ?? leaseKey;
+              return _remoteWriteQueue.run(
+                operationLeaseKey,
+                () => tool.call(arguments),
+                cancellation: cancellation,
+              );
+            },
+            callWithOperationStart: (arguments, onOperationStarted) {
+              final operationLeaseKey =
+                  leaseKeyForArguments?.call(arguments) ?? leaseKey;
+              return _remoteWriteQueue.run(operationLeaseKey, () {
+                onOperationStarted();
+                return tool.call(arguments);
+              }, cancellation: cancellation);
+            },
           ),
     ];
   }
@@ -4768,6 +4959,9 @@ class AppController extends ChangeNotifier {
           ? [task.serverId!]
           : task.serverIds;
       final activeServer = serverForId(task.serverId);
+      final boundServers = serversForTask(task)
+          .map((server) => '${server.name} (${server.id})')
+          .join('、');
       final phoneDownloadRule = project == null
           ? 'The phone destination requires user approval.'
           : 'A destination outside the current phone project requires user '
@@ -4776,9 +4970,12 @@ class AppController extends ChangeNotifier {
                 'approval flow.';
       scopes.add(
         'This conversation is bound to ${boundServerIds.length} server(s). '
-        'The active server is "${activeServer?.name ?? task.serverId ?? 'not set'}" '
-        '(${task.serverId ?? 'not set'}); operate only on that active server '
-        'unless the user explicitly changes the active server in the app. '
+        'The available servers are $boundServers. The active server is '
+        '"${activeServer?.name ?? task.serverId ?? 'not set'}" '
+        '(${task.serverId ?? 'not set'}) and is only the default target, not a '
+        'restriction. You may operate on any server bound to this conversation. '
+        'For a multi-server conversation, every remote tool call must include '
+        'the matching server_id; do not assume different servers share files. '
         'The selected server working directory is $directory. Use '
         'terminal.exec for short commands; use terminal.start, terminal.poll, '
         'terminal.write, and terminal.stop for long-running commands. Use '
@@ -4788,7 +4985,11 @@ class AppController extends ChangeNotifier {
         'server.download_to_phone to transfer a binary or text file directly '
         'to an absolute phone path such as '
         '/storage/emulated/0/Download/name.docx. These transfers are binary-safe '
-        'and can resume after interruption. $phoneDownloadRule Never use '
+        'and can resume after interruption. To transfer a file between two '
+        'bound servers, use server.transfer with explicit source_server_id, '
+        'source_path, destination_server_id, and destination_path; it streams '
+        'the bytes through the phone without placing file contents in context. '
+        '$phoneDownloadRule Never use '
         'file.read, project.write, or local.write to '
         'copy a binary file.',
       );
@@ -5733,15 +5934,28 @@ class AppController extends ChangeNotifier {
 
   Future<void> _releasePhoneTask(String taskId) async {
     final tools = _phoneTools.remove(taskId);
+    final toolGroup = _phoneToolGroups.remove(taskId);
+    final connectionKeys = <String>{taskId};
+    connectionKeys.addAll(toolGroup?.connectionKeys.values ?? const []);
+    final task = taskForId(taskId);
+    if (task != null) {
+      for (final serverId in _serverIdsForTask(task)) {
+        connectionKeys.add(_sshPoolKey(taskId, serverId));
+      }
+    }
     try {
       await tools?.close();
+      await toolGroup?.close();
     } finally {
-      await _sshPool.release(taskId);
+      for (final key in connectionKeys) {
+        await _sshPool.release(key);
+      }
     }
   }
 
   Future<void> _closePhoneTasks() async {
-    for (final taskId in _phoneTools.keys.toList()) {
+    final taskIds = <String>{..._phoneTools.keys, ..._phoneToolGroups.keys};
+    for (final taskId in taskIds) {
       try {
         await _releasePhoneTask(taskId);
       } catch (_) {
@@ -5959,6 +6173,62 @@ class AppController extends ChangeNotifier {
     }
     return List.unmodifiable(ids);
   }
+
+  static List<String> _serverIdsForTask(Task task) {
+    return _normalizeServerIds(task.serverIds, fallback: task.serverId);
+  }
+
+  static List<String> _serverIdsFromEventPayload(Map<String, Object?> payload) {
+    final ids = <String>[];
+    void add(Object? value) {
+      if (value is String && value.trim().isNotEmpty) {
+        final id = value.trim();
+        if (!ids.contains(id)) ids.add(id);
+      }
+    }
+
+    add(payload['server_id']);
+    final payloadIds = payload['server_ids'];
+    if (payloadIds is List) {
+      for (final value in payloadIds) {
+        add(value);
+      }
+    }
+    for (final value in [
+      payload['source_server_id'],
+      payload['destination_server_id'],
+    ]) {
+      add(value);
+    }
+    final arguments = payload['arguments'];
+    if (arguments is Map) {
+      add(arguments['server_id']);
+      final argumentIds = arguments['server_ids'];
+      if (argumentIds is List) {
+        for (final value in argumentIds) {
+          add(value);
+        }
+      }
+      add(arguments['source_server_id']);
+      add(arguments['destination_server_id']);
+    }
+    final result = payload['result'];
+    if (result is Map) {
+      add(result['server_id']);
+      final resultIds = result['server_ids'];
+      if (resultIds is List) {
+        for (final value in resultIds) {
+          add(value);
+        }
+      }
+      add(result['source_server_id']);
+      add(result['destination_server_id']);
+    }
+    return ids;
+  }
+
+  static String _sshPoolKey(String taskId, String serverId) =>
+      '$taskId\u0000$serverId';
 
   static bool _sameStringList(List<String> left, List<String> right) {
     if (left.length != right.length) return false;

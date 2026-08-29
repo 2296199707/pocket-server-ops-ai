@@ -146,7 +146,7 @@ void main() {
   });
 
   test(
-    'remote write failure stops before requesting the model again',
+    'remote write failure returns a warning before requesting the model again',
     () async {
       final client = _ToolThenTextClient(toolName: 'remote.write');
       final result = await AgentLoop(
@@ -165,8 +165,17 @@ void main() {
         ],
       ).run(prompt: '执行', executionMode: 'auto');
 
-      expect(result.status, 'unknown');
-      expect(client.calls, 1);
+      expect(result.status, 'completed');
+      expect(client.calls, 2);
+      expect(
+        client.messages.any(
+          (message) =>
+              message.role == 'tool' &&
+              message.content!.contains('remote write failed') &&
+              message.content!.contains('先确认服务器当前状态'),
+        ),
+        isTrue,
+      );
     },
   );
 

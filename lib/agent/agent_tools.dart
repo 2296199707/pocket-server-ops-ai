@@ -68,29 +68,32 @@ class AgentTool {
 
 class RemoteAgentTools {
   RemoteAgentTools(
-    SshConnection connection, {
+    SshConnection? connection, {
     this.workingDirectory,
     this.project,
     this.projectFiles,
     this.localAccess,
+    this.connectionFactory,
     this.reconnect,
     this.remoteTaskRecoveryEnabled = true,
   }) : _connection = connection {
-    _processController = RemoteProcessController(
-      connection,
-      reconnect: reconnect,
-      onConnectionChanged: (value) => _connection = value,
-    );
+    if (connection != null) {
+      _hasEstablishedConnection = true;
+      _processController = _newProcessController(connection);
+    }
   }
 
-  SshConnection _connection;
+  SshConnection? _connection;
   final String? workingDirectory;
   Project? project;
   ProjectFileStore? projectFiles;
   LocalFileAccessStore? localAccess;
+  final RemoteConnectionReconnector? connectionFactory;
   final RemoteConnectionReconnector? reconnect;
   bool remoteTaskRecoveryEnabled;
-  late final RemoteProcessController _processController;
+  RemoteProcessController? _processController;
+  Future<SshConnection>? _connectionFuture;
+  var _hasEstablishedConnection = false;
   final Map<String, _ManagedProcess> _processes = {};
   final List<Future<SshCommandStream>> _startingProcesses = [];
   Future<void>? _closeFuture;
@@ -98,11 +101,71 @@ class RemoteAgentTools {
 
   bool get isClosed => _closing;
 
-  SshConnection get connection => _connection;
+  SshConnection get connection {
+    final value = _connection;
+    if (value == null) throw StateError('SSH连接尚未建立');
+    return value;
+  }
+
+  /// Returns the current connection without starting a new SSH attempt.
+  /// Agent setup uses this to keep optional project instructions from turning
+  /// a recoverable connection error into a failed conversation.
+  SshConnection? get connectionOrNull => _connection;
+
+  Future<SshConnection> ensureConnection() async {
+    if (_closing) throw StateError('远程工具正在关闭');
+    final current = _connection;
+    if (current != null && !current.isClosed) {
+      _processControllerFor(current);
+      return current;
+    }
+    if (_hasEstablishedConnection && !remoteTaskRecoveryEnabled) {
+      throw StateError('SSH连接已断开，服务器任务断线恢复已关闭');
+    }
+    final factory = connectionFactory ?? reconnect;
+    if (factory == null) throw StateError('SSH连接尚未建立');
+    final pending = _connectionFuture ??= Future<SshConnection>.sync(factory);
+    try {
+      final connected = await pending;
+      if (_closing) {
+        await connected.close();
+        throw StateError('远程工具正在关闭');
+      }
+      _connection = connected;
+      _hasEstablishedConnection = true;
+      _processControllerFor(connected);
+      return connected;
+    } finally {
+      if (identical(_connectionFuture, pending)) _connectionFuture = null;
+    }
+  }
+
+  RemoteProcessController _newProcessController(SshConnection connection) {
+    return RemoteProcessController(
+      connection,
+      reconnect: reconnect,
+      onConnectionChanged: (value) {
+        _connection = value;
+        _hasEstablishedConnection = true;
+      },
+    );
+  }
+
+  RemoteProcessController _processControllerFor(SshConnection connection) {
+    final current = _processController;
+    if (current == null) {
+      final created = _newProcessController(connection);
+      _processController = created;
+      return created;
+    }
+    current.updateConnection(connection);
+    return current;
+  }
 
   void updateConnection(SshConnection connection) {
     _connection = connection;
-    _processController.updateConnection(connection);
+    _hasEstablishedConnection = true;
+    _processControllerFor(connection);
   }
 
   void setRemoteTaskRecoveryEnabled(bool enabled) {
@@ -363,8 +426,9 @@ class RemoteAgentTools {
   ];
 
   Future<Object?> _exec(Map<String, Object?> arguments) async {
+    final connection = await ensureConnection();
     if (!remoteTaskRecoveryEnabled) {
-      final result = await _connection.run(
+      final result = await connection.run(
         _requiredString(arguments, 'command'),
         workingDirectory:
             _optionalString(arguments, 'working_directory') ?? workingDirectory,
@@ -378,7 +442,8 @@ class RemoteAgentTools {
         'stderr': result.stderr,
       };
     }
-    final process = await _processController.start(
+    final processController = _processControllerFor(connection);
+    final process = await processController.start(
       command: _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
@@ -394,11 +459,11 @@ class RemoteAgentTools {
       final remaining = deadline.difference(DateTime.now()).inMilliseconds;
       if (remaining <= 0) {
         try {
-          await _processController.stop(process.id);
+          await processController.stop(process.id);
         } catch (_) {}
         throw const SshCommandTimeout(Duration(minutes: 2));
       }
-      final snapshot = await _processController.poll(
+      final snapshot = await processController.poll(
         process.id,
         stdoutOffset: stdoutOffset,
         stderrOffset: stderrOffset,
@@ -437,7 +502,8 @@ class RemoteAgentTools {
     if (!remoteTaskRecoveryEnabled || arguments['pty'] == true) {
       return _startInteractive(arguments);
     }
-    final process = await _processController.start(
+    final processController = _processControllerFor(await ensureConnection());
+    final process = await processController.start(
       command: _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
@@ -454,7 +520,8 @@ class RemoteAgentTools {
     }
     final processId = 'process-${DateTime.now().microsecondsSinceEpoch}';
     final pty = arguments['pty'] == true;
-    final pending = _connection.execute(
+    final connection = await ensureConnection();
+    final pending = connection.execute(
       _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
@@ -508,7 +575,7 @@ class RemoteAgentTools {
     if (!_canUsePersistentProcess(processId)) {
       throw StateError('服务器任务断线恢复已关闭，当前进程只能在原 SSH 连接中继续使用');
     }
-    final snapshot = await _processController.poll(
+    final snapshot = await _processControllerFor(await ensureConnection()).poll(
       processId,
       stdoutOffset: stdoutOffset,
       stderrOffset: stderrOffset,
@@ -542,10 +609,8 @@ class RemoteAgentTools {
       if (!_canUsePersistentProcess(processId)) {
         throw StateError('服务器任务断线恢复已关闭，当前进程只能在原 SSH 连接中继续使用');
       }
-      await _processController.write(
-        processId,
-        _requiredString(arguments, 'input'),
-      );
+      await _processControllerFor(await ensureConnection())
+          .write(processId, _requiredString(arguments, 'input'));
     }
     return {'process_id': processId};
   }
@@ -564,7 +629,8 @@ class RemoteAgentTools {
     if (!_canUsePersistentProcess(processId)) {
       throw StateError('服务器任务断线恢复已关闭，当前进程只能在原 SSH 连接中继续使用');
     }
-    final snapshot = await _processController.stop(processId);
+    final snapshot = await _processControllerFor(await ensureConnection())
+        .stop(processId);
     return {
       'process_id': processId,
       'stopped': snapshot.done && !snapshot.failed,
@@ -586,7 +652,7 @@ class RemoteAgentTools {
         'must not exceed $_maxFileChunkBytes bytes',
       );
     }
-    final chunk = await _connection.readFileChunk(
+    final chunk = await (await ensureConnection()).readFileChunk(
       _resolveRemotePath(path),
       offset: offset,
       length: length ?? _maxFileChunkBytes,
@@ -603,7 +669,7 @@ class RemoteAgentTools {
 
   Future<Object?> _writeFile(Map<String, Object?> arguments) async {
     final path = _requiredString(arguments, 'path');
-    await _connection.writeFile(
+    await (await ensureConnection()).writeFile(
       _resolveRemotePath(path),
       utf8.encode(_requiredText(arguments, 'content')),
     );
@@ -612,7 +678,7 @@ class RemoteAgentTools {
 
   Future<Object?> _replace(Map<String, Object?> arguments) async {
     final path = _requiredString(arguments, 'path');
-    await _connection.replaceText(
+    await (await ensureConnection()).replaceText(
       _resolveRemotePath(path),
       _requiredString(arguments, 'old'),
       _requiredText(arguments, 'new'),
@@ -634,11 +700,12 @@ class RemoteAgentTools {
     }
     final sourcePath = _resolveRemotePath(remotePath);
     final target = File(await files.resolveForIo(targetProject, projectPath));
+    final connection = await ensureConnection();
     final downloaded = await const ResumableFileDownloader().download(
       target: target,
       sourceKey: sourcePath,
       readChunk: (offset) =>
-          _connection.readFileBytesChunk(sourcePath, offset: offset),
+          connection.readFileBytesChunk(sourcePath, offset: offset),
       overwrite: overwrite,
     );
     return {
@@ -668,11 +735,12 @@ class RemoteAgentTools {
       throw StateError('手机目标文件已存在：$localPath');
     }
     final sourcePath = _resolveRemotePath(remotePath);
+    final connection = await ensureConnection();
     final downloaded = await const ResumableFileDownloader().download(
       target: target,
       sourceKey: sourcePath,
       readChunk: (offset) =>
-          _connection.readFileBytesChunk(sourcePath, offset: offset),
+          connection.readFileBytesChunk(sourcePath, offset: offset),
       overwrite: overwrite,
     );
     return {
@@ -725,11 +793,12 @@ class RemoteAgentTools {
     final modified = await source.lastModified();
     final sourceKey =
         '${source.path}\u0000$totalBytes\u0000${modified.microsecondsSinceEpoch}';
+    final connection = await ensureConnection();
     final localFile = await source.open();
     try {
       final uploaded = await const ResumableFileUploader().upload(
         totalBytes: totalBytes,
-        prepare: () => _connection.prepareFileUpload(
+        prepare: () => connection.prepareFileUpload(
           _resolveRemotePath(remotePath),
           sourceKey: sourceKey,
           totalBytes: totalBytes,
@@ -739,7 +808,7 @@ class RemoteAgentTools {
           await localFile.setPosition(offset);
           return localFile.read(length);
         },
-        writeChunk: (session, bytes, offset) => _connection.writeFileBytesChunk(
+        writeChunk: (session, bytes, offset) => connection.writeFileBytesChunk(
           session.temporaryPath,
           bytes,
           offset: offset,
@@ -750,7 +819,7 @@ class RemoteAgentTools {
           if (currentLength != totalBytes || currentModified != modified) {
             throw StateError('手机文件在上传期间发生变化，请重新上传');
           }
-          await _connection.completeFileUpload(session);
+          await connection.completeFileUpload(session);
         },
       );
       return {
@@ -771,8 +840,15 @@ class RemoteAgentTools {
     return path_util.posix.join(directory, filePath);
   }
 
+  /// Resolves a path using this server's configured working directory.
+  ///
+  /// The multi-server router uses this when it streams a file between two
+  /// independent SSH connections.
+  String resolveRemotePath(String filePath) => _resolveRemotePath(filePath);
+
   bool _canUsePersistentProcess(String processId) =>
-      remoteTaskRecoveryEnabled || _processController.hasHandle(processId);
+      remoteTaskRecoveryEnabled ||
+      (_processController?.hasHandle(processId) ?? false);
 
   Future<void> close() {
     final existing = _closeFuture;
@@ -792,7 +868,7 @@ class RemoteAgentTools {
       for (final process in _processes.values) process.close(),
     ], eagerError: false);
     _processes.clear();
-    await _processController.close();
+    await _processController?.close();
   }
 
   Future<void> _closeStartingProcess(Future<SshCommandStream> pending) async {
@@ -814,7 +890,7 @@ class RemoteAgentTools {
   bool get hasRunningProcesses =>
       _startingProcesses.isNotEmpty ||
       _processes.values.any((value) => !value.done) ||
-      _processController.hasRunningProcesses;
+      (_processController?.hasRunningProcesses ?? false);
 
   static String _requiredString(Map<String, Object?> arguments, String key) {
     final value = arguments[key];
@@ -845,6 +921,420 @@ class RemoteAgentTools {
       throw ArgumentError('$key must be a non-negative integer');
     }
     return value;
+  }
+}
+
+/// Presents the remote tools for every server bound to one conversation.
+///
+/// The underlying [RemoteAgentTools] keeps the existing SSH/process/file
+/// implementation for one server. This small router only adds the target
+/// server to the tool arguments, so the model receives one stable set of tool
+/// names instead of one duplicate set per server.
+class RemoteAgentToolsGroup {
+  RemoteAgentToolsGroup({
+    Map<String, RemoteAgentTools> runtimes = const {},
+    Map<String, String> serverNames = const {},
+  }) {
+    for (final entry in runtimes.entries) {
+      setRuntime(entry.key, serverNames[entry.key] ?? entry.key, entry.value);
+    }
+  }
+
+  final Map<String, RemoteAgentTools> _runtimes = {};
+  final Map<String, String> _serverNames = {};
+  final Map<String, String> _connectionKeys = {};
+  Future<void>? _closeFuture;
+  var _closing = false;
+
+  Map<String, RemoteAgentTools> get runtimes =>
+      Map<String, RemoteAgentTools>.unmodifiable(_runtimes);
+
+  Map<String, String> get connectionKeys =>
+      Map<String, String>.unmodifiable(_connectionKeys);
+
+  bool get isClosed => _closing;
+
+  bool get hasRunningProcesses =>
+      _runtimes.values.any((runtime) => runtime.hasRunningProcesses);
+
+  RemoteAgentTools? runtimeFor(String serverId) => _runtimes[serverId];
+
+  void setRuntime(
+    String serverId,
+    String serverName,
+    RemoteAgentTools runtime, {
+    String? connectionKey,
+  }) {
+    if (serverId.trim().isEmpty) throw ArgumentError('serverId 不能为空');
+    if (_closing) throw StateError('远程工具组正在关闭');
+    _runtimes[serverId] = runtime;
+    _serverNames[serverId] = serverName.trim().isEmpty
+        ? serverId
+        : serverName.trim();
+    if (connectionKey != null && connectionKey.isNotEmpty) {
+      _connectionKeys[serverId] = connectionKey;
+    }
+  }
+
+  void configureContext({
+    required Project? project,
+    required ProjectFileStore? projectFiles,
+    required LocalFileAccessStore? localAccess,
+  }) {
+    for (final runtime in _runtimes.values) {
+      runtime.configureContext(
+        project: project,
+        projectFiles: projectFiles,
+        localAccess: localAccess,
+      );
+    }
+  }
+
+  void setRemoteTaskRecoveryEnabled(bool enabled) {
+    for (final runtime in _runtimes.values) {
+      runtime.setRemoteTaskRecoveryEnabled(enabled);
+    }
+  }
+
+  List<AgentTool> get tools {
+    if (_runtimes.isEmpty) return const [];
+    final sample = _runtimes.values.first.tools;
+    final result = <AgentTool>[];
+    final names = <String>{};
+    for (final tool in sample) {
+      if (!names.add(tool.definition.name)) continue;
+      result.add(_routeTool(tool.definition.name, tool));
+    }
+    if (_runtimes.length > 1) result.add(_transferTool());
+    return result;
+  }
+
+  AgentTool _routeTool(String name, AgentTool sample) {
+    final definition = sample.definition;
+    return AgentTool(
+      definition: AiToolDefinition(
+        name: definition.name,
+        description: '${definition.description} $_targetDescription',
+        parameters: _withTargetParameter(
+          definition.parameters,
+          required: _runtimes.length > 1,
+        ),
+      ),
+      call: (arguments) => _call(name, arguments),
+      callWithOperationStart: sample.callWithOperationStart == null
+          ? null
+          : (arguments, onOperationStarted) =>
+                _callWithOperationStart(name, arguments, onOperationStarted),
+      requiresConfirmation: sample.requiresConfirmation,
+      requiresUserApproval: sample.requiresUserApproval,
+      userApprovalRequired: sample.userApprovalRequired == null
+          ? null
+          : (arguments, executionMode) {
+              final serverId = _serverForCall(
+                arguments,
+                processCall: _isProcessTool(name),
+              );
+              final tool = _toolFor(serverId, name);
+              final approval = tool.userApprovalRequired;
+              if (approval == null) return tool.requiresUserApproval;
+              return approval(_withoutServerId(arguments), executionMode);
+            },
+      isRemote: sample.isRemote,
+      writesRemoteState: sample.writesRemoteState,
+    );
+  }
+
+  Future<Object?> _call(String name, Map<String, Object?> arguments) async {
+    final serverId = _serverForCall(
+      arguments,
+      processCall: _isProcessTool(name),
+    );
+    final tool = _toolFor(serverId, name);
+    final forwarded = _withoutServerId(arguments);
+    final process = _decodeProcessId(forwarded['process_id']);
+    if (_isProcessTool(name) && process != null) {
+      forwarded['process_id'] = process.processId;
+    }
+    final result = await tool.call(forwarded);
+    return _decorateResult(result, name, serverId);
+  }
+
+  Future<Object?> _callWithOperationStart(
+    String name,
+    Map<String, Object?> arguments,
+    void Function() onOperationStarted,
+  ) async {
+    final serverId = _serverForCall(
+      arguments,
+      processCall: _isProcessTool(name),
+    );
+    final tool = _toolFor(serverId, name);
+    final forwarded = _withoutServerId(arguments);
+    final process = _decodeProcessId(forwarded['process_id']);
+    if (_isProcessTool(name) && process != null) {
+      forwarded['process_id'] = process.processId;
+    }
+    final callback = tool.callWithOperationStart;
+    if (callback == null) {
+      onOperationStarted();
+      return _decorateResult(await tool.call(forwarded), name, serverId);
+    }
+    return _decorateResult(
+      await callback(forwarded, onOperationStarted),
+      name,
+      serverId,
+    );
+  }
+
+  AgentTool _toolFor(String serverId, String name) {
+    final runtime = _runtimes[serverId];
+    if (runtime == null) throw StateError('服务器未绑定到当前对话：$serverId');
+    for (final tool in runtime.tools) {
+      if (tool.definition.name == name) return tool;
+    }
+    throw StateError('服务器不支持工具 $name：$serverId');
+  }
+
+  String _serverForCall(
+    Map<String, Object?> arguments, {
+    required bool processCall,
+  }) {
+    final explicit = arguments['server_id'];
+    final process = processCall
+        ? _decodeProcessId(arguments['process_id'])
+        : null;
+    if (process != null) {
+      if (explicit is String &&
+          explicit.trim().isNotEmpty &&
+          explicit.trim() != process.serverId) {
+        throw StateError('process_id 所属服务器与 server_id 不一致');
+      }
+      if (!_runtimes.containsKey(process.serverId)) {
+        throw StateError('进程所属服务器未绑定到当前对话：${process.serverId}');
+      }
+      return process.serverId;
+    }
+    if (explicit is String && explicit.trim().isNotEmpty) {
+      final serverId = explicit.trim();
+      if (!_runtimes.containsKey(serverId)) {
+        throw StateError('服务器未绑定到当前对话：$serverId');
+      }
+      return serverId;
+    }
+    if (_runtimes.length == 1) return _runtimes.keys.single;
+    throw StateError('当前对话绑定了多台服务器，请提供 server_id。可用服务器：$_serverList');
+  }
+
+  String get _serverList =>
+      _runtimes.keys.map((id) => '$id（${_serverNames[id] ?? id}）').join('、');
+
+  String get _targetDescription =>
+      '目标服务器通过 server_id 指定。当前可用：$_serverList。'
+      '单服务器时可省略；多服务器时必须填写。不要假设不同服务器共享文件。';
+
+  static Map<String, Object?> _withTargetParameter(
+    Map<String, Object?> source, {
+    required bool required,
+  }) {
+    final result = <String, Object?>{...source};
+    final sourceProperties = source['properties'];
+    final properties = <String, Object?>{
+      if (sourceProperties is Map)
+        for (final entry in sourceProperties.entries)
+          if (entry.key is String) entry.key as String: entry.value,
+    };
+    properties['server_id'] = {'type': 'string', 'description': '目标服务器 ID'};
+    result['properties'] = properties;
+    if (required) {
+      final values = <Object?>[
+        if (source['required'] is List) ...(source['required'] as List),
+      ];
+      if (!values.contains('server_id')) values.add('server_id');
+      result['required'] = values;
+    }
+    return result;
+  }
+
+  static Map<String, Object?> _withoutServerId(Map<String, Object?> arguments) {
+    final result = <String, Object?>{...arguments};
+    result.remove('server_id');
+    return result;
+  }
+
+  static bool _isProcessTool(String name) =>
+      name == 'terminal.poll' ||
+      name == 'terminal.write' ||
+      name == 'terminal.stop';
+
+  Object? _decorateResult(Object? result, String name, String serverId) {
+    if (result is! Map) return result;
+    final value = <String, Object?>{...Map<String, Object?>.from(result)};
+    final processId = value['process_id'];
+    if ((name == 'terminal.start' || _isProcessTool(name)) &&
+        processId is String &&
+        processId.isNotEmpty) {
+      value['process_id'] = _encodeProcessId(serverId, processId);
+    }
+    value['server_id'] = serverId;
+    value['server_name'] = _serverNames[serverId] ?? serverId;
+    return value;
+  }
+
+  AgentTool _transferTool() {
+    final ids = _runtimes.keys.toList(growable: false);
+    return AgentTool(
+      definition: AiToolDefinition(
+        name: 'server.transfer',
+        description:
+            'Transfer one binary file directly from one bound server to '
+            'another. The phone streams the bytes and does not put file '
+            'contents in the AI context. Both server IDs must be explicit.',
+        parameters: {
+          'type': 'object',
+          'required': [
+            'source_server_id',
+            'source_path',
+            'destination_server_id',
+            'destination_path',
+          ],
+          'properties': {
+            'source_server_id': {'type': 'string', 'enum': ids},
+            'source_path': {'type': 'string'},
+            'destination_server_id': {'type': 'string', 'enum': ids},
+            'destination_path': {'type': 'string'},
+            'overwrite': {'type': 'boolean'},
+          },
+        },
+      ),
+      call: _transfer,
+      isRemote: true,
+      writesRemoteState: true,
+    );
+  }
+
+  Future<Object?> _transfer(Map<String, Object?> arguments) async {
+    final sourceId = _requiredServerArgument(arguments, 'source_server_id');
+    final destinationId = _requiredServerArgument(
+      arguments,
+      'destination_server_id',
+    );
+    final sourceRuntime = _runtimes[sourceId];
+    final destinationRuntime = _runtimes[destinationId];
+    if (sourceRuntime == null || destinationRuntime == null) {
+      throw StateError('服务器未绑定到当前对话');
+    }
+    final sourcePath = sourceRuntime.resolveRemotePath(
+      _requiredString(arguments, 'source_path'),
+    );
+    final destinationPath = destinationRuntime.resolveRemotePath(
+      _requiredString(arguments, 'destination_path'),
+    );
+    if (sourceId == destinationId && sourcePath == destinationPath) {
+      throw StateError('源文件和目标文件不能相同');
+    }
+    final sourceConnection = await sourceRuntime.ensureConnection();
+    final destinationConnection = await destinationRuntime.ensureConnection();
+    final sourceInfo = await sourceConnection.statPath(sourcePath);
+    if (sourceInfo.isDirectory) {
+      throw StateError('server.transfer 目前只支持单个文件');
+    }
+    final totalBytes = sourceInfo.size;
+    if (totalBytes == null) throw StateError('无法读取源文件大小');
+    final overwrite = arguments['overwrite'] != false;
+    final sourceKey =
+        'server-transfer:$sourceId\u0000$sourcePath\u0000$totalBytes\u0000'
+        '${sourceInfo.modified?.microsecondsSinceEpoch ?? ''}';
+    final uploaded = await const ResumableFileUploader().upload(
+      totalBytes: totalBytes,
+      prepare: () => destinationConnection.prepareFileUpload(
+        destinationPath,
+        sourceKey: sourceKey,
+        totalBytes: totalBytes,
+        overwrite: overwrite,
+      ),
+      readChunk: (offset, length) async {
+        final chunk = await sourceConnection.readFileBytesChunk(
+          sourcePath,
+          offset: offset,
+          length: length,
+        );
+        if (chunk.offset != offset) throw StateError('源服务器返回了错误的文件偏移量');
+        if (chunk.totalBytes != null && chunk.totalBytes != totalBytes) {
+          throw StateError('源文件大小发生变化，请重新传输');
+        }
+        return chunk.bytes;
+      },
+      writeChunk: (session, bytes, offset) => destinationConnection
+          .writeFileBytesChunk(session.temporaryPath, bytes, offset: offset),
+      commit: (session) async {
+        final current = await sourceConnection.statPath(sourcePath);
+        if (current.size != totalBytes ||
+            current.modified != sourceInfo.modified) {
+          throw StateError('源文件在传输期间发生变化，请重新传输');
+        }
+        await destinationConnection.completeFileUpload(session);
+      },
+    );
+    return {
+      'source_server_id': sourceId,
+      'source_server_name': _serverNames[sourceId] ?? sourceId,
+      'source_path': sourcePath,
+      'destination_server_id': destinationId,
+      'destination_server_name': _serverNames[destinationId] ?? destinationId,
+      'destination_path': destinationPath,
+      'bytes': uploaded,
+      'written': true,
+    };
+  }
+
+  static String _requiredServerArgument(
+    Map<String, Object?> arguments,
+    String key,
+  ) {
+    final value = arguments[key];
+    if (value is! String || value.trim().isEmpty) {
+      throw ArgumentError('$key is required');
+    }
+    return value.trim();
+  }
+
+  static String _requiredString(Map<String, Object?> arguments, String key) {
+    final value = arguments[key];
+    if (value is! String || value.trim().isEmpty) {
+      throw ArgumentError('$key is required');
+    }
+    return value;
+  }
+
+  static String _encodeProcessId(String serverId, String processId) {
+    return 'multi:${base64Url.encode(utf8.encode(serverId))}:$processId';
+  }
+
+  static ({String serverId, String processId})? _decodeProcessId(
+    Object? value,
+  ) {
+    if (value is! String || !value.startsWith('multi:')) return null;
+    final parts = value.split(':');
+    if (parts.length != 3 || parts[1].isEmpty || parts[2].isEmpty) {
+      throw ArgumentError('process_id 无效');
+    }
+    try {
+      final serverId = utf8.decode(base64Url.decode(parts[1]));
+      return (serverId: serverId, processId: parts[2]);
+    } on FormatException {
+      throw ArgumentError('process_id 无效');
+    }
+  }
+
+  Future<void> close() {
+    final existing = _closeFuture;
+    if (existing != null) return existing;
+    _closing = true;
+    final future = Future.wait<void>([
+      for (final runtime in _runtimes.values) runtime.close(),
+    ], eagerError: false);
+    _closeFuture = future;
+    return future;
   }
 }
 

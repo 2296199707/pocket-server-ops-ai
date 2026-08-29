@@ -405,11 +405,15 @@ void main() {
     expect(find.text('模型与推理'), findsOneWidget);
     expect(modelRequests, 0);
     expect(find.text('模型列表刷新失败，继续使用已保存的模型'), findsNothing);
+    await tester.tap(find.byTooltip('刷新推理参数'));
+    await tester.pumpAndSettle();
+    expect(modelRequests, 1);
+    expect(find.text('推理参数刷新失败，继续使用已保存设置'), findsOneWidget);
     await tester.tap(find.text('AI 模型'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('刷新模型列表'));
     await tester.pumpAndSettle();
-    expect(modelRequests, 1);
+    expect(modelRequests, 2);
     expect(find.text('模型列表刷新失败，继续使用已保存的模型'), findsOneWidget);
     expect(find.textContaining('读取模型或推理设置失败'), findsNothing);
   });

@@ -92,6 +92,37 @@ void main() {
   });
 
   test(
+    'a failed initial SSH connection can be retried by a later tool call',
+    () async {
+      final home = await Directory.systemTemp.createTemp('remote-process-');
+      addTearDown(() => home.delete(recursive: true));
+      var attempts = 0;
+      final tools = RemoteAgentTools(
+        null,
+        workingDirectory: home.path,
+        connectionFactory: () async {
+          attempts++;
+          if (attempts == 1) throw StateError('initial connection failed');
+          return _LocalShellConnection(home);
+        },
+      );
+      final exec = tools.tools.singleWhere(
+        (tool) => tool.definition.name == 'terminal.exec',
+      );
+
+      await expectLater(
+        exec.call({'command': 'printf first'}),
+        throwsA(isA<StateError>()),
+      );
+      final result = await exec.call({'command': 'printf second'}) as Map;
+
+      expect(result['stdout'], 'second');
+      expect(attempts, 2);
+      await tools.close();
+    },
+  );
+
+  test(
     'disabling recovery keeps terminal.exec on the current connection',
     () async {
       final home = await Directory.systemTemp.createTemp('remote-process-');
@@ -124,6 +155,99 @@ void main() {
         isFalse,
       );
       await tools.close();
+    },
+  );
+
+  test('multi-server tools route commands and process ids by server', () async {
+    final firstHome = await Directory.systemTemp.createTemp('multi-server-a-');
+    final secondHome = await Directory.systemTemp.createTemp('multi-server-b-');
+    addTearDown(() => firstHome.delete(recursive: true));
+    addTearDown(() => secondHome.delete(recursive: true));
+    final group = RemoteAgentToolsGroup(
+      runtimes: {
+        'server-a': RemoteAgentTools(
+          _LocalShellConnection(firstHome),
+          workingDirectory: firstHome.path,
+        ),
+        'server-b': RemoteAgentTools(
+          _LocalShellConnection(secondHome),
+          workingDirectory: secondHome.path,
+        ),
+      },
+      serverNames: const {'server-a': '构建机', 'server-b': '发布机'},
+    );
+    addTearDown(group.close);
+
+    final exec = group.tools.singleWhere(
+      (tool) => tool.definition.name == 'terminal.exec',
+    );
+    final required = exec.definition.parameters['required'] as List;
+    expect(required, contains('server_id'));
+    expect(
+      await exec.call({'server_id': 'server-a', 'command': 'printf build'}),
+      isA<Map>(),
+    );
+
+    final start =
+        await group.tools
+                .singleWhere((tool) => tool.definition.name == 'terminal.start')
+                .call({
+                  'server_id': 'server-b',
+                  'command': 'sleep 0.05; printf release',
+                })
+            as Map;
+    final processId = start['process_id'] as String;
+    expect(processId, startsWith('multi:'));
+    final poll =
+        await group.tools
+                .singleWhere((tool) => tool.definition.name == 'terminal.poll')
+                .call({
+                  'server_id': 'server-b',
+                  'process_id': processId,
+                  'wait_ms': 1000,
+                })
+            as Map;
+    expect(poll['server_id'], 'server-b');
+    expect(poll['stdout'], 'release');
+
+    await expectLater(
+      exec.call({'command': 'printf missing-target'}),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test(
+    'multi-server transfer streams bytes without using text results',
+    () async {
+      final source = _TransferConnection(
+        files: {
+          '/srv/source.bin': [0, 1, 2, 255, 254, 253],
+        },
+      );
+      final destination = _TransferConnection();
+      final group = RemoteAgentToolsGroup(
+        runtimes: {
+          'source': RemoteAgentTools(source, workingDirectory: '/srv'),
+          'destination': RemoteAgentTools(
+            destination,
+            workingDirectory: '/srv',
+          ),
+        },
+      );
+      addTearDown(group.close);
+
+      final transfer = group.tools.singleWhere(
+        (tool) => tool.definition.name == 'server.transfer',
+      );
+      final result = await transfer.call({
+        'source_server_id': 'source',
+        'source_path': 'source.bin',
+        'destination_server_id': 'destination',
+        'destination_path': 'copy.bin',
+      }) as Map;
+
+      expect(result['bytes'], 6);
+      expect(destination.files['/srv/copy.bin'], [0, 1, 2, 255, 254, 253]);
     },
   );
 }
@@ -277,6 +401,194 @@ class _LocalShellConnection implements SshConnection {
   @override
   Future<void> writeFile(String remotePath, Uint8List contents) =>
       throw UnimplementedError();
+
+  @override
+  Future<void> replaceText(String remotePath, String oldText, String newText) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> close() async {
+    closed = true;
+  }
+}
+
+class _TransferConnection implements SshConnection {
+  _TransferConnection({Map<String, List<int>>? files})
+    : files = files ?? <String, List<int>>{};
+
+  final Map<String, List<int>> files;
+  final _modified = DateTime.utc(2026, 8, 29);
+  bool closed = false;
+
+  @override
+  final hostKey = const SshHostKey(
+    type: 'ssh-ed25519',
+    fingerprint: 'SHA256:transfer',
+  );
+
+  @override
+  bool get isClosed => closed;
+
+  @override
+  Future<void> get done => Future.value();
+
+  @override
+  Future<SshCommandStream> execute(
+    String command, {
+    String? workingDirectory,
+    bool pty = false,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<SshCommandStream> shell({int width = 80, int height = 24}) =>
+      throw UnimplementedError();
+
+  @override
+  Future<SshCommandResult> run(
+    String command, {
+    String? workingDirectory,
+    String? input,
+    Duration timeout = const Duration(minutes: 2),
+  }) => throw UnimplementedError();
+
+  @override
+  Future<List<SshDirectoryEntry>> listDirectory(String remotePath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<SshFileInfo> statPath(String remotePath) async {
+    final contents = files[remotePath];
+    if (contents == null) throw StateError('missing file: $remotePath');
+    return SshFileInfo(
+      name: remotePath.split('/').last,
+      path: remotePath,
+      isDirectory: false,
+      isSymbolicLink: false,
+      size: contents.length,
+      modified: _modified,
+    );
+  }
+
+  @override
+  Future<void> createDirectory(String remotePath) => throw UnimplementedError();
+
+  @override
+  Future<void> copyPath(String sourcePath, String destinationPath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> movePath(String sourcePath, String destinationPath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> renamePath(String sourcePath, String destinationPath) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> deletePath(String remotePath) => throw UnimplementedError();
+
+  @override
+  Future<String> readFile(String remotePath) async =>
+      String.fromCharCodes(await readFileBytes(remotePath));
+
+  @override
+  Future<Uint8List> readFileBytes(String remotePath) async {
+    final contents = files[remotePath];
+    if (contents == null) throw StateError('missing file: $remotePath');
+    return Uint8List.fromList(contents);
+  }
+
+  @override
+  Future<SshFileBytesChunk> readFileBytesChunk(
+    String remotePath, {
+    int offset = 0,
+    int? length,
+  }) async {
+    final contents = await readFileBytes(remotePath);
+    final start = offset.clamp(0, contents.length).toInt();
+    final end = (start + (length ?? contents.length))
+        .clamp(start, contents.length)
+        .toInt();
+    return SshFileBytesChunk(
+      offset: offset,
+      nextOffset: end,
+      bytes: Uint8List.fromList(contents.sublist(start, end)),
+      eof: end >= contents.length,
+      totalBytes: contents.length,
+    );
+  }
+
+  @override
+  Future<SshFileChunk> readFileChunk(
+    String remotePath, {
+    int offset = 0,
+    int? length,
+  }) async {
+    final bytes = await readFileBytes(remotePath);
+    final start = offset.clamp(0, bytes.length).toInt();
+    final end = (start + (length ?? bytes.length))
+        .clamp(start, bytes.length)
+        .toInt();
+    return SshFileChunk(
+      offset: offset,
+      nextOffset: end,
+      content: String.fromCharCodes(bytes.sublist(start, end)),
+      eof: end >= bytes.length,
+      totalBytes: bytes.length,
+    );
+  }
+
+  @override
+  Future<SshFileUploadSession> prepareFileUpload(
+    String remotePath, {
+    required String sourceKey,
+    required int totalBytes,
+    bool overwrite = true,
+  }) async {
+    final temporaryPath = '$remotePath.part';
+    final contents = files.putIfAbsent(temporaryPath, () => <int>[]);
+    if (overwrite && files.containsKey(remotePath)) files.remove(remotePath);
+    return SshFileUploadSession(
+      targetPath: remotePath,
+      temporaryPath: temporaryPath,
+      metadataPath: '$temporaryPath.meta',
+      offset: contents.length,
+      totalBytes: totalBytes,
+    );
+  }
+
+  @override
+  Future<void> writeFileBytesChunk(
+    String remotePath,
+    Uint8List contents, {
+    required int offset,
+  }) async {
+    final target = files.putIfAbsent(remotePath, () => <int>[]);
+    while (target.length < offset) {
+      target.add(0);
+    }
+    for (var index = 0; index < contents.length; index++) {
+      final targetIndex = offset + index;
+      if (targetIndex == target.length) {
+        target.add(contents[index]);
+      } else {
+        target[targetIndex] = contents[index];
+      }
+    }
+  }
+
+  @override
+  Future<void> completeFileUpload(SshFileUploadSession session) async {
+    final contents = files[session.temporaryPath];
+    if (contents == null) throw StateError('missing upload');
+    files[session.targetPath] = List<int>.from(contents);
+    files.remove(session.temporaryPath);
+  }
+
+  @override
+  Future<void> writeFile(String remotePath, Uint8List contents) async {
+    files[remotePath] = List<int>.from(contents);
+  }
 
   @override
   Future<void> replaceText(String remotePath, String oldText, String newText) =>
