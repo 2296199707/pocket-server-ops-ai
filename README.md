@@ -14,6 +14,7 @@ PocketServerOps AI 是一款面向服务器运维的 Android 手机应用。它�
 - Android 前台服务，支持切换应用后继续运行手机端任务
 - 服务器状态脚本一键安装或更新；脚本按需执行，不在服务器常驻运行
 - 手机项目网页预览、控制台日志、页面/资源错误反馈和静态资源检查
+- MCP 工具客户端：连接手机本地或局域网 MCP 服务，发现并调用其工具
 
 ## 工作方式
 
@@ -72,6 +73,7 @@ python3 -m http.server 4173 -d build/web
 - [开源依赖与许可证审查](docs/open-source-audit.zh-CN.md)
 - [第三方许可索引](THIRD_PARTY_NOTICES.md)
 - [架构与复用调查](docs/wfl-reuse-audit-and-mobile-agent-v1.zh-CN.md)
+- [手机本地 MCP 客户端](docs/mcp-local-client.zh-CN.md)
 
 ## 许可证
 

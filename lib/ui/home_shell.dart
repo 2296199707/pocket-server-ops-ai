@@ -13,6 +13,7 @@ import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
 import 'chat_page.dart';
 import 'file_manager_page.dart';
+import 'mcp_page.dart';
 import 'profile_sheets.dart';
 import 'providers_page.dart';
 import 'server_dashboard_page.dart';
@@ -140,33 +141,26 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     final pendingTaskId = _pendingOverlayTaskId;
+    final pendingTask = _taskForTopLevelId(pendingTaskId);
+    if (pendingTask != null) {
+      _didRestoreLastConversation = true;
+      _activateOverlayTask(pendingTask);
+      return;
+    }
     if (pendingTaskId != null) {
-      for (final task in widget.controller.tasks) {
-        if (task.id == pendingTaskId) {
-          _didRestoreLastConversation = true;
-          _activateOverlayTask(task);
-          return;
-        }
-      }
       _pendingOverlayTaskId = null;
     }
     if (_didRestoreLastConversation) return;
     _didRestoreLastConversation = true;
     final savedId = widget.controller.lastConversationTaskId;
-    Task? task;
-    if (savedId != null) {
-      for (final candidate in widget.controller.tasks) {
-        if (candidate.id == savedId) {
-          task = candidate;
-          break;
-        }
-      }
-    }
-    task ??= widget.controller.tasks.isEmpty
-        ? null
-        : widget.controller.tasks.first;
-    if (task == null) return;
-    final restoredTask = task;
+    final task = _taskForTopLevelId(savedId);
+    final restored =
+        task ??
+        (widget.controller.tasks.isEmpty
+            ? null
+            : widget.controller.tasks.first);
+    if (restored == null) return;
+    final restoredTask = restored;
     if (savedId != restoredTask.id) {
       unawaited(widget.controller.setLastConversationTask(restoredTask.id));
     }
@@ -176,6 +170,16 @@ class _HomeShellState extends State<HomeShell> {
       _pendingProjectId = restoredTask.projectId;
       _selectedIndex = 0;
     });
+  }
+
+  Task? _taskForTopLevelId(String? taskId) {
+    if (taskId == null || taskId.isEmpty) return null;
+    final task = widget.controller.taskForId(taskId);
+    if (task == null) return null;
+    if (!task.isSubagent) return task;
+    final rootId = task.rootTaskId;
+    final root = rootId == null ? null : widget.controller.taskForId(rootId);
+    return root != null && !root.isSubagent ? root : null;
   }
 
   @override
@@ -1690,7 +1694,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 10,
+              itemCount: 11,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1752,9 +1756,42 @@ class SettingsPage extends StatelessWidget {
                 if (index == 8) {
                   return _PermissionsSettingsTile(controller: controller);
                 }
-                return _DeveloperSettingsTile(controller: controller);
+                if (index == 9) {
+                  return _DeveloperSettingsTile(controller: controller);
+                }
+                return _McpSettingsTile(controller: controller);
               },
             ),
+    );
+  }
+}
+
+class _McpSettingsTile extends StatelessWidget {
+  const _McpSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = controller.mcpServers.where((item) => item.enabled).length;
+    final configured = controller.mcpServers.length;
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+      leading: const CircleAvatar(child: Icon(Icons.extension_outlined)),
+      title: const Text('MCP 工具'),
+      subtitle: Text(
+        configured == 0
+            ? '连接手机上的本地 MCP 服务'
+            : '$enabled/$configured 个服务启用 · 可用工具 ${controller.mcpServers.fold<int>(0, (sum, item) => sum + item.tools.length)} 个',
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => McpServersPage(controller: controller),
+          ),
+        );
+      },
     );
   }
 }

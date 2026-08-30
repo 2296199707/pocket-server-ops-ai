@@ -75,6 +75,10 @@ String toolActionSummary(Object? name, Object? arguments) {
   if (toolName == 'local.test_web') return '测试页面';
   if (toolName.startsWith('preview.')) return '预览页面';
   if (toolName == 'local.request_access') return '申请文件权限';
+  if (toolName.startsWith('mcp_')) {
+    final detail = toolArgumentSummary(toolName, arguments);
+    return detail.isEmpty ? '调用 MCP 工具' : 'MCP $detail';
+  }
 
   final path =
       value('path') ??

@@ -452,6 +452,139 @@ class ProviderProfile {
   }
 }
 
+/// A locally configured MCP endpoint. The access token is deliberately kept
+/// outside this durable model; [tokenRef] points to the platform secure store.
+class McpServerProfile {
+  const McpServerProfile({
+    required this.id,
+    required this.name,
+    required this.url,
+    this.enabled = true,
+    this.tokenRef,
+    this.tools = const [],
+    this.protocolVersion,
+    this.toolsUpdatedAt,
+  });
+
+  final String id;
+  final String name;
+  final String url;
+  final bool enabled;
+  final String? tokenRef;
+  final List<McpToolProfile> tools;
+  final String? protocolVersion;
+  final DateTime? toolsUpdatedAt;
+
+  factory McpServerProfile.fromMap(Map<String, Object?> map) {
+    final rawTools = map['tools'];
+    final tools = <McpToolProfile>[];
+    if (rawTools is List) {
+      for (final value in rawTools) {
+        if (value is! Map) continue;
+        try {
+          tools.add(McpToolProfile.fromMap(Map<String, Object?>.from(value)));
+        } on Object {
+          // One stale tool must not hide the remaining MCP configuration.
+        }
+      }
+    }
+    final updatedAt = map['toolsUpdatedAt'] ?? map['tools_updated_at'];
+    return McpServerProfile(
+      id: map['id'] as String,
+      name: map['name'] as String,
+      url: map['url'] as String,
+      enabled: map['enabled'] != false,
+      tokenRef: map['tokenRef'] as String? ?? map['token_ref'] as String?,
+      tools: List.unmodifiable(tools),
+      protocolVersion:
+          map['protocolVersion'] as String? ??
+          map['protocol_version'] as String?,
+      toolsUpdatedAt: updatedAt is String && updatedAt.isNotEmpty
+          ? DateTime.tryParse(updatedAt)
+          : null,
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'name': name,
+    'url': url,
+    'enabled': enabled,
+    if (tokenRef != null) 'tokenRef': tokenRef,
+    'tools': [for (final tool in tools) tool.toMap()],
+    if (protocolVersion != null) 'protocolVersion': protocolVersion,
+    if (toolsUpdatedAt != null)
+      'toolsUpdatedAt': toolsUpdatedAt!.toUtc().toIso8601String(),
+  };
+
+  McpServerProfile copyWith({
+    String? name,
+    String? url,
+    bool? enabled,
+    String? tokenRef,
+    List<McpToolProfile>? tools,
+    String? protocolVersion,
+    DateTime? toolsUpdatedAt,
+  }) {
+    return McpServerProfile(
+      id: id,
+      name: name ?? this.name,
+      url: url ?? this.url,
+      enabled: enabled ?? this.enabled,
+      tokenRef: tokenRef ?? this.tokenRef,
+      tools: tools ?? this.tools,
+      protocolVersion: protocolVersion ?? this.protocolVersion,
+      toolsUpdatedAt: toolsUpdatedAt ?? this.toolsUpdatedAt,
+    );
+  }
+}
+
+/// Durable cache of one MCP tool definition. It contains only the schema,
+/// never a tool result or credential.
+class McpToolProfile {
+  const McpToolProfile({
+    required this.name,
+    required this.description,
+    required this.inputSchema,
+    this.title,
+    this.annotations = const {},
+  });
+
+  final String name;
+  final String description;
+  final String? title;
+  final Map<String, Object?> inputSchema;
+  final Map<String, Object?> annotations;
+
+  factory McpToolProfile.fromMap(Map<String, Object?> map) {
+    final name = map['name'];
+    if (name is! String || name.trim().isEmpty) {
+      throw const FormatException('MCP 工具缺少名称');
+    }
+    final rawSchema = map['inputSchema'];
+    final rawAnnotations = map['annotations'];
+    return McpToolProfile(
+      name: name,
+      description: map['description'] as String? ?? '',
+      title: map['title'] as String?,
+      inputSchema: rawSchema is Map
+          ? Map<String, Object?>.from(rawSchema)
+          : const {'type': 'object', 'properties': {}},
+      annotations: rawAnnotations is Map
+          ? Map<String, Object?>.from(rawAnnotations)
+          : const {},
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'name': name,
+    'description': description,
+    if (title != null) 'title': title,
+    'inputSchema': inputSchema,
+    if (annotations.isNotEmpty) 'annotations': annotations,
+  };
+}
+
 /// Metadata used by the Codex-compatible context policy for one provider
 /// model. The window is the model's raw window; the effective window reserves
 /// the same percentage of headroom used by Codex for prompts, tools, and

@@ -317,7 +317,7 @@ class ChatPageState extends State<ChatPage> {
                         return _EventTile(
                           controller: widget.controller,
                           presentation: presentations[contentIndex],
-                          onTaskActivated: widget.onTaskActivated,
+                          onSubagentDetails: _openSubagentDetails,
                           key: ValueKey(
                             '${presentations[contentIndex].event.eventId}-$contentIndex',
                           ),
@@ -583,6 +583,25 @@ class ChatPageState extends State<ChatPage> {
       if (provider.id == id) return provider;
     }
     return null;
+  }
+
+  Future<void> _openSubagentDetails(String taskId) async {
+    final child = widget.controller.taskForId(taskId);
+    if (!mounted || child == null || !child.isSubagent) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.6,
+        child: _SubagentDetailsSheet(
+          controller: widget.controller,
+          task: child,
+          onOpenSubagent: _openSubagentDetails,
+        ),
+      ),
+    );
   }
 
   Future<void> _loadEarlier() async {
@@ -4293,13 +4312,13 @@ class _EventTile extends StatelessWidget {
   const _EventTile({
     required this.controller,
     required this.presentation,
-    required this.onTaskActivated,
+    required this.onSubagentDetails,
     super.key,
   });
 
   final AppController controller;
   final _EventPresentation presentation;
-  final ValueChanged<String> onTaskActivated;
+  final Future<void> Function(String) onSubagentDetails;
 
   @override
   Widget build(BuildContext context) {
@@ -4308,7 +4327,7 @@ class _EventTile extends StatelessWidget {
       return _SubagentEventTile(
         controller: controller,
         event: event,
-        onTaskActivated: onTaskActivated,
+        onSubagentDetails: onSubagentDetails,
       );
     }
     if (_isToolEvent(event.type)) {
@@ -4331,22 +4350,29 @@ class _EventTile extends StatelessWidget {
   }
 }
 
-class _SubagentEventTile extends StatelessWidget {
+class _SubagentEventTile extends StatefulWidget {
   const _SubagentEventTile({
     required this.controller,
     required this.event,
-    required this.onTaskActivated,
+    required this.onSubagentDetails,
   });
 
   final AppController controller;
   final TaskEvent event;
-  final ValueChanged<String> onTaskActivated;
+  final Future<void> Function(String) onSubagentDetails;
+
+  @override
+  State<_SubagentEventTile> createState() => _SubagentEventTileState();
+}
+
+class _SubagentEventTileState extends State<_SubagentEventTile> {
+  var _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final payload = event.payload;
-    final type = event.type;
+    final payload = widget.event.payload;
+    final type = widget.event.type;
     final isFailure = type == 'subagent.failed' || type == 'subagent.unknown';
     final isComplete = type == 'subagent.completed';
     final color = isFailure
@@ -4382,67 +4408,355 @@ class _SubagentEventTile extends StatelessWidget {
         ? (payload['summary'] as String).trim()
         : '';
     final agentId = payload['agent_id'];
-    final child = agentId is String ? controller.taskForId(agentId) : null;
+    final child = agentId is String
+        ? widget.controller.taskForId(agentId)
+        : null;
+    final childSummary = summary.isNotEmpty
+        ? summary
+        : child?.agentSummary?.trim() ?? '';
     return Container(
       margin: const EdgeInsets.only(bottom: 5),
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
       decoration: BoxDecoration(
         color: colors.surfaceContainerLow,
         border: Border.all(color: color.withValues(alpha: 0.32)),
         borderRadius: BorderRadius.circular(9),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 1),
-            child: Icon(icon, size: 17, color: color),
-          ),
-          const SizedBox(width: 7),
-          Expanded(
-            child: Column(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '$path · $status',
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
+                  child: Icon(icon, size: 17, color: color),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    '$path · $status',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: colors.onSurface,
+                    ),
+                  ),
+                ),
+                if (child != null) ...[
+                  IconButton(
+                    tooltip: _expanded ? '收起子代理详情' : '展开子代理详情',
+                    onPressed: () => setState(() => _expanded = !_expanded),
+                    constraints: const BoxConstraints.tightFor(
+                      width: 25,
+                      height: 25,
+                    ),
+                    padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(
+                      _expanded
+                          ? Icons.keyboard_arrow_up_rounded
+                          : Icons.keyboard_arrow_down_rounded,
+                      size: 18,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        unawaited(widget.onSubagentDetails(child.id)),
+                    style: TextButton.styleFrom(
+                      minimumSize: Size.zero,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('查看', style: TextStyle(fontSize: 10)),
+                  ),
+                ],
+              ],
+            ),
+            if (summary.isNotEmpty && !_expanded)
+              Text(
+                summary,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 10,
+                  height: 1.2,
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            if (_expanded)
+              _ExpandedSubagentDetails(
+                summary: childSummary,
+                status: status,
+                colors: colors,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ExpandedSubagentDetails extends StatelessWidget {
+  const _ExpandedSubagentDetails({
+    required this.summary,
+    required this.status,
+    required this.colors,
+  });
+
+  final String summary;
+  final String status;
+  final ColorScheme colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxHeight = (MediaQuery.sizeOf(context).height * 0.2)
+        .clamp(90.0, 180.0)
+        .toDouble();
+    return Padding(
+      padding: const EdgeInsets.only(left: 24, top: 5),
+      child: Container(
+        width: double.infinity,
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        padding: const EdgeInsets.all(7),
+        decoration: BoxDecoration(
+          color: colors.surfaceContainerHighest.withValues(alpha: 0.7),
+          borderRadius: BorderRadius.circular(7),
+        ),
+        child: summary.isEmpty
+            ? Text(
+                '子代理$status，暂时没有可显示的摘要。点击“查看”进入完整对话。',
+                style: TextStyle(
+                  fontSize: 10,
+                  height: 1.2,
+                  color: colors.onSurfaceVariant,
+                ),
+              )
+            : SingleChildScrollView(
+                child: SelectableText(
+                  summary,
+                  style: TextStyle(
+                    fontSize: 10,
+                    height: 1.2,
+                    color: colors.onSurface,
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _SubagentDetailsSheet extends StatefulWidget {
+  const _SubagentDetailsSheet({
+    required this.controller,
+    required this.task,
+    required this.onOpenSubagent,
+  });
+
+  final AppController controller;
+  final Task task;
+  final Future<void> Function(String) onOpenSubagent;
+
+  @override
+  State<_SubagentDetailsSheet> createState() => _SubagentDetailsSheetState();
+}
+
+class _SubagentDetailsSheetState extends State<_SubagentDetailsSheet> {
+  final _scroll = ScrollController();
+  List<TaskEvent>? _presentationSource;
+  List<_EventPresentation>? _presentationCache;
+  var _loadingEarlier = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadEvents());
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadEvents() async {
+    try {
+      await widget.controller.ensureTaskEventsLoaded(widget.task.id);
+      if (!mounted) return;
+      setState(() => _error = null);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = '$error');
+    }
+  }
+
+  List<_EventPresentation> _presentationsFor(List<TaskEvent> events) {
+    if (identical(_presentationSource, events) && _presentationCache != null) {
+      return _presentationCache!;
+    }
+    final presentations = _eventPresentations(events);
+    _presentationSource = events;
+    _presentationCache = presentations;
+    return presentations;
+  }
+
+  Future<void> _loadEarlier() async {
+    if (_loadingEarlier) return;
+    final oldOffset = _scroll.hasClients ? _scroll.offset : 0.0;
+    final oldMaxExtent = _scroll.hasClients
+        ? _scroll.position.maxScrollExtent
+        : 0.0;
+    setState(() => _loadingEarlier = true);
+    try {
+      await widget.controller.loadEarlierTaskEvents(widget.task.id);
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+      return;
+    } finally {
+      if (mounted) setState(() => _loadingEarlier = false);
+    }
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      final addedExtent = _scroll.position.maxScrollExtent - oldMaxExtent;
+      _scroll.jumpTo(
+        (oldOffset + addedExtent)
+            .clamp(0.0, _scroll.position.maxScrollExtent)
+            .toDouble(),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (context, _) => _buildSheet(context),
+    );
+  }
+
+  Widget _buildSheet(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final task = widget.controller.taskForId(widget.task.id) ?? widget.task;
+    final events = widget.controller.eventsFor(task.id);
+    final presentations = _presentationsFor(events);
+    final hasEarlier = widget.controller.hasEarlierTaskEvents(task.id);
+    final running = widget.controller.isTaskRunning(task.id);
+    final streamingText = widget.controller.streamingAssistantText(task.id);
+    final showStreaming = running || streamingText.isNotEmpty;
+    final status = _taskStatusPresentation(task, events);
+    final title = task.agentPath?.trim().isNotEmpty == true
+        ? task.agentPath!.trim()
+        : task.title;
+
+    return Material(
+      color: colors.surface,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 8, 4),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: '关闭子代理详情',
+                  onPressed: () => Navigator.of(context).pop(),
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.arrow_back_rounded),
+                ),
+                Icon(
+                  Icons.smart_toy_outlined,
+                  size: 18,
+                  color: _taskStatusColor(status.status, colors),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        '${status.label} · ${status.detail}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: colors.onSurface,
+                          fontSize: 10,
+                          color: colors.onSurfaceVariant,
                         ),
                       ),
-                    ),
-                    if (child != null)
-                      TextButton(
-                        onPressed: () => onTaskActivated(child.id),
-                        style: TextButton.styleFrom(
-                          minimumSize: Size.zero,
-                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        child: const Text('查看', style: TextStyle(fontSize: 10)),
-                      ),
-                  ],
-                ),
-                if (summary.isNotEmpty)
-                  Text(
-                    summary,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 10,
-                      height: 1.2,
-                      color: colors.onSurfaceVariant,
-                    ),
+                    ],
                   ),
+                ),
               ],
             ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _error != null
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('历史记录加载失败：$_error'),
+                        const SizedBox(height: 6),
+                        TextButton(
+                          onPressed: () {
+                            setState(() => _error = null);
+                            unawaited(_loadEvents());
+                          },
+                          child: const Text('重试'),
+                        ),
+                      ],
+                    ),
+                  )
+                : !widget.controller.taskEventsLoaded(task.id) && events.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : presentations.isEmpty && !showStreaming
+                ? const Center(child: Text('暂无子代理记录'))
+                : ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.fromLTRB(12, 10, 12, 18),
+                    itemCount:
+                        presentations.length +
+                        (hasEarlier ? 1 : 0) +
+                        (showStreaming ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (hasEarlier && index == 0) {
+                        return _LoadEarlierTile(
+                          loading: _loadingEarlier,
+                          onPressed: _loadingEarlier ? null : _loadEarlier,
+                        );
+                      }
+                      final contentIndex = index - (hasEarlier ? 1 : 0);
+                      if (contentIndex == presentations.length) {
+                        return _StreamingTile(
+                          controller: widget.controller,
+                          taskId: task.id,
+                        );
+                      }
+                      return _EventTile(
+                        controller: widget.controller,
+                        presentation: presentations[contentIndex],
+                        onSubagentDetails: widget.onOpenSubagent,
+                        key: ValueKey(
+                          '${presentations[contentIndex].event.eventId}-$contentIndex',
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
@@ -4949,6 +5263,7 @@ class _ToolEventTile extends StatelessWidget {
     final arguments =
         started?.payload['arguments'] ?? result?.payload['arguments'];
     final argumentSummary = toolArgumentSummary(name, arguments);
+    final isTerminalTool = name is String && name.startsWith('terminal.');
     final detailTitle = [
       '$name',
       if (argumentSummary.isNotEmpty) argumentSummary,
@@ -5008,7 +5323,12 @@ class _ToolEventTile extends StatelessWidget {
                       : null,
                 ),
               ),
-            if (result != null) _ToolDetail(title: '结果', value: resultValue),
+            if (result != null)
+              _ToolDetail(
+                title: '结果',
+                value: resultValue,
+                initiallyExpanded: isTerminalTool,
+              ),
           ],
         ),
       ),
@@ -5087,17 +5407,22 @@ Future<void> _showStoredAttachment(
 }
 
 class _ToolDetail extends StatefulWidget {
-  const _ToolDetail({required this.title, required this.value});
+  const _ToolDetail({
+    required this.title,
+    required this.value,
+    this.initiallyExpanded = false,
+  });
 
   final String title;
   final Object? value;
+  final bool initiallyExpanded;
 
   @override
   State<_ToolDetail> createState() => _ToolDetailState();
 }
 
 class _ToolDetailState extends State<_ToolDetail> {
-  bool _expanded = false;
+  late bool _expanded = widget.initiallyExpanded;
   String? _formattedValue;
 
   @override

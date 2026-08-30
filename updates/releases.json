@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.4-beta.6",
+      "title": "PocketServerOps AI v1.0.4-beta.6",
+      "notes": "优化子代理查看交互：保留每次子代理调用记录，支持展开和收缩；查看进入半屏详情抽屉，可返回、下滑关闭并实时查看完整历史、工具调用和命令结果；终端结果展开后直接显示内容。增加手机本地 MCP 客户端配置、工具缓存和 Agent 调用支持。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.6",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.4-beta.6/pocket-server-ops-ai-v1.0.4-beta.6-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-30T04:44:25Z"
+    },
+    {
       "version": "1.0.4-beta.5",
       "title": "PocketServerOps AI v1.0.4-beta.5",
       "notes": "按 Codex 修正断线重连策略：普通 HTTP 请求默认最多重试 4 次，已建立 SSE 后断流默认最多重试 5 次；Responses 与 Chat Completions 独立计数，读取超时正确归类，避免半截回复重复显示。",

@@ -14,6 +14,7 @@ import 'agent/ai_client_factory.dart';
 import 'agent/context_usage.dart';
 import 'agent/ai_protocol.dart';
 import 'agent/auto_review.dart';
+import 'agent/mcp_client.dart';
 import 'agent/openai_compatible_client.dart';
 import 'agent/remote_instructions.dart';
 import 'agent/remote_write_queue.dart';
@@ -115,6 +116,7 @@ class AppController extends ChangeNotifier {
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, RemoteAgentToolsGroup> _phoneToolGroups = {};
+  final Map<String, McpClient> _mcpClients = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
   final Map<String, ServerDirectoryCacheRecord> _directoryCacheRecords = {};
   final Map<String, Future<List<SshDirectoryEntry>>> _directoryLoads = {};
@@ -152,6 +154,7 @@ class AppController extends ChangeNotifier {
 
   List<ServerProfile> _servers = const [];
   List<ProviderProfile> _providers = const [];
+  List<McpServerProfile> _mcpServers = const [];
   List<Project> _projects = const [];
   List<Task> _tasks = const [];
   Map<String, List<TaskEvent>> _events = const {};
@@ -173,6 +176,7 @@ class AppController extends ChangeNotifier {
 
   List<ServerProfile> get servers => List.unmodifiable(_servers);
   List<ProviderProfile> get providers => List.unmodifiable(_providers);
+  List<McpServerProfile> get mcpServers => List.unmodifiable(_mcpServers);
   List<Project> get projects => List.unmodifiable(_projects);
   List<Task> get tasks =>
       List.unmodifiable(_tasks.where((task) => !task.isSubagent));
@@ -582,6 +586,9 @@ class AppController extends ChangeNotifier {
       _directoryCacheRecords[record.cacheKey] = record;
     }
     _providers = await _database.loadProviders();
+    _mcpServers = _readMcpServers(
+      await _database.readSetting(_mcpServersSetting),
+    );
     _projects = await _database.loadProjects();
     _agentAutoExecute =
         await _database.readSetting(_agentAutoExecuteSetting) == 'true';
@@ -1203,6 +1210,164 @@ class AppController extends ChangeNotifier {
     await _database.writeSetting(_subagentSettingsSetting, settings.toJson());
     _subagentSettings = settings;
     _notify();
+  }
+
+  Future<McpServerProfile> saveMcpServer({
+    McpServerProfile? existing,
+    required String name,
+    required String url,
+    required bool enabled,
+    String token = '',
+    bool clearToken = false,
+  }) async {
+    final normalizedName = name.trim();
+    final normalizedUrl = url.trim();
+    if (normalizedName.isEmpty) throw ArgumentError('MCP 名称不能为空');
+    final parsedUrl = Uri.tryParse(normalizedUrl);
+    if (parsedUrl == null ||
+        (parsedUrl.scheme != 'http' && parsedUrl.scheme != 'https') ||
+        parsedUrl.host.isEmpty) {
+      throw ArgumentError('MCP 地址必须是有效的 http 或 https URL');
+    }
+    final id = existing?.id ?? _newId('mcp');
+    final previousTokenRef = existing?.tokenRef;
+    final tokenRef = token.trim().isNotEmpty
+        ? previousTokenRef ?? 'mcp:$id:token'
+        : clearToken
+        ? null
+        : previousTokenRef;
+    if (token.trim().isNotEmpty) {
+      await _credentials.write(tokenRef ?? 'mcp:$id:token', token.trim());
+    }
+    if (clearToken && token.trim().isEmpty && previousTokenRef != null) {
+      await _credentials.delete(previousTokenRef);
+    }
+    final endpointChanged = existing != null && existing.url != normalizedUrl;
+    final saved = McpServerProfile(
+      id: id,
+      name: normalizedName,
+      url: normalizedUrl,
+      enabled: enabled,
+      tokenRef: tokenRef,
+      tools: endpointChanged ? const [] : existing?.tools ?? const [],
+      protocolVersion: endpointChanged ? null : existing?.protocolVersion,
+      toolsUpdatedAt: endpointChanged ? null : existing?.toolsUpdatedAt,
+    );
+    await _database.writeSetting(
+      _mcpServersSetting,
+      jsonEncode([
+        for (final profile in [
+          ..._mcpServers.where((item) => item.id != id),
+          saved,
+        ]..sort((left, right) => left.name.compareTo(right.name)))
+          profile.toMap(),
+      ]),
+    );
+    if (endpointChanged) {
+      _mcpClients.remove(id)?.close();
+    }
+    _mcpServers = [
+      for (final profile in _mcpServers)
+        if (profile.id != id) profile,
+      saved,
+    ]..sort((left, right) => left.name.compareTo(right.name));
+    _notify();
+    return saved;
+  }
+
+  Future<void> setMcpServerEnabled(
+    McpServerProfile profile,
+    bool enabled,
+  ) async {
+    final current = _mcpServerForId(profile.id);
+    if (current == null) throw StateError('MCP 配置不存在');
+    await saveMcpServer(
+      existing: current,
+      name: current.name,
+      url: current.url,
+      enabled: enabled,
+    );
+  }
+
+  Future<int> refreshMcpServerTools(McpServerProfile profile) async {
+    final current = _mcpServerForId(profile.id);
+    if (current == null) throw StateError('MCP 配置不存在');
+    final client = _mcpClientFor(current);
+    final descriptors = await client.listTools();
+    final updated = McpServerProfile(
+      id: current.id,
+      name: current.name,
+      url: current.url,
+      enabled: current.enabled,
+      tokenRef: current.tokenRef,
+      tools: [for (final descriptor in descriptors) descriptor.toProfile()],
+      protocolVersion: client.protocolVersion,
+      toolsUpdatedAt: DateTime.now().toUtc(),
+    );
+    await _writeMcpServers([
+      for (final item in _mcpServers) item.id == updated.id ? updated : item,
+    ]);
+    _mcpServers = [
+      for (final item in _mcpServers) item.id == updated.id ? updated : item,
+    ];
+    _notify();
+    return descriptors.length;
+  }
+
+  Future<void> deleteMcpServer(McpServerProfile profile) async {
+    final current = _mcpServerForId(profile.id);
+    if (current == null) return;
+    final client = _mcpClients.remove(current.id);
+    client?.close();
+    if (current.tokenRef != null) await _credentials.delete(current.tokenRef!);
+    final remaining = [
+      for (final item in _mcpServers)
+        if (item.id != current.id) item,
+    ];
+    await _writeMcpServers(remaining);
+    _mcpServers = remaining;
+    _notify();
+  }
+
+  McpServerProfile? _mcpServerForId(String id) {
+    for (final profile in _mcpServers) {
+      if (profile.id == id) return profile;
+    }
+    return null;
+  }
+
+  McpClient _mcpClientFor(McpServerProfile profile) {
+    final existing = _mcpClients[profile.id];
+    if (existing != null && existing.url == profile.url) return existing;
+    existing?.close();
+    final client = McpClient(
+      url: profile.url,
+      tokenLoader: () async {
+        final current = _mcpServerForId(profile.id);
+        final ref = current?.tokenRef;
+        return ref == null ? null : _credentials.read(ref);
+      },
+    );
+    _mcpClients[profile.id] = client;
+    return client;
+  }
+
+  List<AgentTool> _mcpAgentTools() {
+    final result = <AgentTool>[];
+    for (final profile in _mcpServers) {
+      if (!profile.enabled || profile.tools.isEmpty) continue;
+      result.addAll(
+        McpAgentTools(profile: profile, client: _mcpClientFor(profile)).tools,
+      );
+    }
+    return result;
+  }
+
+  Future<void> _writeMcpServers(List<McpServerProfile> profiles) {
+    return _database.writeSetting(
+      _mcpServersSetting,
+      jsonEncode([for (final profile in profiles) profile.toMap()]),
+    );
   }
 
   Future<void> setImageProviderId(String? providerId) async {
@@ -2488,6 +2653,7 @@ class AppController extends ChangeNotifier {
         _subagentTrees[rootTaskId] = tree;
         tree.setActiveTurn(task.id, turnId);
         tools.addAll(tree.toolsFor(task.id));
+        tools.addAll(_mcpAgentTools());
         if (tools.isEmpty) {
           throw StateError('Agent 没有可用的项目或服务器工具');
         }
@@ -6967,6 +7133,10 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       // Continue closing resources after a task failure.
     }
+    for (final client in _mcpClients.values) {
+      client.close();
+    }
+    _mcpClients.clear();
     await Future.wait(
       List<Future<void>>.of(_taskEventTails.values),
       eagerError: false,
@@ -6996,12 +7166,42 @@ const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
 const _floatingCapsuleLengthScaleSetting = 'floating_capsule_length_scale';
 const _documentModuleSetting = 'document_module_enabled';
 const _remoteTaskRecoverySetting = 'remote_task_recovery_enabled';
+const _mcpServersSetting = 'mcp_servers';
 const _fontScaleSetting = 'font_scale';
 const _subagentSettingsSetting = 'subagent_settings';
 const _imageProviderSetting = 'image_provider_id';
 const _imageModelSettingPrefix = 'image_model:';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';
 const _lastConversationTaskSetting = 'last_conversation_task_id';
+
+List<McpServerProfile> _readMcpServers(String? value) {
+  if (value == null || value.trim().isEmpty) return const [];
+  try {
+    final decoded = jsonDecode(value);
+    if (decoded is! List) return const [];
+    final profiles = <McpServerProfile>[];
+    for (final item in decoded) {
+      if (item is! Map) continue;
+      try {
+        final profile = McpServerProfile.fromMap(
+          Map<String, Object?>.from(item),
+        );
+        if (profile.id.trim().isEmpty ||
+            profile.name.trim().isEmpty ||
+            profile.url.trim().isEmpty) {
+          continue;
+        }
+        profiles.add(profile);
+      } on Object {
+        // Ignore one malformed optional MCP profile.
+      }
+    }
+    profiles.sort((left, right) => left.name.compareTo(right.name));
+    return List.unmodifiable(profiles);
+  } on FormatException {
+    return const [];
+  }
+}
 
 String _sidebarExpandedSettingKey(String sectionId) =>
     'sidebar_expanded:$sectionId';

@@ -92,6 +92,134 @@ void main() {
     expect(find.text('较新对话'), findsNothing);
   });
 
+  testWidgets('subagent view stays in a half-height detail sheet', (
+    tester,
+  ) async {
+    final database = MemoryAppDatabase();
+    const provider = ProviderProfile(
+      id: 'subagent-provider',
+      name: '子代理测试供应商',
+      baseUrl: 'https://provider.example/v1',
+      model: 'model-a',
+      apiKeyRef: null,
+      isDefault: true,
+    );
+    final now = DateTime.utc(2026, 8, 30);
+    final root = Task(
+      id: 'root-task',
+      mode: 'agent',
+      workMode: 'local',
+      projectId: null,
+      serverId: null,
+      providerId: provider.id,
+      title: '根对话',
+      workingDirectory: null,
+      executionMode: 'confirm',
+      status: 'completed',
+      createdAt: now,
+      updatedAt: now,
+    );
+    final child = Task(
+      id: 'child-task',
+      mode: 'agent',
+      workMode: 'local',
+      projectId: null,
+      serverId: null,
+      providerId: provider.id,
+      title: '根对话 · worker',
+      workingDirectory: null,
+      executionMode: 'confirm',
+      isSubagent: true,
+      parentTaskId: root.id,
+      rootTaskId: root.id,
+      agentDepth: 1,
+      agentName: 'worker',
+      agentPath: '/root/worker',
+      agentSummary: '子代理的完整结果',
+      status: 'completed',
+      createdAt: now,
+      updatedAt: now,
+    );
+    await database.saveProvider(provider);
+    await database.saveTask(root);
+    await database.saveTask(child);
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'root-message',
+        taskId: root.id,
+        sequence: 1,
+        type: 'user.message',
+        timestamp: now,
+        payload: const {'text': '父对话消息'},
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'subagent-completed',
+        taskId: root.id,
+        sequence: 2,
+        type: 'subagent.completed',
+        timestamp: now,
+        payload: const {
+          'agent_id': 'child-task',
+          'agent_path': '/root/worker',
+          'task_name': 'worker',
+          'status': 'completed',
+          'summary': '子代理的完整结果',
+        },
+      ),
+    );
+    await database.saveEvent(
+      TaskEvent(
+        eventId: 'child-message',
+        taskId: child.id,
+        sequence: 1,
+        type: 'assistant.completed',
+        timestamp: now,
+        payload: const {'text': '子代理的完整结果'},
+      ),
+    );
+    final controller = AppController(
+      database: database,
+      credentials: MemoryCredentialStore(),
+      providerUsageClient: ProviderUsageClient(
+        client: MockClient((_) async => http.Response('', 404)),
+      ),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    final activated = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatPage(
+            controller: controller,
+            taskId: root.id,
+            onTaskActivated: activated.add,
+            onOpenSettings: () {},
+            onConfirmTool: (_, _, _) async => true,
+            onConfirmHostKey: (_, _) async => true,
+            onUserInfoRequest: (_, _) async => null,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('查看'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('关闭子代理详情'), findsOneWidget);
+    expect(find.text('子代理的完整结果'), findsWidgets);
+    expect(activated, isEmpty);
+    expect(controller.lastConversationTaskId, isNull);
+
+    await tester.tap(find.byTooltip('关闭子代理详情'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('关闭子代理详情'), findsNothing);
+    expect(find.text('父对话消息'), findsOneWidget);
+  });
+
   testWidgets('compact drawer keeps its labels on a narrow screen', (
     tester,
   ) async {
