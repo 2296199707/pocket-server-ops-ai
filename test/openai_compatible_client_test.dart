@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,18 @@ import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/agent/openai_compatible_client.dart';
 
 void main() {
+  test('Codex retry defaults keep request and stream budgets separate', () {
+    const policy = AiRetryPolicy();
+
+    expect(policy.effectiveRequestMaxRetries, 4);
+    expect(policy.effectiveStreamMaxRetries, 5);
+    expect(policy.maxRetries, 5);
+
+    const legacyPolicy = AiRetryPolicy(maxRetries: 2);
+    expect(legacyPolicy.effectiveRequestMaxRetries, 2);
+    expect(legacyPolicy.effectiveStreamMaxRetries, 2);
+  });
+
   test(
     'Responses tail token estimate includes local items after model output',
     () {
@@ -277,6 +290,7 @@ void main() {
         baseUrl: 'https://provider.example/v1',
         apiKey: 'test-key',
         model: 'test-model',
+        retryPolicy: const AiRetryPolicy(maxRetries: 0),
         client: MockClient(
           (_) async => http.Response('upstream unavailable', 503),
         ),
@@ -680,6 +694,7 @@ void main() {
       baseUrl: 'https://provider.example/v1',
       apiKey: 'test-key',
       model: 'test-model',
+      retryPolicy: const AiRetryPolicy(maxRetries: 0),
       client: MockClient(
         (_) async => http.Response(
           'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
@@ -692,8 +707,290 @@ void main() {
 
     await expectLater(
       client.complete(messages: [AiMessage.user('hello')], tools: const []),
-      throwsA(isA<AiResponseIncomplete>()),
+      throwsA(isA<AiResponseStreamDisconnected>()),
     );
+  });
+
+  test('retries a disconnected Responses stream in the same request', () async {
+    var requestCount = 0;
+    final retryEvents = <AiRetryEvent>[];
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      retryPolicy: const AiRetryPolicy(
+        requestMaxRetries: 0,
+        streamMaxRetries: 1,
+        initialDelay: Duration.zero,
+      ),
+      onRetry: retryEvents.add,
+      client: MockClient((request) async {
+        requestCount++;
+        expect(request.url.path, '/v1/responses');
+        if (requestCount == 1) {
+          return http.Response.bytes(
+            utf8.encode(
+              'data: ${jsonEncode({'type': 'response.output_text.delta', 'delta': '半句'})}\n\n',
+            ),
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(
+            'data: ${jsonEncode({'type': 'response.output_text.delta', 'delta': '恢复'})}\n\n'
+            'data: ${jsonEncode({
+              'type': 'response.completed',
+              'response': {'id': 'resp_recovered', 'status': 'completed'},
+            })}\n\n',
+          ),
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('继续')],
+      tools: const [],
+      onContentDelta: (_) {},
+    );
+
+    expect(requestCount, 2);
+    expect(retryEvents, hasLength(1));
+    expect(retryEvents.single.attempt, 1);
+    expect(retryEvents.single.error, isA<AiResponseStreamDisconnected>());
+    expect(response.content, '恢复');
+  });
+
+  test('connection failures use the separate unbounded retry budget', () async {
+    var requestCount = 0;
+    final retryEvents = <AiRetryEvent>[];
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      retryPolicy: const AiRetryPolicy(
+        maxRetries: 0,
+        unboundedConnectionRetries: true,
+        connectionInitialDelay: Duration.zero,
+      ),
+      onRetry: retryEvents.add,
+      client: MockClient((_) async {
+        requestCount++;
+        if (requestCount == 1) {
+          throw http.ClientException('temporary connection failure');
+        }
+        return http.Response(
+          jsonEncode({
+            'status': 'completed',
+            'output': [
+              {
+                'type': 'message',
+                'role': 'assistant',
+                'content': [
+                  {'type': 'output_text', 'text': '连接恢复'},
+                ],
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('重试')],
+      tools: const [],
+    );
+
+    expect(requestCount, 2);
+    expect(response.content, '连接恢复');
+    expect(retryEvents, hasLength(1));
+    expect(retryEvents.single.unbounded, isTrue);
+    expect(retryEvents.single.maxRetries, 0);
+  });
+
+  test('a response-header timeout uses the connection retry budget', () async {
+    var requestCount = 0;
+    final retryEvents = <AiRetryEvent>[];
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      timeout: const Duration(milliseconds: 1),
+      retryPolicy: const AiRetryPolicy(
+        maxRetries: 0,
+        unboundedConnectionRetries: true,
+        connectionInitialDelay: Duration.zero,
+      ),
+      onRetry: retryEvents.add,
+      client: MockClient((_) {
+        requestCount++;
+        if (requestCount == 1) {
+          return Future<http.Response>.delayed(
+            const Duration(milliseconds: 20),
+            () => http.Response(
+              jsonEncode({'status': 'completed', 'output': []}),
+              200,
+            ),
+          );
+        }
+        return Future.value(
+          http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '超时后恢复'},
+                  ],
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          ),
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('重试超时')],
+      tools: const [],
+    );
+
+    expect(requestCount, 2);
+    expect(response.content, '超时后恢复');
+    expect(retryEvents, hasLength(1));
+    expect(retryEvents.single.error, isA<AiConnectionFailure>());
+    expect(retryEvents.single.unbounded, isTrue);
+  });
+
+  test('cancelling a connection retry exits before the next attempt', () async {
+    var requestCount = 0;
+    final cancellation = Completer<void>();
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      retryPolicy: const AiRetryPolicy(
+        maxRetries: 0,
+        unboundedConnectionRetries: true,
+        connectionInitialDelay: Duration(hours: 1),
+      ),
+      onRetry: (_) {
+        cancellation.complete();
+      },
+      client: MockClient((_) async {
+        requestCount++;
+        throw http.ClientException('network unavailable');
+      }),
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.complete(
+        messages: [AiMessage.user('取消重连')],
+        tools: const [],
+        cancellation: cancellation.future,
+      ),
+      throwsA(isA<AiRequestCancelled>()),
+    );
+    expect(requestCount, 1);
+  });
+
+  test(
+    'retries an HTTP provider overload response at the request layer',
+    () async {
+      var requestCount = 0;
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'test-model',
+        retryPolicy: const AiRetryPolicy(
+          requestMaxRetries: 1,
+          streamMaxRetries: 0,
+          initialDelay: Duration.zero,
+        ),
+        client: MockClient((_) async {
+          requestCount++;
+          if (requestCount == 1) {
+            return http.Response(
+              jsonEncode({
+                'error': {'code': 'server_is_overloaded'},
+              }),
+              503,
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'status': 'completed',
+              'output': [
+                {
+                  'type': 'message',
+                  'role': 'assistant',
+                  'content': [
+                    {'type': 'output_text', 'text': '恢复'},
+                  ],
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+
+      final response = await client.complete(
+        messages: [AiMessage.user('请求')],
+        tools: const [],
+      );
+      expect(requestCount, 2);
+      expect(response.content, '恢复');
+    },
+  );
+
+  test('does not retry a streamed provider overload response', () async {
+    var requestCount = 0;
+    final client = OpenAiCompatibleClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      retryPolicy: const AiRetryPolicy(
+        maxRetries: 2,
+        initialDelay: Duration.zero,
+      ),
+      client: MockClient((_) async {
+        requestCount++;
+        return http.Response(
+          'data: ${jsonEncode({
+            'type': 'response.failed',
+            'response': {
+              'id': 'overloaded',
+              'status': 'failed',
+              'error': {'code': 'server_is_overloaded'},
+            },
+          })}\n\n',
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.complete(messages: [AiMessage.user('请求')], tools: const []),
+      throwsA(isA<AiResponseProviderError>()),
+    );
+    expect(requestCount, 1);
   });
 
   test('malformed Responses SSE event is skipped before a valid completion', () async {
@@ -923,6 +1220,7 @@ void main() {
         baseUrl: 'https://provider.example/v1',
         apiKey: secret,
         model: 'test-model',
+        retryPolicy: const AiRetryPolicy(maxRetries: 0),
         client: MockClient(
           (_) async => http.Response(
             'provider error $secret',

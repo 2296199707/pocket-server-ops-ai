@@ -317,6 +317,7 @@ class ChatPageState extends State<ChatPage> {
                         return _EventTile(
                           controller: widget.controller,
                           presentation: presentations[contentIndex],
+                          onTaskActivated: widget.onTaskActivated,
                           key: ValueKey(
                             '${presentations[contentIndex].event.eventId}-$contentIndex',
                           ),
@@ -563,10 +564,7 @@ class ChatPageState extends State<ChatPage> {
   Task? get _currentTask {
     final id = _taskId;
     if (id == null) return null;
-    for (final task in widget.controller.tasks) {
-      if (task.id == id) return task;
-    }
-    return null;
+    return widget.controller.taskForId(id);
   }
 
   String? get _effectiveProviderId {
@@ -4131,6 +4129,7 @@ String _taskStatusDetail(String status, List<TaskEvent> events) {
   for (final event in events.reversed) {
     switch (event.type) {
       case 'assistant.delta':
+      case 'assistant.retrying':
         return '生成回复';
       case 'tool.started':
         return _toolStatusPhase(event.payload['name']);
@@ -4242,6 +4241,7 @@ List<_EventPresentation> _eventPresentations(List<TaskEvent> events) {
     if (consumed.contains(event.eventId)) continue;
     switch (event.type) {
       case 'assistant.delta':
+      case 'assistant.retrying':
       case 'task.started':
       case 'task.completed':
       case 'task.cancel_requested':
@@ -4293,15 +4293,24 @@ class _EventTile extends StatelessWidget {
   const _EventTile({
     required this.controller,
     required this.presentation,
+    required this.onTaskActivated,
     super.key,
   });
 
   final AppController controller;
   final _EventPresentation presentation;
+  final ValueChanged<String> onTaskActivated;
 
   @override
   Widget build(BuildContext context) {
     final event = presentation.event;
+    if (_isSubagentEvent(event.type)) {
+      return _SubagentEventTile(
+        controller: controller,
+        event: event,
+        onTaskActivated: onTaskActivated,
+      );
+    }
     if (_isToolEvent(event.type)) {
       return _ToolEventTile(
         controller: controller,
@@ -4318,6 +4327,125 @@ class _EventTile extends StatelessWidget {
       attachments: _readChatAttachments(event.payload['attachments']),
       controller: controller,
       taskId: event.taskId,
+    );
+  }
+}
+
+class _SubagentEventTile extends StatelessWidget {
+  const _SubagentEventTile({
+    required this.controller,
+    required this.event,
+    required this.onTaskActivated,
+  });
+
+  final AppController controller;
+  final TaskEvent event;
+  final ValueChanged<String> onTaskActivated;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final payload = event.payload;
+    final type = event.type;
+    final isFailure = type == 'subagent.failed' || type == 'subagent.unknown';
+    final isComplete = type == 'subagent.completed';
+    final color = isFailure
+        ? colors.error
+        : isComplete
+        ? Colors.green
+        : colors.primary;
+    final icon = isFailure
+        ? Icons.error_outline_rounded
+        : isComplete
+        ? Icons.check_circle_outline_rounded
+        : type == 'subagent.interrupted'
+        ? Icons.pause_circle_outline_rounded
+        : type == 'subagent.message'
+        ? Icons.mail_outline_rounded
+        : Icons.smart_toy_outlined;
+    final status = switch (type) {
+      'subagent.started' => '运行中',
+      'subagent.message' => payload['followup'] == true ? '后续已排队' : '消息已排队',
+      'subagent.completed' => '已完成',
+      'subagent.interrupted' => '已中断',
+      'subagent.unknown' => '状态未知',
+      'subagent.failed' => '失败',
+      _ => '更新',
+    };
+    final name = payload['task_name'] is String
+        ? payload['task_name'] as String
+        : '子代理';
+    final path = payload['agent_path'] is String
+        ? payload['agent_path'] as String
+        : name;
+    final summary = payload['summary'] is String
+        ? (payload['summary'] as String).trim()
+        : '';
+    final agentId = payload['agent_id'];
+    final child = agentId is String ? controller.taskForId(agentId) : null;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        border: Border.all(color: color.withValues(alpha: 0.32)),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(icon, size: 17, color: color),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '$path · $status',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: colors.onSurface,
+                        ),
+                      ),
+                    ),
+                    if (child != null)
+                      TextButton(
+                        onPressed: () => onTaskActivated(child.id),
+                        style: TextButton.styleFrom(
+                          minimumSize: Size.zero,
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        child: const Text('查看', style: TextStyle(fontSize: 10)),
+                      ),
+                  ],
+                ),
+                if (summary.isNotEmpty)
+                  Text(
+                    summary,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10,
+                      height: 1.2,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -5127,6 +5255,8 @@ String _titleFromPrompt(String prompt) {
 
 bool _isToolEvent(String type) =>
     type == 'tool.started' || type == 'tool.completed' || type == 'tool.failed';
+
+bool _isSubagentEvent(String type) => type.startsWith('subagent.');
 
 bool _isPlanToolEvent(TaskEvent event) =>
     _isToolEvent(event.type) && event.payload['name'] == 'update_plan';

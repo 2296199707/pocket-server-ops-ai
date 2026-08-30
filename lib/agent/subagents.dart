@@ -23,34 +23,49 @@ typedef SubagentEventSink = Future<void> Function(
 
 typedef SubagentInterrupt = Future<void> Function(SubagentNode node);
 
+typedef SubagentDiscard = Future<void> Function(SubagentNode node);
+
+typedef SubagentStateChanged = FutureOr<void> Function(SubagentNode node);
+
 class SubagentNode {
   SubagentNode({
     required this.id,
     required this.rootTaskId,
     required this.parentId,
     required this.taskName,
+    required this.agentPath,
     required this.depth,
     required this.providerId,
     required this.model,
     required this.reasoningEffort,
-  });
+    this.role = defaultSubagentRole,
+    this.forkTurns = 'all',
+    Iterable<String> mailbox = const [],
+  }) : mailbox = List<String>.of(mailbox);
 
   final String id;
   final String rootTaskId;
   final String parentId;
   final String taskName;
+  final String agentPath;
   final int depth;
   final String? providerId;
   final String? model;
   final String? reasoningEffort;
+  final String role;
+  final String forkTurns;
   String status = 'pending';
   String summary = '';
   DateTime updatedAt = DateTime.now().toUtc();
+  String? parentTurnId;
+  String? activeTurnId;
+  String? lastEventType;
   Future<AgentResult>? run;
   Future<void>? observation;
   Completer<void>? startSettled;
   bool cancelRequested = false;
-  final List<String> mailbox = [];
+  bool followupPending = false;
+  final List<String> mailbox;
 
   bool get isActive =>
       status == 'pending' || status == 'running' || status == 'waiting';
@@ -71,17 +86,24 @@ class SubagentTree {
     required this._start,
     required this._onEvent,
     required this._interrupt,
+    this._discard,
+    this._onStateChanged,
+    Iterable<SubagentNode> restoredNodes = const [],
   }) {
     _nodes[rootTaskId] = SubagentNode(
       id: rootTaskId,
       rootTaskId: rootTaskId,
       parentId: '',
       taskName: 'root',
+      agentPath: '/root',
       depth: 0,
       providerId: null,
       model: null,
       reasoningEffort: null,
     )..status = 'running';
+    for (final node in restoredNodes) {
+      restoreNode(node);
+    }
   }
 
   static const minWaitTimeout = Duration(seconds: 10);
@@ -90,10 +112,12 @@ class SubagentTree {
 
   final String rootTaskId;
   SubagentSettings settings;
-  final SubagentPrepare _prepare;
-  final SubagentStart _start;
-  final SubagentEventSink _onEvent;
-  final SubagentInterrupt _interrupt;
+  SubagentPrepare _prepare;
+  SubagentStart _start;
+  SubagentEventSink _onEvent;
+  SubagentInterrupt _interrupt;
+  SubagentDiscard? _discard;
+  SubagentStateChanged? _onStateChanged;
   final Map<String, SubagentNode> _nodes = {};
   final Set<Future<void>> _operations = {};
   int _idSequence = 0;
@@ -111,6 +135,53 @@ class SubagentTree {
   bool get hasActiveAgents => agents.any((node) => node.isActive);
 
   bool get isClosed => _closed;
+
+  /// Restored trees are created before a turn has UI callbacks. The next
+  /// active run refreshes these handlers with the current confirmation and
+  /// host-key callbacks without replacing the restored nodes.
+  void updateHandlers({
+    required SubagentPrepare prepare,
+    required SubagentStart start,
+    required SubagentEventSink onEvent,
+    required SubagentInterrupt interrupt,
+    SubagentDiscard? discard,
+    SubagentStateChanged? onStateChanged,
+  }) {
+    _prepare = prepare;
+    _start = start;
+    _onEvent = onEvent;
+    _interrupt = interrupt;
+    _discard = discard;
+    _onStateChanged = onStateChanged;
+  }
+
+  void restoreNode(SubagentNode node) {
+    if (node.id == rootTaskId || node.rootTaskId != rootTaskId) return;
+    _nodes[node.id] = node;
+  }
+
+  void setActiveTurn(String agentId, String? turnId) {
+    final node = _nodes[agentId];
+    if (node == null) return;
+    node.activeTurnId = turnId;
+  }
+
+  void clearActiveTurn(String agentId, String turnId) {
+    final node = _nodes[agentId];
+    if (node != null && node.activeTurnId == turnId) {
+      node.activeTurnId = null;
+    }
+  }
+
+  void updateNodeStatus(String agentId, String status) {
+    final node = _nodes[agentId];
+    if (node == null || !node.isActive) return;
+    if (status != 'pending' && status != 'running' && status != 'waiting') {
+      return;
+    }
+    node.status = status;
+    node.updatedAt = DateTime.now().toUtc();
+  }
 
   /// Apply settings for the next spawn. Existing active children keep their
   /// current provider/model; a later child uses the latest conversation
@@ -225,6 +296,20 @@ class SubagentTree {
                     'Lowercase task name, unique among this agent children.',
               },
               'message': {'type': 'string'},
+              'role': {
+                'type': 'string',
+                'description': 'Optional role name from the saved subagent role configuration.',
+              },
+              'fork_turns': {
+                'description': 'Optional history fork: none, all, or a positive number of recent turns.',
+                'oneOf': [
+                  {
+                    'type': 'string',
+                    'enum': ['none', 'all'],
+                  },
+                  {'type': 'integer', 'minimum': 1, 'maximum': 64},
+                ],
+              },
             },
           },
         ),
@@ -247,7 +332,7 @@ class SubagentTree {
             },
           },
         ),
-        call: _sendMessage,
+        call: (arguments) => _track(_sendMessage(parent, arguments)),
         requiresConfirmation: false,
       ),
       AgentTool(
@@ -265,7 +350,7 @@ class SubagentTree {
             },
           },
         ),
-        call: (arguments) => _track(_followup(arguments)),
+        call: (arguments) => _track(_followup(parent, arguments)),
         requiresConfirmation: false,
       ),
       AgentTool(
@@ -291,7 +376,7 @@ class SubagentTree {
             },
           },
         ),
-        call: _wait,
+        call: (arguments) => _wait(parent, arguments),
         requiresConfirmation: false,
       ),
       AgentTool(
@@ -300,7 +385,7 @@ class SubagentTree {
           description: 'List child agents and their current status.',
           parameters: {'type': 'object', 'properties': {}},
         ),
-        call: (_) async => {'agents': _agentMaps()},
+        call: (_) async => {'agents': _agentMaps(parent)},
         requiresConfirmation: false,
       ),
       AgentTool(
@@ -317,7 +402,41 @@ class SubagentTree {
             },
           },
         ),
-        call: _interruptAgent,
+        call: (arguments) => _interruptAgent(parent, arguments),
+        requiresConfirmation: false,
+      ),
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'close_agent',
+          description:
+              'Close a child agent and its descendants while retaining their '
+              'history. A closed agent must be resumed before follow-up work.',
+          parameters: {
+            'type': 'object',
+            'required': ['target'],
+            'properties': {
+              'target': {'type': 'string'},
+            },
+          },
+        ),
+        call: (arguments) => _closeAgent(parent, arguments),
+        requiresConfirmation: false,
+      ),
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'resume_agent',
+          description:
+              'Resume a previously closed child agent. This only reopens the '
+              'thread; use followup_task to start its next turn.',
+          parameters: {
+            'type': 'object',
+            'required': ['target'],
+            'properties': {
+              'target': {'type': 'string'},
+            },
+          },
+        ),
+        call: (arguments) => _resumeAgent(parent, arguments),
         requiresConfirmation: false,
       ),
     ];
@@ -348,6 +467,8 @@ class SubagentTree {
       );
     }
     if (message.trim().isEmpty) throw ArgumentError('message is required');
+    final role = _parseRole(arguments['role']);
+    final forkTurns = _parseForkTurns(arguments['fork_turns']);
     if (parent.depth >= settings.maxRecursionDepth) {
       throw StateError('已达到子代理递归深度 ${settings.maxRecursionDepth}');
     }
@@ -368,6 +489,7 @@ class SubagentTree {
       rootTaskId: rootTaskId,
       parentId: parent.id,
       taskName: taskName,
+      agentPath: '${parent.agentPath}/$taskName',
       depth: parent.depth + 1,
       providerId: settings.providerId.trim().isEmpty
           ? null
@@ -376,7 +498,9 @@ class SubagentTree {
       reasoningEffort: settings.reasoningEffort == defaultReasoningEffort
           ? null
           : settings.reasoningEffort,
-    );
+      role: role,
+      forkTurns: forkTurns,
+    )..parentTurnId = parent.activeTurnId;
     _nodes[node.id] = node;
     final startSettled = Completer<void>();
     node.startSettled = startSettled;
@@ -388,6 +512,7 @@ class SubagentTree {
         node.updatedAt = DateTime.now().toUtc();
         await _emit(node, 'subagent.interrupted', {
           'agent_id': node.id,
+          'agent_path': node.agentPath,
           'task_name': node.taskName,
           'status': node.status,
         });
@@ -397,6 +522,7 @@ class SubagentTree {
       node.status = 'running';
       await _emit(node, 'subagent.started', {
         'agent_id': node.id,
+        'agent_path': node.agentPath,
         'task_name': node.taskName,
         'parent_id': node.parentId,
         'depth': node.depth,
@@ -411,6 +537,7 @@ class SubagentTree {
         node.updatedAt = DateTime.now().toUtc();
         await _emit(node, 'subagent.interrupted', {
           'agent_id': node.id,
+          'agent_path': node.agentPath,
           'task_name': node.taskName,
           'status': node.status,
         });
@@ -419,7 +546,7 @@ class SubagentTree {
       }
       final run = _start(node, message.trim());
       node.run = run;
-      final observation = _observe(node, run);
+      final observation = _track(_observe(node, run));
       node.observation = observation;
       unawaited(observation);
       return _agentMap(node);
@@ -429,6 +556,11 @@ class SubagentTree {
           await _interrupt(node);
         } catch (_) {}
       }
+      try {
+        await _discard?.call(node);
+      } catch (_) {
+        // Keep the original spawn error when cleanup races with deletion.
+      }
       _nodes.remove(node.id);
       rethrow;
     } finally {
@@ -436,146 +568,272 @@ class SubagentTree {
     }
   }
 
-  Future<Object?> _sendMessage(Map<String, Object?> arguments) async {
+  Future<Object?> _sendMessage(
+    SubagentNode caller,
+    Map<String, Object?> arguments,
+  ) async {
     if (_closed) throw StateError('子代理树已关闭');
-    final node = _target(arguments['target']);
+    final node = _target(caller, arguments['target']);
     final message = _requiredText(arguments, 'message');
     if (message.trim().isEmpty) throw ArgumentError('message is required');
     node.mailbox.add(message.trim());
+    node.parentTurnId ??= caller.activeTurnId;
     node.updatedAt = DateTime.now().toUtc();
     await _emit(node, 'subagent.message', {
       'agent_id': node.id,
+      'agent_path': node.agentPath,
       'task_name': node.taskName,
       'message_queued': true,
     });
     return {
       'agent_id': node.id,
+      'agent_path': node.agentPath,
       'task_name': node.taskName,
       'queued': true,
       'starts_turn': false,
     };
   }
 
-  Future<Object?> _followup(Map<String, Object?> arguments) async {
+  Future<Object?> _followup(
+    SubagentNode caller,
+    Map<String, Object?> arguments,
+  ) async {
     if (_closed || _cancelling) throw StateError('子代理树正在关闭或停止');
-    final node = _target(arguments['target']);
+    final node = _target(caller, arguments['target']);
     final message = _requiredText(arguments, 'message');
     if (message.trim().isEmpty) throw ArgumentError('message is required');
+    if (node.status == 'closed') {
+      throw StateError('子代理已关闭，请先调用 resume_agent');
+    }
     if (node.isActive) {
       node.mailbox.add(message.trim());
+      node.followupPending = true;
+      node.parentTurnId = caller.activeTurnId ?? node.parentTurnId;
+      node.updatedAt = DateTime.now().toUtc();
+      await _emit(node, 'subagent.message', {
+        'agent_id': node.id,
+        'agent_path': node.agentPath,
+        'task_name': node.taskName,
+        'message_queued': true,
+        'followup': true,
+      });
       return {
         'agent_id': node.id,
+        'agent_path': node.agentPath,
         'task_name': node.taskName,
         'queued': true,
         'starts_turn': false,
       };
     }
-    final activeCount = _nodes.values
-        .where((item) => item.id != rootTaskId && item.isActive)
-        .length;
+    final activeCount = _activeChildCount(excluding: node);
     if (activeCount >= settings.maxConcurrentThreads) {
       throw StateError('子代理并发线程已达到 ${settings.maxConcurrentThreads}');
     }
-    final previousStatus = node.status;
     final queued = List<String>.of(node.mailbox);
     node.mailbox.clear();
+    node.followupPending = false;
     final prompt = [...queued, message.trim()].join('\n\n');
+    node.parentTurnId = caller.activeTurnId ?? node.parentTurnId;
+    final startsTurn = await _beginFollowup(node, prompt, automatic: false);
+    if (!startsTurn) {
+      return {
+        'agent_id': node.id,
+        'agent_path': node.agentPath,
+        'task_name': node.taskName,
+        'queued': false,
+        'starts_turn': false,
+        'interrupted': true,
+      };
+    }
+    return {
+      'agent_id': node.id,
+      'agent_path': node.agentPath,
+      'task_name': node.taskName,
+      'queued': false,
+      'starts_turn': true,
+    };
+  }
+
+  Future<bool> _beginFollowup(
+    SubagentNode node,
+    String prompt, {
+    required bool automatic,
+  }) async {
+    final previousStatus = node.status;
     node.cancelRequested = false;
     node.status = 'pending';
+    node.summary = '';
     node.run = null;
     node.observation = null;
     node.updatedAt = DateTime.now().toUtc();
     final startSettled = Completer<void>();
     node.startSettled = startSettled;
+    // Keep a follow-up prompt durable while it waits for a slot or task
+    // preparation. A process stop in this window must not lose the request.
+    if (node.mailbox.isEmpty || node.mailbox.first != prompt) {
+      node.mailbox.insert(0, prompt);
+    }
+    await _persistStateBestEffort(node);
     try {
-      await _prepare(node, followup: true);
+      if (automatic) await _waitForFollowupCapacity(node);
       if (_closed || _cancelling || node.cancelRequested) {
-        node.mailbox.insertAll(0, [...queued, message.trim()]);
+        _ensurePromptInMailbox(node, prompt);
         await _interrupt(node);
         node.status = 'interrupted';
         node.updatedAt = DateTime.now().toUtc();
+        node.lastEventType = 'subagent.interrupted';
         await _emit(node, 'subagent.interrupted', {
           'agent_id': node.id,
+          'agent_path': node.agentPath,
           'task_name': node.taskName,
           'status': node.status,
+          'followup': true,
         });
-        return {
-          ..._agentMap(node),
-          'queued': false,
-          'starts_turn': false,
-          'interrupted': true,
-        };
+        return false;
+      }
+      await _prepare(node, followup: true);
+      if (_closed || _cancelling || node.cancelRequested) {
+        _ensurePromptInMailbox(node, prompt);
+        await _interrupt(node);
+        node.status = 'interrupted';
+        node.updatedAt = DateTime.now().toUtc();
+        node.lastEventType = 'subagent.interrupted';
+        await _emit(node, 'subagent.interrupted', {
+          'agent_id': node.id,
+          'agent_path': node.agentPath,
+          'task_name': node.taskName,
+          'status': node.status,
+          'followup': true,
+        });
+        return false;
       }
       node.status = 'running';
+      if (node.mailbox.isNotEmpty && node.mailbox.first == prompt) {
+        node.mailbox.removeAt(0);
+      }
+      await _persistStateBestEffort(node);
       await _emit(node, 'subagent.started', {
         'agent_id': node.id,
+        'agent_path': node.agentPath,
         'task_name': node.taskName,
         'parent_id': node.parentId,
         'depth': node.depth,
         if (node.providerId != null) 'provider_id': node.providerId,
+        if (node.model != null) 'model': node.model,
+        if (node.reasoningEffort != null)
+          'reasoning_effort': node.reasoningEffort,
         'followup': true,
       });
       if (_closed || _cancelling || node.cancelRequested) {
-        node.mailbox.insertAll(0, [...queued, message.trim()]);
+        _ensurePromptInMailbox(node, prompt);
         await _interrupt(node);
         node.status = 'interrupted';
         node.updatedAt = DateTime.now().toUtc();
+        node.lastEventType = 'subagent.interrupted';
         await _emit(node, 'subagent.interrupted', {
           'agent_id': node.id,
+          'agent_path': node.agentPath,
           'task_name': node.taskName,
           'status': node.status,
+          'followup': true,
         });
-        return {
-          ..._agentMap(node),
-          'queued': false,
-          'starts_turn': false,
-          'interrupted': true,
-        };
+        return false;
       }
       final run = _start(node, prompt);
       node.run = run;
-      final observation = _observe(node, run);
+      final observation = _track(_observe(node, run));
       node.observation = observation;
       unawaited(observation);
-      return {
-        'agent_id': node.id,
-        'task_name': node.taskName,
-        'queued': false,
-        'starts_turn': true,
-      };
-    } catch (_) {
+      return true;
+    } catch (error) {
       if (node.run != null && node.isActive) {
         try {
           await _interrupt(node);
         } catch (_) {}
       }
+      _ensurePromptInMailbox(node, prompt);
+      node.followupPending = false;
+      if (automatic) {
+        node.status = 'failed';
+        node.summary = _summary('后续任务启动失败：$error');
+        node.updatedAt = DateTime.now().toUtc();
+        node.lastEventType = 'subagent.failed';
+        await _emitBestEffort(node, 'subagent.failed', {
+          'agent_id': node.id,
+          'agent_path': node.agentPath,
+          'task_name': node.taskName,
+          'status': node.status,
+          'summary': node.summary,
+          'followup': true,
+        });
+        return false;
+      }
       if (node.isActive) {
         node.status = previousStatus;
         node.updatedAt = DateTime.now().toUtc();
+        await _persistStateBestEffort(node);
       }
-      node.mailbox.insertAll(0, [...queued, message.trim()]);
       rethrow;
     } finally {
       if (!startSettled.isCompleted) startSettled.complete();
+      if (identical(node.startSettled, startSettled) &&
+          startSettled.isCompleted &&
+          node.run == null) {
+        node.startSettled = null;
+      }
     }
   }
 
-  Future<Object?> _wait(Map<String, Object?> arguments) async {
+  static void _ensurePromptInMailbox(SubagentNode node, String prompt) {
+    if (node.mailbox.isEmpty || node.mailbox.first != prompt) {
+      node.mailbox.insert(0, prompt);
+    }
+  }
+
+  int _activeChildCount({SubagentNode? excluding}) => _nodes.values
+      .where(
+        (node) => node.id != rootTaskId && node != excluding && node.isActive,
+      )
+      .length;
+
+  Future<void> _waitForFollowupCapacity(SubagentNode node) async {
+    while (!_closed &&
+        !_cancelling &&
+        _activeChildCount(excluding: node) >= settings.maxConcurrentThreads) {
+      final pending = <Future<void>>[];
+      for (final other in agents) {
+        if (other == node || !other.isActive) continue;
+        _addNodeWaitFuture(other, pending);
+      }
+      if (pending.isEmpty) return;
+      // One completed sibling is enough to free a shared execution slot. Do
+      // not wait for every other sibling, which could unnecessarily hold a
+      // queued follow-up behind an unrelated long-running task.
+      await Future.any<void>(pending);
+    }
+  }
+
+  Future<Object?> _wait(
+    SubagentNode caller,
+    Map<String, Object?> arguments,
+  ) async {
     final targets = <SubagentNode>[];
     final target = arguments['target'];
     final targetList = arguments['targets'];
     if (target is String && target.trim().isNotEmpty) {
-      targets.add(_target(target));
+      targets.add(_target(caller, target));
     }
     if (targetList is List) {
       for (final value in targetList) {
         if (value is String && value.trim().isNotEmpty) {
-          final node = _target(value);
+          final node = _target(caller, value);
           if (!targets.contains(node)) targets.add(node);
         }
       }
     }
-    if (targets.isEmpty) targets.addAll(agents);
+    if (targets.isEmpty) {
+      targets.addAll(agents.where((node) => _isDescendantOf(node, caller)));
+    }
     final timeout = _waitDuration(arguments['timeout_ms']);
     var timedOut = false;
     final deadline = DateTime.now().add(timeout);
@@ -603,90 +861,284 @@ class SubagentTree {
     };
   }
 
-  Future<Object?> _interruptAgent(Map<String, Object?> arguments) async {
-    final node = _target(arguments['target']);
-    if (!node.isActive) return {..._agentMap(node), 'interrupted': false};
+  Future<Object?> _interruptAgent(
+    SubagentNode caller,
+    Map<String, Object?> arguments,
+  ) async {
+    final node = _target(caller, arguments['target']);
+    final previousStatus = node.status;
+    if (!node.isActive) {
+      return {
+        ..._agentMap(node),
+        'previous_status': previousStatus,
+        'interrupted': false,
+      };
+    }
     node.cancelRequested = true;
     await _interrupt(node);
-    return {..._agentMap(node), 'interrupted': true};
+    return {
+      ..._agentMap(node),
+      'previous_status': previousStatus,
+      'interrupted': true,
+    };
+  }
+
+  Future<Object?> _closeAgent(
+    SubagentNode caller,
+    Map<String, Object?> arguments,
+  ) async {
+    if (_closed || _cancelling) throw StateError('子代理树正在关闭或停止');
+    final node = _target(caller, arguments['target']);
+    final targets = <SubagentNode>[
+      node,
+      for (final child in agents)
+        if (child != node && _isDescendantOf(child, node)) child,
+    ]..sort((left, right) => right.depth.compareTo(left.depth));
+    for (final target in targets) {
+      if (!target.isActive) continue;
+      target.cancelRequested = true;
+      try {
+        await _interrupt(target);
+      } catch (_) {
+        // A turn may have finished between the lookup and the close request.
+      }
+    }
+    await _waitFor(targets);
+    for (final target in targets) {
+      target.cancelRequested = false;
+      target.followupPending = false;
+      target.status = 'closed';
+      target.updatedAt = DateTime.now().toUtc();
+      await _emit(target, 'subagent.closed', {
+        'agent_id': target.id,
+        'agent_path': target.agentPath,
+        'task_name': target.taskName,
+        'status': target.status,
+      });
+    }
+    return {
+      ..._agentMap(node),
+      'closed': true,
+      'descendants_closed': targets.length - 1,
+    };
+  }
+
+  Future<Object?> _resumeAgent(
+    SubagentNode caller,
+    Map<String, Object?> arguments,
+  ) async {
+    if (_closed || _cancelling) throw StateError('子代理树正在关闭或停止');
+    final node = _target(caller, arguments['target']);
+    final wasClosed = node.status == 'closed';
+    if (wasClosed) {
+      node.status = 'interrupted';
+      node.cancelRequested = false;
+      node.updatedAt = DateTime.now().toUtc();
+      await _emit(node, 'subagent.resumed', {
+        'agent_id': node.id,
+        'agent_path': node.agentPath,
+        'task_name': node.taskName,
+        'status': node.status,
+      });
+    }
+    return {..._agentMap(node), 'resumed': wasClosed};
   }
 
   Future<void> _observe(SubagentNode node, Future<AgentResult> run) async {
-    AgentResult result;
+    AgentResult? result;
+    Object? runError;
     try {
       result = await run;
     } catch (error) {
-      node.status = 'failed';
-      node.summary = '$error';
-      node.updatedAt = DateTime.now().toUtc();
-      await _emit(node, 'subagent.failed', {
-        'agent_id': node.id,
-        'task_name': node.taskName,
-        'status': node.status,
-        'summary': node.summary,
-      });
-      return;
+      runError = error;
     }
-    node.status = switch (result.status) {
-      'completed' => 'completed',
-      'cancelled' || 'canceled' => 'interrupted',
-      'unknown' => 'unknown',
-      _ => 'failed',
-    };
-    node.summary = _summary(result.finalText);
-    if (node.summary.isEmpty && result.error != null) {
-      node.summary = _summary('${result.error}');
+    final finalStatus = runError != null
+        ? 'failed'
+        : switch (result!.status) {
+            'completed' => 'completed',
+            'cancelled' || 'canceled' => 'interrupted',
+            'unknown' => 'unknown',
+            _ => 'failed',
+          };
+    node.status = finalStatus;
+    node.summary = runError == null ? _summary(result!.finalText) : '';
+    if (node.summary.isEmpty) {
+      final resultError = runError ?? result?.error;
+      if (resultError != null) node.summary = _summary('$resultError');
     }
     node.updatedAt = DateTime.now().toUtc();
-    final eventType = switch (node.status) {
+    final eventType = switch (finalStatus) {
       'completed' => 'subagent.completed',
       'interrupted' => 'subagent.interrupted',
       'unknown' => 'subagent.unknown',
       _ => 'subagent.failed',
     };
-    await _emit(node, eventType, {
+    node.lastEventType = eventType;
+    final completionPayload = <String, Object?>{
       'agent_id': node.id,
+      'agent_path': node.agentPath,
       'task_name': node.taskName,
-      'status': node.status,
+      'status': finalStatus,
       if (node.summary.isNotEmpty) 'summary': node.summary,
-    });
+    };
+    // A late event must not turn a completed child into an unhandled future
+    // when the parent is being deleted at the same time. The task result and
+    // the in-memory node remain authoritative even if persistence is gone.
+    await _emitBestEffort(node, eventType, completionPayload);
+    // Re-check after the completion event. An explicit followup_task may be
+    // delivered while the event is being persisted; in that case it already
+    // consumed the mailbox and started the next turn. Starting from the old
+    // snapshot would launch a duplicate (sometimes empty) turn.
+    final pendingFollowup =
+        node.followupPending &&
+        node.mailbox.isNotEmpty &&
+        !_closed &&
+        !_cancelling &&
+        !node.cancelRequested &&
+        finalStatus != 'interrupted';
+    if (pendingFollowup) {
+      final prompt = node.mailbox.join('\n\n');
+      node.mailbox.clear();
+      node.followupPending = false;
+      node.status = 'waiting';
+      node.updatedAt = DateTime.now().toUtc();
+      await _beginFollowup(node, prompt, automatic: true);
+    }
+    if (!pendingFollowup) {
+      _releaseRuntime(node, run);
+    }
   }
 
-  SubagentNode _target(Object? value) {
+  Future<void> _persistStateBestEffort(SubagentNode node) async {
+    try {
+      await _onStateChanged?.call(node);
+    } catch (_) {
+      // State persistence is advisory; the active in-memory tree remains
+      // authoritative for the current process.
+    }
+  }
+
+  void _releaseRuntime(SubagentNode node, Future<AgentResult> run) {
+    if (identical(node.run, run)) node.run = null;
+    node.observation = null;
+    final settled = node.startSettled;
+    if (settled == null || settled.isCompleted) node.startSettled = null;
+  }
+
+  bool _isDescendantOf(SubagentNode node, SubagentNode ancestor) {
+    var current = node;
+    final visited = <String>{};
+    while (current.parentId.isNotEmpty && visited.add(current.id)) {
+      if (current.parentId == ancestor.id) return true;
+      final parent = _nodes[current.parentId];
+      if (parent == null) return false;
+      current = parent;
+    }
+    return false;
+  }
+
+  SubagentNode _target(SubagentNode caller, Object? value) {
     if (value is! String || value.trim().isEmpty) {
       throw ArgumentError('target is required');
     }
     final target = value.trim();
-    if (target == rootTaskId) throw StateError('不能操作根代理');
-    for (final node in agents) {
-      if (node.id == target ||
-          node.taskName == target ||
-          node.id.endsWith('/$target')) {
-        return node;
-      }
+    if (target == caller.id || target == caller.agentPath) {
+      throw StateError('不能操作自己');
     }
-    throw StateError('找不到子代理 $target');
+    if (target == rootTaskId || target == '/root') {
+      throw StateError('不能操作根代理');
+    }
+    final visible = agents.where((node) => _isDescendantOf(node, caller));
+    final exactId = visible.where((node) => node.id == target).toList();
+    if (exactId.length == 1) return exactId.single;
+    final canonicalPath = target.startsWith('/')
+        ? target
+        : target.startsWith('root/')
+        ? '/$target'
+        : '${caller.agentPath}/$target';
+    final pathMatches = visible
+        .where((node) => node.agentPath == canonicalPath)
+        .toList();
+    if (pathMatches.length == 1) return pathMatches.single;
+    final nameMatches = visible
+        .where((node) => node.parentId == caller.id && node.taskName == target)
+        .toList();
+    if (nameMatches.length == 1) return nameMatches.single;
+    final descendantNameMatches = visible
+        .where((node) => node.taskName == target)
+        .toList();
+    if (descendantNameMatches.length > 1) {
+      throw StateError('子代理目标不明确，请使用 agent_path：$target');
+    }
+    if (descendantNameMatches.length == 1) return descendantNameMatches.single;
+    throw StateError('找不到当前代理范围内的子代理 $target');
   }
 
-  List<Map<String, Object?>> _agentMaps() => [
-    for (final node in agents) _agentMap(node),
+  List<Map<String, Object?>> _agentMaps(SubagentNode caller) => [
+    for (final node in agents)
+      if (_isDescendantOf(node, caller)) _agentMap(node),
   ];
 
   Map<String, Object?> _agentMap(SubagentNode node) => {
     'agent_id': node.id,
+    'agent_path': node.agentPath,
     'task_name': node.taskName,
     'parent_id': node.parentId,
     'depth': node.depth,
+    'role': node.role,
+    'fork_turns': node.forkTurns,
     'status': node.status,
     if (node.providerId != null) 'provider_id': node.providerId,
     if (node.summary.isNotEmpty) 'summary': node.summary,
+    if (node.lastEventType != null) 'last_event': node.lastEventType,
+    if (node.status == 'completed' ||
+        node.status == 'failed' ||
+        node.status == 'unknown' ||
+        node.status == 'interrupted' ||
+        node.status == 'closed')
+      'completion_notice': node.summary.isEmpty
+          ? '子代理已${_statusLabel(node.status)}。'
+          : node.summary,
+    if (node.mailbox.isNotEmpty) 'mailbox_pending': node.mailbox.length,
   };
+
+  static String _statusLabel(String status) {
+    return switch (status) {
+      'completed' => '完成',
+      'failed' => '失败',
+      'unknown' => '结束但状态未知',
+      'interrupted' => '中断',
+      'closed' => '已关闭',
+      _ => status,
+    };
+  }
 
   Future<void> _emit(
     SubagentNode node,
     String type,
     Map<String, Object?> payload,
-  ) => _onEvent(node, type, payload);
+  ) async {
+    node.lastEventType = type;
+    try {
+      await _onStateChanged?.call(node);
+    } catch (_) {
+      // State persistence is best effort here; the event remains authoritative
+      // for the current turn and a later save can repair the task snapshot.
+    }
+    await _onEvent(node, type, payload);
+  }
+
+  Future<void> _emitBestEffort(
+    SubagentNode node,
+    String type,
+    Map<String, Object?> payload,
+  ) async {
+    try {
+      await _emit(node, type, payload);
+    } catch (_) {
+      // A parent task may have been deleted before a child reports back.
+    }
+  }
 
   String _newId() {
     _idSequence++;
@@ -697,6 +1149,36 @@ class SubagentTree {
     final value = arguments[key];
     if (value is! String) throw ArgumentError('$key is required');
     return value;
+  }
+
+  static String _parseRole(Object? value) {
+    if (value == null) return defaultSubagentRole;
+    if (value is! String || value.trim().isEmpty) {
+      throw ArgumentError('role must be a non-empty string');
+    }
+    final role = value.trim();
+    if (!RegExp(r'^[a-z0-9][a-z0-9_-]{0,31}$').hasMatch(role)) {
+      throw ArgumentError(
+        'role must use lowercase letters, digits, underscores, or hyphens',
+      );
+    }
+    return role;
+  }
+
+  static String _parseForkTurns(Object? value) {
+    // Codex MultiAgentV2 uses a full-history fork when fork_turns is omitted.
+    if (value == null) return 'all';
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      if (normalized == 'none' || normalized == 'all') return normalized;
+      final count = int.tryParse(normalized);
+      if (count != null && count > 0 && count <= 64) return '$count';
+    } else if (value is int && value > 0 && value <= 64) {
+      return '$value';
+    }
+    throw ArgumentError(
+      'fork_turns must be none, all, or an integer from 1 to 64',
+    );
   }
 
   static Duration _waitDuration(Object? value) {

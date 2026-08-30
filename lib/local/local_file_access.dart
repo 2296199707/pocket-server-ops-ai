@@ -19,6 +19,8 @@ class LocalFileAccessStore {
 
   final List<LocalFileGrant> grants;
 
+  void clear() => grants.clear();
+
   Future<LocalFileGrant> add(
     String requestedPath, {
     required bool canWrite,

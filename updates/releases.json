@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.4-beta.5",
+      "title": "PocketServerOps AI v1.0.4-beta.5",
+      "notes": "按 Codex 修正断线重连策略：普通 HTTP 请求默认最多重试 4 次，已建立 SSE 后断流默认最多重试 5 次；Responses 与 Chat Completions 独立计数，读取超时正确归类，避免半截回复重复显示。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.5",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.4-beta.5/pocket-server-ops-ai-v1.0.4-beta.5-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-30T01:59:19Z"
+    },
+    {
       "version": "1.0.4-beta.4",
       "title": "PocketServerOps AI v1.0.4-beta.4",
       "notes": "修复远程工具连接失败导致 Agent 会话提前终止的问题：错误会回传给 AI 并提示先确认服务器状态；首次 SSH 建连延迟到远程工具调用时，支持失败后重试；多服务器单台连接失败不再阻止整轮会话。",

@@ -633,7 +633,10 @@ class AgentLoop {
       status == 'unknown' ? 'task.unknown' : 'task.cancelled',
       const {},
     );
-    return AgentResult(status: status, messages: List.unmodifiable(messages));
+    return AgentResult(
+      status: status,
+      messages: List.unmodifiable(messages),
+    );
   }
 
   AgentTool? _findTool(List<AgentTool> availableTools, String name) {

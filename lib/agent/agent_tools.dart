@@ -652,11 +652,35 @@ class RemoteAgentTools {
         'must not exceed $_maxFileChunkBytes bytes',
       );
     }
-    final chunk = await (await ensureConnection()).readFileChunk(
-      _resolveRemotePath(path),
-      offset: offset,
-      length: length ?? _maxFileChunkBytes,
-    );
+    final remotePath = _resolveRemotePath(path);
+    final current = await ensureConnection();
+    SshFileChunk chunk;
+    try {
+      chunk = await current.readFileChunk(
+        remotePath,
+        offset: offset,
+        length: length ?? _maxFileChunkBytes,
+      );
+    } catch (error) {
+      // Reading is idempotent. If the SSH channel died during a read, reopen
+      // it once and repeat only this same chunk. Writes and stdin deliberately
+      // do not use this path because replaying an uncertain side effect is not
+      // safe.
+      if (!remoteTaskRecoveryEnabled || _closing) rethrow;
+      final failed = _connection;
+      if (identical(failed, current)) _connection = null;
+      try {
+        await failed?.close();
+      } catch (_) {
+        // The failed channel may already be closed.
+      }
+      final replacement = await ensureConnection();
+      chunk = await replacement.readFileChunk(
+        remotePath,
+        offset: offset,
+        length: length ?? _maxFileChunkBytes,
+      );
+    }
     return {
       'path': path,
       'offset': chunk.offset,

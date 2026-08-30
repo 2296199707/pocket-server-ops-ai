@@ -173,6 +173,238 @@ void main() {
     expect(response.toolCalls.single.arguments, '{"command":"pwd"}');
   });
 
+  test('retries a disconnected Chat Completions stream', () async {
+    var requestCount = 0;
+    final retryEvents = <AiRetryEvent>[];
+    final client = ChatCompletionsClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      retryPolicy: const AiRetryPolicy(
+        requestMaxRetries: 0,
+        streamMaxRetries: 1,
+        initialDelay: Duration.zero,
+      ),
+      onRetry: retryEvents.add,
+      client: MockClient((_) async {
+        requestCount++;
+        if (requestCount == 1) {
+          return http.Response.bytes(
+            utf8.encode(
+              'data: ${jsonEncode({
+                'choices': [
+                  {
+                    'delta': {'content': '半句'},
+                    'finish_reason': null,
+                  },
+                ],
+              })}\n\n',
+            ),
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(
+            'data: ${jsonEncode({
+              'choices': [
+                {
+                  'delta': {'content': '恢复'},
+                  'finish_reason': 'stop',
+                },
+              ],
+            })}\n\n'
+            'data: [DONE]\n\n',
+          ),
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('继续')],
+      tools: const [],
+    );
+
+    expect(requestCount, 2);
+    expect(retryEvents.single.error, isA<AiResponseStreamDisconnected>());
+    expect(response.content, '恢复');
+  });
+
+  test('Chat Completions HTTP errors use the request retry budget', () async {
+    var requestCount = 0;
+    final retryEvents = <AiRetryEvent>[];
+    final client = ChatCompletionsClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      retryPolicy: const AiRetryPolicy(
+        requestMaxRetries: 1,
+        streamMaxRetries: 0,
+        initialDelay: Duration.zero,
+      ),
+      onRetry: retryEvents.add,
+      client: MockClient((_) async {
+        requestCount++;
+        if (requestCount == 1) return http.Response('temporary failure', 503);
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': '恢复'},
+                'finish_reason': 'stop',
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('重试请求')],
+      tools: const [],
+    );
+
+    expect(requestCount, 2);
+    expect(response.content, '恢复');
+    expect(retryEvents, hasLength(1));
+    expect(retryEvents.single.maxRetries, 1);
+    expect(retryEvents.single.error, isA<ChatCompletionsHttpException>());
+  });
+
+  test(
+    'a timeout after response headers uses the stream retry budget',
+    () async {
+      var requestCount = 0;
+      final retryEvents = <AiRetryEvent>[];
+      final stalledStreams = <StreamController<List<int>>>[];
+      final client = ChatCompletionsClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'test-model',
+        timeout: const Duration(seconds: 1),
+        retryPolicy: const AiRetryPolicy(
+          requestMaxRetries: 0,
+          streamMaxRetries: 1,
+          initialDelay: Duration.zero,
+        ),
+        onRetry: retryEvents.add,
+        client: _StreamedResponseClient((_) {
+          requestCount++;
+          if (requestCount == 1) {
+            final stalled = StreamController<List<int>>();
+            stalledStreams.add(stalled);
+            Future<void>.delayed(const Duration(milliseconds: 20), () {
+              if (stalled.isClosed) return;
+              stalled.addError(TimeoutException('stream idle'));
+              stalled.close();
+            });
+            return Future.value(
+              http.StreamedResponse(
+                stalled.stream,
+                200,
+                headers: {'content-type': 'text/event-stream'},
+              ),
+            );
+          }
+          return Future.value(
+            http.StreamedResponse(
+              Stream<List<int>>.fromIterable([
+                utf8.encode(
+                  'data: ${jsonEncode({
+                    'choices': [
+                      {
+                        'delta': {'content': '恢复'},
+                        'finish_reason': 'stop',
+                      },
+                    ],
+                  })}\n\n',
+                ),
+                utf8.encode('data: [DONE]\n\n'),
+              ]),
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            ),
+          );
+        }),
+      );
+      addTearDown(() {
+        for (final stalled in stalledStreams) {
+          stalled.close();
+        }
+        client.close();
+      });
+
+      final response = await client.complete(
+        messages: [AiMessage.user('等待流恢复')],
+        tools: const [],
+      );
+
+      expect(requestCount, 2);
+      expect(response.content, '恢复');
+      expect(retryEvents, hasLength(1));
+      expect(retryEvents.single.maxRetries, 1);
+      expect(retryEvents.single.error, isA<AiResponseStreamDisconnected>());
+    },
+  );
+
+  test('a response-header timeout uses the connection retry budget', () async {
+    var requestCount = 0;
+    final retryEvents = <AiRetryEvent>[];
+    final client = ChatCompletionsClient(
+      baseUrl: 'https://provider.example/v1',
+      apiKey: 'test-key',
+      model: 'test-model',
+      timeout: const Duration(milliseconds: 1),
+      retryPolicy: const AiRetryPolicy(
+        maxRetries: 0,
+        unboundedConnectionRetries: true,
+        connectionInitialDelay: Duration.zero,
+      ),
+      onRetry: retryEvents.add,
+      client: MockClient((_) {
+        requestCount++;
+        if (requestCount == 1) {
+          return Future<http.Response>.delayed(
+            const Duration(milliseconds: 20),
+            () => http.Response('{}', 200),
+          );
+        }
+        return Future.value(
+          http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {'role': 'assistant', 'content': '超时后恢复'},
+                  'finish_reason': 'stop',
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          ),
+        );
+      }),
+    );
+    addTearDown(client.close);
+
+    final response = await client.complete(
+      messages: [AiMessage.user('重试超时')],
+      tools: const [],
+    );
+
+    expect(requestCount, 2);
+    expect(response.content, '超时后恢复');
+    expect(retryEvents, hasLength(1));
+    expect(retryEvents.single.error, isA<AiConnectionFailure>());
+    expect(retryEvents.single.unbounded, isTrue);
+  });
+
   test(
     'assistant tool call history uses Chat Completions wire names',
     () async {
@@ -390,4 +622,15 @@ void main() {
       await expectLater(pending, throwsA(isA<AiRequestCancelled>()));
     },
   );
+}
+
+class _StreamedResponseClient extends http.BaseClient {
+  _StreamedResponseClient(this._handler);
+
+  final Future<http.StreamedResponse> Function(http.BaseRequest) _handler;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    return _handler(request);
+  }
 }

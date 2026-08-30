@@ -12,6 +12,8 @@ AiChatClient createAiClient({
   List<String>? inputModalities,
   int? autoCompactTokenLimit,
   http.Client? client,
+  AiRetryPolicy retryPolicy = const AiRetryPolicy(),
+  AiRetryListener? onRetry,
 }) {
   switch (wireApi) {
     case 'responses':
@@ -23,6 +25,8 @@ AiChatClient createAiClient({
         inputModalities: inputModalities,
         autoCompactTokenLimit: autoCompactTokenLimit,
         client: client,
+        retryPolicy: retryPolicy,
+        onRetry: onRetry,
       );
     case 'chat-completions':
       return ChatCompletionsClient(
@@ -31,6 +35,8 @@ AiChatClient createAiClient({
         model: model,
         reasoningEffort: reasoningEffort,
         client: client,
+        retryPolicy: retryPolicy,
+        onRetry: onRetry,
       );
     default:
       throw StateError('不支持的 AI 协议：$wireApi');

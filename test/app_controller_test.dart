@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path_util;
 import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/app_controller.dart';
 import 'package:mobile_agent/credentials/credential_store.dart';
@@ -1004,8 +1005,8 @@ void main() {
       server.listen((request) async {
         requestBodies.add(await utf8.decoder.bind(request).join());
         if (requestBodies.length == 2) {
-          request.response.statusCode = 503;
-          request.response.write('temporary provider failure');
+          request.response.statusCode = 400;
+          request.response.write('invalid request for regression test');
           await request.response.close();
           return;
         }
@@ -1251,6 +1252,131 @@ void main() {
       );
       expect(preambleIndex, greaterThanOrEqualTo(0));
       expect(toolIndex, greaterThan(preambleIndex));
+    },
+  );
+
+  test(
+    'failed subagent fork rolls back its task and copied attachments',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'mobile-agent-fork-rollback-',
+      );
+      addTearDown(() async {
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var requestCount = 0;
+      server.listen((request) async {
+        await utf8.decoder.bind(request).join();
+        requestCount++;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          jsonEncode({
+            'status': 'completed',
+            'output': requestCount == 1
+                ? [
+                    {
+                      'type': 'function_call',
+                      'id': 'fork-call-item',
+                      'call_id': 'fork-call',
+                      'name': 'spawn_agent',
+                      'arguments': jsonEncode({
+                        'task_name': 'broken-fork',
+                        'message': '检查附件',
+                        'fork_turns': 'all',
+                      }),
+                    },
+                  ]
+                : [
+                    {
+                      'type': 'message',
+                      'role': 'assistant',
+                      'content': [
+                        {'type': 'output_text', 'text': '父任务继续完成'},
+                      ],
+                    },
+                  ],
+          }),
+        );
+        await request.response.close();
+      });
+
+      final database = _FailingForkAttachmentDatabase();
+      final store = AttachmentStore(rootProvider: () async => root);
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+        attachmentStore: store,
+        taskService: const _NoopAndroidTaskService(),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveProvider(
+        name: 'fork rollback provider',
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'fork-model',
+        secret: 'test-key',
+        isDefault: true,
+      );
+      final provider = controller.providers.single;
+      final parent = await controller.createTask(
+        mode: 'agent',
+        workMode: 'local',
+        providerId: provider.id,
+        executionMode: 'auto',
+        title: '父任务',
+      );
+      database.parentTaskId = parent.id;
+      final source = AttachmentRecord(
+        id: 'source-attachment',
+        taskId: parent.id,
+        name: 'source.txt',
+        mimeType: 'text/plain',
+        byteLength: 6,
+        storagePath: '${parent.id}/source.txt',
+        createdAt: DateTime.now().toUtc(),
+      );
+      await store.write(source, Uint8List.fromList(utf8.encode('source')));
+      await database.saveAttachments([source]);
+      await database.saveEvent(
+        TaskEvent(
+          eventId: 'fork-source-message',
+          taskId: parent.id,
+          sequence: 1,
+          type: 'user.message',
+          timestamp: DateTime.now().toUtc(),
+          payload: {
+            'text': '历史附件',
+            'attachments': [
+              {
+                'attachment_id': source.id,
+                'name': source.name,
+                'mime_type': source.mimeType,
+                'size': source.byteLength,
+              },
+            ],
+          },
+        ),
+      );
+      await controller.ensureTaskEventsLoaded(parent.id);
+      database.failChildAttachments = true;
+
+      final result = await controller.runTask(parent, prompt: '创建子代理');
+
+      expect(result.status, 'completed', reason: '${result.error}');
+      expect(requestCount, 2);
+      expect((await database.loadTasks()).map((task) => task.id), [parent.id]);
+      expect(
+        (await database.loadAttachments()).map((record) => record.taskId),
+        [parent.id],
+      );
+      final directories = await root
+          .list()
+          .where((entity) => entity is Directory)
+          .map((entity) => path_util.basename(entity.path))
+          .toList();
+      expect(directories, [parent.id]);
     },
   );
 
@@ -1822,7 +1948,7 @@ void main() {
     addTearDown(() => server.close(force: true));
     server.listen((request) async {
       await utf8.decoder.bind(request).join();
-      request.response.statusCode = 503;
+      request.response.statusCode = 400;
       request.response.write('temporary failure');
       await request.response.close();
     });
@@ -3043,6 +3169,20 @@ class _FailingTaskSaveDatabase extends MemoryAppDatabase {
       throw StateError('save failed');
     }
     return super.saveTask(task);
+  }
+}
+
+class _FailingForkAttachmentDatabase extends MemoryAppDatabase {
+  String? parentTaskId;
+  bool failChildAttachments = false;
+
+  @override
+  Future<void> saveAttachments(List<AttachmentRecord> records) {
+    if (failChildAttachments &&
+        records.any((record) => record.taskId != parentTaskId)) {
+      throw StateError('fork attachment save failed');
+    }
+    return super.saveAttachments(records);
   }
 }
 

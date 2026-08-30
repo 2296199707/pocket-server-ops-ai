@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -54,6 +55,8 @@ class ChatCompletionsClient implements AiChatClient {
     http.Client? client,
     Duration timeout = const Duration(minutes: 5),
     int? maxResponseBytes,
+    AiRetryPolicy retryPolicy = const AiRetryPolicy(),
+    AiRetryListener? onRetry,
   }) {
     final normalizedBaseUrl = baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
     if (normalizedBaseUrl.isEmpty) {
@@ -76,6 +79,8 @@ class ChatCompletionsClient implements AiChatClient {
       client: client ?? http.Client(),
       timeout: timeout,
       maxResponseBytes: maxResponseBytes,
+      retryPolicy: retryPolicy,
+      onRetry: onRetry,
     );
   }
 
@@ -89,6 +94,8 @@ class ChatCompletionsClient implements AiChatClient {
     required this._client,
     required this.timeout,
     required this.maxResponseBytes,
+    required this.retryPolicy,
+    required this.onRetry,
   });
 
   final String baseUrl;
@@ -100,6 +107,8 @@ class ChatCompletionsClient implements AiChatClient {
   final Duration timeout;
   final int? maxResponseBytes;
   final http.Client _client;
+  final AiRetryPolicy retryPolicy;
+  final AiRetryListener? onRetry;
 
   String get wireApi => 'chat-completions';
 
@@ -156,10 +165,100 @@ class ChatCompletionsClient implements AiChatClient {
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
   }) async {
-    final response = await _awaitCancellation(
-      _client.send(request).timeout(timeout),
-      cancellation,
-    );
+    var requestRetries = 0;
+    var streamRetries = 0;
+    var connectionRetries = 0;
+    var requestSent = false;
+    while (true) {
+      final attemptRequest = requestSent ? _retryRequest(request) : request;
+      requestSent = true;
+      try {
+        return await _sendOnce(
+          attemptRequest,
+          onContentDelta: onContentDelta,
+          cancellation: cancellation,
+        );
+      } catch (error) {
+        if (retryPolicy.unboundedConnectionRetries &&
+            isAiConnectionError(error)) {
+          connectionRetries++;
+          final delay = retryPolicy.connectionDelayFor(connectionRetries);
+          try {
+            await onRetry?.call(
+              AiRetryEvent(
+                attempt: connectionRetries,
+                maxRetries: 0,
+                delay: delay,
+                error: error,
+                unbounded: true,
+              ),
+            );
+          } catch (_) {
+            // Retry telemetry is best effort and must not change task behavior.
+          }
+          await waitForAiRetry(delay, cancellation);
+          continue;
+        }
+        final isStreamError = isAiStreamRetryError(error);
+        final maxRetries = isStreamError
+            ? retryPolicy.effectiveStreamMaxRetries
+            : retryPolicy.effectiveRequestMaxRetries;
+        final retries = isStreamError ? streamRetries : requestRetries;
+        if (retries >= maxRetries || !isRetryableAiError(error)) {
+          rethrow;
+        }
+        final attempt = retries + 1;
+        if (isStreamError) {
+          streamRetries = attempt;
+        } else {
+          requestRetries = attempt;
+        }
+        final delay = retryPolicy.delayFor(attempt);
+        try {
+          await onRetry?.call(
+            AiRetryEvent(
+              attempt: attempt,
+              maxRetries: maxRetries,
+              delay: delay,
+              error: error,
+            ),
+          );
+        } catch (_) {
+          // Retry telemetry is best effort and must not change task behavior.
+        }
+        await waitForAiRetry(delay, cancellation);
+      }
+    }
+  }
+
+  Future<AiMessage> _sendOnce(
+    http.Request request, {
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    // Keep each retry attempt transactional. A disconnected SSE stream may
+    // already contain text, but that partial output is not durable history
+    // and must not be emitted again when the same turn is retried.
+    final attemptDeltas = onContentDelta == null ? null : <String>[];
+    final attemptDelta = attemptDeltas?.add;
+    late http.StreamedResponse response;
+    try {
+      response = await _awaitCancellation(
+        _client.send(request).timeout(timeout),
+        cancellation,
+      );
+    } on AiRequestCancelled {
+      rethrow;
+    } on TimeoutException catch (error) {
+      // A timeout before response headers is a connection failure, so it uses
+      // the same independent retry budget as Codex's ConnectionFailed path.
+      throw AiConnectionFailure(error);
+    } on Object catch (error) {
+      if (error is http.ClientException || error is IOException) {
+        throw AiConnectionFailure(error);
+      }
+      rethrow;
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final body = await _awaitCancellation(
         _readLimitedText(
@@ -183,19 +282,64 @@ class ChatCompletionsClient implements AiChatClient {
 
     final contentType = response.headers['content-type'] ?? '';
     if (contentType.toLowerCase().contains('text/event-stream')) {
-      return _awaitCancellation(
-        _readSse(response, onContentDelta),
+      late AiMessage result;
+      try {
+        result = await _awaitCancellation(
+          _readSse(response, attemptDelta),
+          cancellation,
+        );
+      } on AiRequestCancelled {
+        rethrow;
+      } on Object catch (error) {
+        if (error is TimeoutException ||
+            error is http.ClientException ||
+            error is IOException) {
+          throw AiResponseStreamDisconnected('$error');
+        }
+        rethrow;
+      }
+      _publishAttemptDeltas(attemptDeltas, onContentDelta);
+      return result;
+    }
+    late String body;
+    try {
+      body = await _awaitCancellation(
+        _readLimitedText(
+          response.stream,
+          maxBytes: maxResponseBytes,
+        ).timeout(timeout),
         cancellation,
       );
+    } on AiRequestCancelled {
+      rethrow;
+    } on Object catch (error) {
+      if (error is TimeoutException ||
+          error is http.ClientException ||
+          error is IOException) {
+        throw AiResponseStreamDisconnected('$error');
+      }
+      rethrow;
     }
-    final body = await _awaitCancellation(
-      _readLimitedText(
-        response.stream,
-        maxBytes: maxResponseBytes,
-      ).timeout(timeout),
-      cancellation,
-    );
-    return _readJson(body, onContentDelta);
+    final result = _readJson(body, attemptDelta);
+    _publishAttemptDeltas(attemptDeltas, onContentDelta);
+    return result;
+  }
+
+  static void _publishAttemptDeltas(
+    List<String>? deltas,
+    void Function(String delta)? onContentDelta,
+  ) {
+    if (deltas == null || onContentDelta == null) return;
+    for (final delta in deltas) {
+      onContentDelta(delta);
+    }
+  }
+
+  static http.Request _retryRequest(http.Request request) {
+    final retry = http.Request(request.method, request.url)
+      ..headers.addAll(request.headers)
+      ..bodyBytes = request.bodyBytes;
+    return retry;
   }
 
   Future<T> _awaitCancellation<T>(
@@ -204,7 +348,8 @@ class ChatCompletionsClient implements AiChatClient {
   ) {
     if (cancellation == null) return operation;
     final cancelled = cancellation.then<T>((_) {
-      close();
+      // Keep cancellation scoped to this logical request. Closing the shared
+      // HTTP client would also abort unrelated/reused requests.
       throw const AiRequestCancelled();
     });
     return Future.any<T>([operation, cancelled]);
@@ -241,9 +386,15 @@ class ChatCompletionsClient implements AiChatClient {
       final decoded = _decodeJsonObject(data, stream: true);
       final error = decoded['error'];
       if (error != null) {
-        throw AiResponseInvalid(
-          'Chat Completions stream error: '
-          '${_sanitizeProviderError(jsonEncode(error), _apiKey)}',
+        final code = aiProviderErrorCode(error) ?? aiProviderErrorCode(decoded);
+        throw AiResponseProviderError(
+          message: _sanitizeProviderError(
+            'Chat Completions stream error: ${aiProviderErrorMessage(error)}',
+            _apiKey,
+          ),
+          code: code,
+          retryable: isRetryableAiProviderCode(code, stream: true),
+          stream: true,
         );
       }
       final rawUsage = decoded['usage'];
@@ -297,7 +448,7 @@ class ChatCompletionsClient implements AiChatClient {
     if (!streamDone) processEvent();
 
     if (!streamDone && finishReason == null) {
-      throw const AiResponseIncomplete();
+      throw const AiResponseStreamDisconnected();
     }
     final effectiveFinishReason = finishReason == null || finishReason!.isEmpty
         ? toolCalls.isEmpty
@@ -329,9 +480,14 @@ class ChatCompletionsClient implements AiChatClient {
     final decoded = _decodeJsonObject(body);
     final error = decoded['error'];
     if (error != null) {
-      throw AiResponseInvalid(
-        'Chat Completions response error: '
-        '${_sanitizeProviderError(jsonEncode(error), _apiKey)}',
+      final code = aiProviderErrorCode(error) ?? aiProviderErrorCode(decoded);
+      throw AiResponseProviderError(
+        message: _sanitizeProviderError(
+          'Chat Completions response error: ${aiProviderErrorMessage(error)}',
+          _apiKey,
+        ),
+        code: code,
+        retryable: isRetryableAiProviderCode(code, stream: false),
       );
     }
     final choices = decoded['choices'];

@@ -53,10 +53,7 @@ class _HomeShellState extends State<HomeShell> {
   Task? get _activeTask {
     final id = _activeTaskId;
     if (id == null) return null;
-    for (final task in widget.controller.tasks) {
-      if (task.id == id) return task;
-    }
-    return null;
+    return widget.controller.taskForId(id);
   }
 
   @override

@@ -124,6 +124,7 @@ class AppController extends ChangeNotifier {
   final RemoteWriteQueue _remoteWriteQueue = RemoteWriteQueue();
   final Map<String, Future<void>> _taskEventTails = {};
   final Map<String, Future<void>> _taskStatusTails = {};
+  final Map<String, Future<void>> _subagentStateTails = {};
   final Map<String, Future<void>> _eventLoads = {};
   final Map<String, Future<void>> _attachmentMigrations = {};
   final Set<String> _loadedTaskEvents = {};
@@ -659,10 +660,12 @@ class AppController extends ChangeNotifier {
 
     final recoveredTasks = <Task>[];
     for (final task in storedTasks) {
-      if ((task.status == 'running' ||
-              task.status == 'waiting' ||
-              task.status == 'stopping') &&
-          !_runningTasks.containsKey(task.id)) {
+      final needsRecovery =
+          task.status == 'running' ||
+          task.status == 'waiting' ||
+          task.status == 'stopping' ||
+          (task.isSubagent && task.status == 'queued');
+      if (needsRecovery && !_runningTasks.containsKey(task.id)) {
         final latestEvent = await _database.loadLatestEvent(task.id);
         final terminalEvent = await _database.loadLatestTerminalEvent(task.id);
         final terminalStatus =
@@ -696,6 +699,7 @@ class AppController extends ChangeNotifier {
     }
 
     _tasks = recoveredTasks;
+    await _restoreSubagentTrees();
     _events = eventsByTask.map(
       (taskId, values) =>
           MapEntry(taskId, List<TaskEvent>.unmodifiable(values)),
@@ -704,6 +708,107 @@ class AppController extends ChangeNotifier {
     _hasEarlierTaskEvents.clear();
     _loading = false;
     _notify();
+  }
+
+  /// Rebuild only the persisted subagent control metadata. A process that was
+  /// running before the app stopped is never replayed automatically: the
+  /// child task is recovered as `unknown`, and a later follow-up starts a new
+  /// turn after the user/model can inspect the saved history.
+  Future<void> _restoreSubagentTrees() async {
+    _subagentTrees.clear();
+    final tasksById = <String, Task>{for (final task in _tasks) task.id: task};
+    final childrenByRoot = <String, List<Task>>{};
+    for (final task in _tasks) {
+      if (!task.isSubagent || task.rootTaskId == null) continue;
+      childrenByRoot.putIfAbsent(task.rootTaskId!, () => []).add(task);
+    }
+    for (final entry in childrenByRoot.entries) {
+      final root = tasksById[entry.key];
+      if (root == null) continue;
+      final children = entry.value
+        ..sort((left, right) {
+          final depth = left.agentDepth.compareTo(right.agentDepth);
+          if (depth != 0) return depth;
+          return left.updatedAt.compareTo(right.updatedAt);
+        });
+      final pathsById = <String, String>{root.id: '/root'};
+      final nodes = <SubagentNode>[];
+      for (final task in children) {
+        final name = task.agentName?.trim().isNotEmpty == true
+            ? task.agentName!.trim()
+            : _lastAgentPathPart(task.agentPath) ?? task.id;
+        final parentId = task.parentTaskId ?? root.id;
+        final parentPath = pathsById[parentId] ?? '/root';
+        final agentPath = task.agentPath?.trim().isNotEmpty == true
+            ? task.agentPath!.trim()
+            : '$parentPath/$name';
+        pathsById[task.id] = agentPath;
+        final status = _restoredSubagentStatus(task.status);
+        final node =
+            SubagentNode(
+                id: task.id,
+                rootTaskId: entry.key,
+                parentId: parentId,
+                taskName: name,
+                agentPath: agentPath,
+                depth: task.agentDepth,
+                providerId: task.providerId,
+                model: task.modelOverride,
+                reasoningEffort: task.reasoningEffortOverride,
+                role: task.agentRole ?? defaultSubagentRole,
+                forkTurns: task.agentForkTurns ?? 'all',
+                mailbox: task.agentMailbox,
+              )
+              ..status = status
+              ..summary = task.agentSummary ?? ''
+              ..updatedAt = task.updatedAt
+              ..lastEventType = _subagentEventTypeForStatus(status);
+        nodes.add(node);
+      }
+      _subagentTrees[entry.key] = _createSubagentTree(
+        root,
+        restoredNodes: nodes,
+      );
+    }
+  }
+
+  static String _restoredSubagentStatus(String status) {
+    switch (status) {
+      case 'completed':
+      case 'failed':
+      case 'cancelled':
+      case 'canceled':
+      case 'unknown':
+      case 'closed':
+        return status == 'canceled' ? 'cancelled' : status;
+      default:
+        return 'unknown';
+    }
+  }
+
+  static String? _subagentEventTypeForStatus(String status) {
+    switch (status) {
+      case 'completed':
+        return 'subagent.completed';
+      case 'failed':
+        return 'subagent.failed';
+      case 'cancelled':
+      case 'interrupted':
+        return 'subagent.interrupted';
+      case 'unknown':
+        return 'subagent.unknown';
+      case 'closed':
+        return 'subagent.closed';
+      default:
+        return null;
+    }
+  }
+
+  static String? _lastAgentPathPart(String? path) {
+    final value = path?.trim();
+    if (value == null || value.isEmpty) return null;
+    final parts = value.split('/')..removeWhere((part) => part.isEmpty);
+    return parts.isEmpty ? null : parts.last;
   }
 
   Project? projectFor(String? projectId) {
@@ -744,8 +849,21 @@ class AppController extends ChangeNotifier {
   }
 
   void revokeLocalAccess(String taskId) {
-    _localAccess.remove(taskId);
+    _clearLocalAccess(taskId);
     _notify();
+  }
+
+  void _clearLocalAccess(String taskId) {
+    final store = _localAccess[taskId];
+    if (store != null) {
+      // Child tasks intentionally share the parent's store while they are
+      // running. Clear the shared object before dropping map entries so a
+      // child holding the old reference cannot keep using a revoked grant.
+      store.clear();
+      _localAccess.removeWhere((_, value) => identical(value, store));
+    } else {
+      _localAccess.remove(taskId);
+    }
   }
 
   Future<bool> _isProtectedLocalPath(String candidate) async {
@@ -1286,6 +1404,11 @@ class AppController extends ChangeNotifier {
       rootTaskId: current.rootTaskId,
       agentDepth: current.agentDepth,
       agentName: current.agentName,
+      agentPath: current.agentPath,
+      agentRole: current.agentRole,
+      agentForkTurns: current.agentForkTurns,
+      agentMailbox: current.agentMailbox,
+      agentSummary: current.agentSummary,
       status: current.status,
       createdAt: current.createdAt,
       updatedAt: now,
@@ -1305,7 +1428,7 @@ class AppController extends ChangeNotifier {
 
     if (contextChanged) {
       if (current.projectId != normalizedProjectId) {
-        _localAccess.remove(taskId);
+        _clearLocalAccess(taskId);
       }
       _invalidateTaskContextUsage(taskId);
       final historyProjection = providerTransportChanged
@@ -1906,13 +2029,39 @@ class AppController extends ChangeNotifier {
     Project? taskProject;
     ProviderProfile? provider;
     AiChatClient? client;
-    var remoteOperationStarted = false;
     var serviceStarted = false;
     var userMessageRecorded = false;
     var durableAttachments = const <AiAttachment>[];
     final workMode = task.effectiveWorkMode;
     final useLocalTools = workModeUsesLocal(workMode);
     final useServerTools = workModeUsesServer(workMode);
+
+    Future<void> handleAiRetry(AiRetryEvent retry) async {
+      _publishTaskProgress(
+        task.id,
+        retry.unbounded
+            ? '网络重连 ${retry.attempt}'
+            : '网络重连 ${retry.attempt}/${retry.maxRetries}',
+      );
+      if (_taskRunIds[task.id] == turnId) {
+        // A failed stream may already have delivered partial text. It is not
+        // part of durable history, so remove it before the same turn is
+        // requested again and avoid showing duplicated text.
+        _clearStreamingAssistantText(task.id);
+        _notify();
+      }
+      try {
+        await appendTurnEvent('assistant.retrying', {
+          'attempt': retry.attempt,
+          'max_retries': retry.maxRetries,
+          'delay_ms': retry.delay.inMilliseconds,
+          'unbounded': retry.unbounded,
+        });
+      } catch (_) {
+        // Retry telemetry is best effort; a database hiccup must not cancel a
+        // request that can still recover.
+      }
+    }
 
     Future<void> appendUserMessage(
       List<AiAttachment> messageAttachments,
@@ -1938,6 +2087,7 @@ class AppController extends ChangeNotifier {
       if (current.status != 'waiting') {
         await updateTaskStatus(task.id, 'waiting', turnId: turnId);
       }
+      _updateSubagentNodeStatus(task, 'waiting');
     }
 
     Future<void> restoreTaskAfterWaiting() async {
@@ -1946,6 +2096,7 @@ class AppController extends ChangeNotifier {
       if (current.status == 'waiting') {
         await updateTaskStatus(task.id, 'running', turnId: turnId);
       }
+      _updateSubagentNodeStatus(task, 'running');
     }
 
     Future<bool> Function(AgentTool, Map<String, Object?>)? waitingConfirm;
@@ -2323,8 +2474,19 @@ class AppController extends ChangeNotifier {
             );
         if (existingSubagentTree != null) {
           tree.updateSettings(_subagentSettings);
+          _refreshSubagentTreeHandlers(
+            tree,
+            rootTask,
+            confirm: confirm,
+            confirmForTask: confirmForTask,
+            onFirstHostKey: onFirstHostKey,
+            onFirstHostKeyForTask: onFirstHostKeyForTask,
+            onUserInfoRequest: onUserInfoRequest,
+            onUserInfoRequestForTask: onUserInfoRequestForTask,
+          );
         }
         _subagentTrees[rootTaskId] = tree;
+        tree.setActiveTurn(task.id, turnId);
         tools.addAll(tree.toolsFor(task.id));
         if (tools.isEmpty) {
           throw StateError('Agent 没有可用的项目或服务器工具');
@@ -2361,6 +2523,11 @@ class AppController extends ChangeNotifier {
                 contextWindowMode: activeProvider.contextWindowMode,
               )
             : null,
+        // Match Codex's separate unbounded connection-retry loop. This only
+        // applies before a response is received; stream retries retain the
+        // finite policy and explicit provider errors remain terminal.
+        retryPolicy: const AiRetryPolicy(unboundedConnectionRetries: true),
+        onRetry: handleAiRetry,
       );
       final truncationPolicy =
           modelMetadata?.resolvedTruncationPolicy ??
@@ -2390,9 +2557,6 @@ class AppController extends ChangeNotifier {
             ? (tool, arguments) =>
                   _reviewTool(task, tool, arguments, cancellation: cancellation)
             : null,
-        onRemoteOperationStarted: (tool) {
-          if (tool.writesRemoteState) remoteOperationStarted = true;
-        },
         onEvent: (type, payload) {
           if (type == 'assistant.delta') {
             final delta = payload['text'];
@@ -2410,7 +2574,6 @@ class AppController extends ChangeNotifier {
               type == 'task.failed' ||
               type == 'task.cancelled' ||
               type == 'task.unknown';
-          if (type == 'task.unknown') remoteOperationStarted = true;
           eventQueue = eventQueue.then((_) async {
             var eventPayload = payload;
             final eventCallId = eventPayload['call_id'] ?? eventPayload['id'];
@@ -2507,15 +2670,9 @@ class AppController extends ChangeNotifier {
           // unavailable; the normal failure event below remains best effort.
         }
       }
-      final status = remoteOperationStarted
-          ? 'unknown'
-          : cancellation.isCancelled
-          ? 'cancelled'
-          : 'failed';
+      final status = cancellation.isCancelled ? 'cancelled' : 'failed';
       final eventType = status == 'cancelled'
           ? 'task.cancelled'
-          : status == 'unknown'
-          ? 'task.unknown'
           : 'task.failed';
       await appendTurnEvent(eventType, {'error': '$error'});
       await updateTaskStatus(task.id, status, turnId: turnId);
@@ -2573,8 +2730,67 @@ class AppController extends ChangeNotifier {
     _taskRuns.remove(taskId);
     _taskRunIds.remove(taskId);
     _runningTasks.remove(taskId);
+    final task = taskForId(taskId);
+    if (task != null) {
+      _subagentTrees[task.rootTaskId ?? task.id]?.clearActiveTurn(
+        taskId,
+        turnId,
+      );
+    }
     _taskProgressLabels.remove(taskId);
     _notify();
+  }
+
+  void _updateSubagentNodeStatus(Task task, String status) {
+    final rootTaskId = task.rootTaskId;
+    if (rootTaskId == null) return;
+    final tree = _subagentTrees[rootTaskId];
+    if (tree == null) return;
+    tree.updateNodeStatus(task.id, status);
+    final node = tree.nodeFor(task.id);
+    if (node != null) unawaited(_persistSubagentNode(node));
+  }
+
+  Future<void> _persistSubagentNode(SubagentNode node) {
+    final previous = _subagentStateTails[node.id] ?? Future<void>.value();
+    late Future<void> current;
+    current = previous.then<void>((_) async {
+      try {
+        final task = _tasks.firstWhere((item) => item.id == node.id);
+        final persistedStatus = switch (node.status) {
+          'pending' => 'queued',
+          'canceled' => 'cancelled',
+          _ => node.status,
+        };
+        final updated = task.copyWith(
+          status: persistedStatus,
+          agentPath: node.agentPath,
+          agentRole: node.role,
+          agentForkTurns: node.forkTurns,
+          agentMailbox: List.unmodifiable(node.mailbox),
+          agentSummary: node.summary.trim().isEmpty ? null : node.summary,
+          updatedAt: DateTime.now().toUtc(),
+        );
+        await _database.saveTask(updated);
+        _tasks = [
+          for (final item in _tasks) item.id == updated.id ? updated : item,
+        ];
+        _notify();
+      } catch (_) {
+        // Node snapshots are a recovery aid. A transient database failure must
+        // not abort the active child turn or its durable event stream.
+      }
+    });
+    final settled = current.then<void>((_) {});
+    _subagentStateTails[node.id] = settled;
+    unawaited(
+      settled.then<void>((_) {
+        if (identical(_subagentStateTails[node.id], settled)) {
+          _subagentStateTails.remove(node.id);
+        }
+      }),
+    );
+    return current;
   }
 
   void _disposeStreamingAssistantState(String taskId) {
@@ -2599,6 +2815,7 @@ class AppController extends ChangeNotifier {
     SshUserInfoHandler? onUserInfoRequest,
     FutureOr<List<String>?> Function(Task task, SshUserInfoRequest request)?
     onUserInfoRequestForTask,
+    Iterable<SubagentNode> restoredNodes = const [],
   }) {
     final childConfirmForTask =
         confirmForTask ??
@@ -2635,7 +2852,70 @@ class AppController extends ChangeNotifier {
       },
       onEvent: _recordSubagentEvent,
       interrupt: _interruptSubagentTask,
+      discard: (node) => _discardSubagentTask(node.id),
+      onStateChanged: _persistSubagentNode,
+      restoredNodes: restoredNodes,
     );
+  }
+
+  void _refreshSubagentTreeHandlers(
+    SubagentTree tree,
+    Task rootTask, {
+    Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
+    confirm,
+    Future<bool> Function(
+      Task task,
+      AgentTool tool,
+      Map<String, Object?> arguments,
+    )?
+    confirmForTask,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FutureOr<bool> Function(Task task, SshHostKey key)? onFirstHostKeyForTask,
+    SshUserInfoHandler? onUserInfoRequest,
+    FutureOr<List<String>?> Function(Task task, SshUserInfoRequest request)?
+    onUserInfoRequestForTask,
+  }) {
+    final childConfirmForTask =
+        confirmForTask ??
+        (confirm == null
+            ? null
+            : (Task task, AgentTool tool, Map<String, Object?> arguments) =>
+                  confirm(tool, arguments));
+    final childHostKeyForTask =
+        onFirstHostKeyForTask ??
+        (onFirstHostKey == null
+            ? null
+            : (Task task, SshHostKey key) => onFirstHostKey(key));
+    final childUserInfoForTask =
+        onUserInfoRequestForTask ??
+        (onUserInfoRequest == null
+            ? null
+            : (Task task, SshUserInfoRequest request) =>
+                  onUserInfoRequest(request));
+    tree.updateHandlers(
+      prepare: (node, {required followup}) =>
+          _prepareSubagentTask(rootTask, node, followup: followup),
+      start: (node, prompt) {
+        final child = _tasks.firstWhere((task) => task.id == node.id);
+        return runTask(
+          child,
+          prompt: prompt,
+          confirmForTask: childConfirmForTask,
+          onFirstHostKeyForTask: childHostKeyForTask,
+          onUserInfoRequestForTask: childUserInfoForTask,
+        );
+      },
+      onEvent: _recordSubagentEvent,
+      interrupt: _interruptSubagentTask,
+      discard: (node) => _discardSubagentTask(node.id),
+      onStateChanged: _persistSubagentNode,
+    );
+  }
+
+  Future<void> _discardSubagentTask(String taskId) async {
+    final task = taskForId(taskId);
+    if (task == null) return;
+    await deleteTask(task);
   }
 
   Future<void> _interruptSubagentTask(SubagentNode node) async {
@@ -2718,38 +2998,320 @@ class AppController extends ChangeNotifier {
       rootTaskId: node.rootTaskId,
       agentDepth: node.depth,
       agentName: node.taskName,
+      agentPath: node.agentPath,
+      agentRole: node.role,
+      agentForkTurns: node.forkTurns,
+      agentMailbox: node.mailbox,
       status: 'queued',
       createdAt: now,
       updatedAt: now,
     );
-    await _database.saveTask(child);
-    final parentAccess = _localAccess[parent.id];
-    if (parentAccess != null) _localAccess[child.id] = parentAccess;
-    _tasks = [child, ..._tasks];
-    _events = {..._events, child.id: const <TaskEvent>[]};
-    _loadedTaskEvents.add(child.id);
-    _hasEarlierTaskEvents[child.id] = false;
-    _notify();
+    var childPersisted = false;
+    try {
+      await _database.saveTask(child);
+      childPersisted = true;
+      final forkedEvents = followup
+          ? null
+          : await _forkSubagentHistory(parent, child, node);
+      final parentAccess = _localAccess[parent.id];
+      if (parentAccess != null) _localAccess[child.id] = parentAccess;
+      _tasks = [child, ..._tasks];
+      _events = {
+        ..._events,
+        child.id: List.unmodifiable(forkedEvents ?? const <TaskEvent>[]),
+      };
+      _loadedTaskEvents.add(child.id);
+      _hasEarlierTaskEvents[child.id] = false;
+      _notify();
+    } catch (_) {
+      // The tree removes its reservation when preparation fails. Roll back the
+      // persisted task too; otherwise a failed fork can leave an invisible
+      // child (and copied attachments) that is only found after a restart.
+      if (childPersisted) {
+        try {
+          await _database.deleteTask(child.id);
+        } catch (_) {}
+        try {
+          await _attachmentStore.deleteTask(child.id);
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
+  Future<List<TaskEvent>> _forkSubagentHistory(
+    Task parent,
+    Task child,
+    SubagentNode node,
+  ) async {
+    final marker = TaskEvent(
+      eventId: _newId('event'),
+      taskId: child.id,
+      sequence: 1,
+      type: 'subagent.fork',
+      timestamp: DateTime.now().toUtc(),
+      payload: {
+        'source_task_id': parent.id,
+        'fork_turns': node.forkTurns,
+        'parent_turn_id': node.parentTurnId,
+      },
+    );
+    if (node.forkTurns == 'none') {
+      await _database.saveEvent(marker);
+      return [marker];
+    }
+
+    final parentProvider = _providerForTask(parent);
+    final sourceEvents = await _database.loadModelEvents(
+      parent.id,
+      useCompactionBoundary: parentProvider.wireApi == 'responses',
+    );
+    final availableEvents = [
+      for (final event in sourceEvents)
+        if (node.parentTurnId == null ||
+            event.payload['turn_id'] != node.parentTurnId)
+          event,
+    ].where(_isForkableSubagentEvent).toList(growable: false);
+    final selectedEvents = _selectSubagentForkEvents(
+      availableEvents,
+      node.forkTurns,
+    );
+    final safeEvents = _filterSubagentForkToolPairs(selectedEvents);
+    final attachmentIds = <String, String>{};
+    final records = <AttachmentRecord>[];
+    final copied = <TaskEvent>[marker];
+    try {
+      for (var index = 0; index < safeEvents.length; index++) {
+        final source = safeEvents[index];
+        final payload = await _copyForkPayload(
+          source.payload,
+          parentTaskId: parent.id,
+          childTaskId: child.id,
+          attachmentIds: attachmentIds,
+          records: records,
+        );
+        copied.add(
+          TaskEvent(
+            eventId: _newId('event'),
+            taskId: child.id,
+            sequence: index + 2,
+            type: source.type,
+            timestamp: source.timestamp,
+            payload: payload,
+          ),
+        );
+      }
+      await _database.saveAttachments(records);
+      for (final event in copied.skip(1)) {
+        await _database.saveEvent(event);
+      }
+      return copied;
+    } catch (_) {
+      for (final record in records) {
+        try {
+          await _attachmentStore.delete(record);
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
+  static List<TaskEvent> _selectSubagentForkEvents(
+    List<TaskEvent> events,
+    String forkTurns,
+  ) {
+    if (forkTurns == 'all') return events;
+    final count = int.tryParse(forkTurns);
+    if (count == null || count <= 0) return const [];
+    final userPositions = <int>[];
+    for (var index = 0; index < events.length; index++) {
+      if (events[index].type == 'user.message') userPositions.add(index);
+    }
+    if (userPositions.isEmpty) return const [];
+    final start = userPositions.length > count
+        ? userPositions[userPositions.length - count]
+        : userPositions.first;
+    return events.sublist(start);
+  }
+
+  static bool _isForkableSubagentEvent(TaskEvent event) {
+    return const {
+      'user.message',
+      'assistant.completed',
+      'tool.started',
+      'tool.completed',
+      'tool.failed',
+      'context.compacted',
+      'task.context_changed',
+    }.contains(event.type);
+  }
+
+  static List<TaskEvent> _filterSubagentForkToolPairs(List<TaskEvent> events) {
+    final completedToolIds = <String>{};
+    for (final event in events) {
+      if (event.type != 'tool.completed' && event.type != 'tool.failed') {
+        continue;
+      }
+      final id = _forkToolEventId(event);
+      if (id != null) completedToolIds.add(id);
+    }
+    final validAssistantToolIds = <String>{};
+    final keepAssistant = <TaskEvent>{};
+    for (final event in events) {
+      if (event.type != 'assistant.completed') continue;
+      final calls = _readToolCalls(
+        event.payload['tool_calls'],
+        requireCallId: false,
+      );
+      if (calls.isEmpty) {
+        keepAssistant.add(event);
+        continue;
+      }
+      final valid = calls.every(
+        (call) => call.id.isNotEmpty && completedToolIds.contains(call.id),
+      );
+      if (!valid) continue;
+      keepAssistant.add(event);
+      validAssistantToolIds.addAll(calls.map((call) => call.id));
+    }
+
+    final filtered = <TaskEvent>[];
+    for (final event in events) {
+      if (event.type == 'assistant.completed') {
+        if (keepAssistant.contains(event)) filtered.add(event);
+      } else if (event.type == 'tool.started' ||
+          event.type == 'tool.completed' ||
+          event.type == 'tool.failed') {
+        final id = _forkToolEventId(event);
+        if (id != null && validAssistantToolIds.contains(id)) {
+          filtered.add(event);
+        }
+      } else {
+        filtered.add(event);
+      }
+    }
+    return filtered;
+  }
+
+  static String? _forkToolEventId(TaskEvent event) {
+    for (final key in ['id', 'call_id']) {
+      final value = event.payload[key];
+      if (value is String && value.isNotEmpty) return value;
+    }
+    return null;
+  }
+
+  Future<Map<String, Object?>> _copyForkPayload(
+    Map<String, Object?> payload, {
+    required String parentTaskId,
+    required String childTaskId,
+    required Map<String, String> attachmentIds,
+    required List<AttachmentRecord> records,
+  }) async {
+    final copied = await _copyForkValue(
+      payload,
+      parentTaskId: parentTaskId,
+      childTaskId: childTaskId,
+      attachmentIds: attachmentIds,
+      records: records,
+    );
+    return Map<String, Object?>.from(copied as Map);
+  }
+
+  Future<Object?> _copyForkValue(
+    Object? value, {
+    required String parentTaskId,
+    required String childTaskId,
+    required Map<String, String> attachmentIds,
+    required List<AttachmentRecord> records,
+  }) async {
+    if (value is Map) {
+      final result = <String, Object?>{};
+      for (final entry in value.entries) {
+        final key = entry.key as String;
+        if (key == 'attachment_id' && entry.value is String) {
+          final sourceId = entry.value as String;
+          var copiedId = attachmentIds[sourceId];
+          if (copiedId == null) {
+            final source = await _database.loadAttachment(sourceId);
+            if (source == null || source.taskId != parentTaskId) {
+              throw StateError('子代理 fork 引用的附件不可用');
+            }
+            final bytes = await _attachmentStore.read(source);
+            final stored = await _writeAttachmentBytes(
+              childTaskId,
+              name: source.name,
+              mimeType: source.mimeType,
+              bytes: bytes,
+            );
+            records.add(stored.$1);
+            copiedId = stored.$1.id;
+            attachmentIds[sourceId] = copiedId;
+          }
+          result[key] = copiedId;
+        } else {
+          result[key] = await _copyForkValue(
+            entry.value,
+            parentTaskId: parentTaskId,
+            childTaskId: childTaskId,
+            attachmentIds: attachmentIds,
+            records: records,
+          );
+        }
+      }
+      return result;
+    }
+    if (value is Iterable) {
+      return [
+        for (final item in value)
+          await _copyForkValue(
+            item,
+            parentTaskId: parentTaskId,
+            childTaskId: childTaskId,
+            attachmentIds: attachmentIds,
+            records: records,
+          ),
+      ];
+    }
+    return value;
   }
 
   Future<void> _recordSubagentEvent(
     SubagentNode node,
     String type,
     Map<String, Object?> payload,
-  ) {
-    final parentTurnId = _taskRunIds[node.rootTaskId];
-    return appendTaskEvent(
+  ) async {
+    final eventPayload = <String, Object?>{
+      'agent_id': node.id,
+      'agent_path': node.agentPath,
+      'parent_task_id': node.parentId,
+      'root_task_id': node.rootTaskId,
+      'agent_depth': node.depth,
+      ...?(node.parentTurnId == null
+          ? null
+          : {'parent_turn_id': node.parentTurnId}),
+      ...payload,
+    };
+    await appendTaskEvent(
       taskId: node.rootTaskId,
       type: type,
-      payload: {
-        'agent_id': node.id,
-        'parent_task_id': node.parentId,
-        'root_task_id': node.rootTaskId,
-        'agent_depth': node.depth,
-        ...?(parentTurnId == null ? null : {'parent_turn_id': parentTurnId}),
-        ...payload,
-      },
-    ).then<void>((_) {});
+      payload: eventPayload,
+    );
+    // Codex delivers a child completion to its immediate parent thread. Keep
+    // the root copy for the conversation UI, and mirror nested activity into
+    // the parent task so a nested agent can see its child's short notification
+    // on its next turn without importing the child's transcript.
+    if (node.parentId != node.rootTaskId) {
+      try {
+        await appendTaskEvent(
+          taskId: node.parentId,
+          type: type,
+          payload: eventPayload,
+        );
+      } catch (_) {
+        // The parent child may be deleted while the root event is still valid.
+      }
+    }
   }
 
   List<AgentTool> _serializeRemoteWrites(
@@ -4994,6 +5556,18 @@ class AppController extends ChangeNotifier {
         'copy a binary file.',
       );
     }
+    if (task.isSubagent) {
+      final role = task.agentRole?.trim().isNotEmpty == true
+          ? task.agentRole!.trim()
+          : defaultSubagentRole;
+      final roleInstruction = _subagentSettings.instructionForRole(role);
+      scopes.add(
+        'You are subagent "${task.agentPath ?? task.agentName ?? task.id}" '
+        'with role "$role". Stay within the assigned subtask, coordinate '
+        'through the parent agent, and return a concise result. '
+        '$roleInstruction',
+      );
+    }
     final subagentScope = task.mode == 'agent'
         ? 'You may delegate independent, bounded work with spawn_agent. Each '
               'child has its own history and the same selected work scope. '
@@ -5079,6 +5653,7 @@ class AppController extends ChangeNotifier {
     final messages = <AiMessage>[
       AiMessage(role: 'system', content: systemPrompt),
     ];
+    final subagentNotifications = <AiMessage>[];
     int? assistantIndex;
     // Responses uses the output item id for the assistant call and a
     // separate call_id for the function_call_output.
@@ -5170,6 +5745,7 @@ class AppController extends ChangeNotifier {
               compactedProviderId != providerId) {
             continue;
           }
+          subagentNotifications.clear();
           if (event.payload['compaction_mode'] == 'local') {
             messages.addAll(
               _readCodexRetainedUserMessages(
@@ -5291,6 +5867,7 @@ class AppController extends ChangeNotifier {
           );
         case 'task.context_changed':
           if (_isHistoryBoundary(event.payload)) {
+            subagentNotifications.clear();
             messages
               ..clear()
               ..add(AiMessage(role: 'system', content: systemPrompt))
@@ -5322,11 +5899,22 @@ class AppController extends ChangeNotifier {
             assistantIndex = null;
             activeToolCallIds = <String, String>{};
           }
+        case 'subagent.completed':
+        case 'subagent.failed':
+        case 'subagent.unknown':
+        case 'subagent.interrupted':
+          final notification = _subagentNotification(event);
+          if (notification != null) subagentNotifications.add(notification);
       }
     }
     if (useResponsesCompaction) {
       _dropHistoryBeforeLatestCompaction(messages);
     }
+    // Completion notifications are model-visible control messages, not user
+    // transcript. Append them after the historical tool-call/result sequence
+    // so a late child event can never split an assistant tool call from its
+    // matching tool result.
+    messages.addAll(subagentNotifications);
     for (var index = 0; index < messages.length; index++) {
       final message = messages[index];
       if (message.attachments.isEmpty) continue;
@@ -5364,6 +5952,30 @@ class AppController extends ChangeNotifier {
       );
     }
     toolCallIds.clear();
+  }
+
+  static AiMessage? _subagentNotification(TaskEvent event) {
+    final path = event.payload['agent_path'];
+    if (path is! String || path.trim().isEmpty) return null;
+    final status = switch (event.type) {
+      'subagent.completed' => 'completed',
+      'subagent.failed' => 'failed',
+      'subagent.unknown' => 'unknown',
+      'subagent.interrupted' => 'interrupted',
+      _ => null,
+    };
+    if (status == null) return null;
+    final summary = event.payload['summary'];
+    final payload = <String, Object?>{
+      'agent_path': path,
+      'status': status,
+      if (summary is String && summary.trim().isNotEmpty)
+        'summary': summary.trim(),
+    };
+    return AiMessage.user(
+      '<subagent_notification>\n${jsonEncode(payload)}\n'
+      '</subagent_notification>',
+    );
   }
 
   static List<AiToolCall> _readToolCalls(
@@ -6426,6 +7038,8 @@ bool _isTerminalTaskStatus(String status) => const {
   'failed',
   'cancelled',
   'canceled',
+  'interrupted',
+  'closed',
   'unknown',
 }.contains(status);
 

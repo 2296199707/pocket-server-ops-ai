@@ -68,4 +68,33 @@ void main() {
       }
     },
   );
+
+  test(
+    'clearing a shared grant store revokes access held by child tools',
+    () async {
+      final root = Directory(
+        '/www/mobile-agent-local-revoke-'
+        '${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await root.create(recursive: true);
+      await File('${root.path}/inside.txt').writeAsString('inside');
+      try {
+        final parentAccess = LocalFileAccessStore();
+        await parentAccess.add(root.path, canWrite: true);
+        // Child agents intentionally receive the same store instance.
+        final childAccess = parentAccess;
+        expect(await childAccess.hasAccess('${root.path}/inside.txt'), isTrue);
+
+        parentAccess.clear();
+
+        expect(await childAccess.hasAccess('${root.path}/inside.txt'), isFalse);
+        expect(
+          await childAccess.hasAccess('${root.path}/inside.txt', write: true),
+          isFalse,
+        );
+      } finally {
+        await root.delete(recursive: true);
+      }
+    },
+  );
 }

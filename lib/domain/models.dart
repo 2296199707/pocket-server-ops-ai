@@ -16,6 +16,12 @@ const defaultSubagentMaxConcurrentThreads = 4;
 const defaultSubagentMaxRecursionDepth = 1;
 const subagentMaxConcurrentThreadsRange = (1, 16);
 const subagentMaxRecursionDepthRange = (1, 8);
+const defaultSubagentRole = 'default';
+const defaultSubagentRoleInstructions = <String, String>{
+  'default': '完成分配的子任务，并用简短结果通知父代理。',
+  'worker': '优先直接实施分配的修改，完成后验证结果并报告变更。',
+  'explorer': '优先检查现状、收集证据并给出结论，不要擅自修改目标。',
+};
 
 const wireApiOptions = <String>['responses', 'chat-completions'];
 
@@ -57,6 +63,7 @@ class SubagentSettings {
     this.reasoningEffort = defaultReasoningEffort,
     this.maxConcurrentThreads = defaultSubagentMaxConcurrentThreads,
     this.maxRecursionDepth = defaultSubagentMaxRecursionDepth,
+    this.roleInstructions = defaultSubagentRoleInstructions,
   });
 
   final String providerId;
@@ -64,6 +71,7 @@ class SubagentSettings {
   final String reasoningEffort;
   final int maxConcurrentThreads;
   final int maxRecursionDepth;
+  final Map<String, String> roleInstructions;
 
   factory SubagentSettings.fromJson(String? value) {
     if (value == null || value.trim().isEmpty) return const SubagentSettings();
@@ -101,6 +109,19 @@ class SubagentSettings {
     final model = map['model'];
     final providerId = map['providerId'] ?? map['provider_id'];
     final effort = map['reasoningEffort'] ?? map['reasoning_effort'];
+    final rawRoles = map['roleInstructions'] ?? map['role_instructions'];
+    final roles = <String, String>{
+      ...defaultSubagentRoleInstructions,
+    };
+    if (rawRoles is Map) {
+      for (final entry in rawRoles.entries) {
+        if (entry.key is! String || entry.value is! String) continue;
+        final role = (entry.key as String).trim();
+        final instruction = (entry.value as String).trim();
+        if (role.isEmpty || instruction.isEmpty) continue;
+        roles[role] = instruction;
+      }
+    }
     return SubagentSettings(
       providerId: providerId is String ? providerId.trim() : '',
       model: model is String ? model.trim() : '',
@@ -109,6 +130,7 @@ class SubagentSettings {
           : defaultReasoningEffort,
       maxConcurrentThreads: threads,
       maxRecursionDepth: depth,
+      roleInstructions: Map.unmodifiable(roles),
     );
   }
 
@@ -118,6 +140,7 @@ class SubagentSettings {
     'reasoningEffort': reasoningEffort,
     'maxConcurrentThreads': maxConcurrentThreads,
     'maxRecursionDepth': maxRecursionDepth,
+    'roleInstructions': roleInstructions,
   };
 
   String toJson() => jsonEncode(toMap());
@@ -128,6 +151,7 @@ class SubagentSettings {
     String? reasoningEffort,
     int? maxConcurrentThreads,
     int? maxRecursionDepth,
+    Map<String, String>? roleInstructions,
   }) {
     return SubagentSettings(
       providerId: providerId ?? this.providerId,
@@ -135,7 +159,19 @@ class SubagentSettings {
       reasoningEffort: reasoningEffort ?? this.reasoningEffort,
       maxConcurrentThreads: maxConcurrentThreads ?? this.maxConcurrentThreads,
       maxRecursionDepth: maxRecursionDepth ?? this.maxRecursionDepth,
+      roleInstructions: roleInstructions ?? this.roleInstructions,
     );
+  }
+
+  String instructionForRole(String? role) {
+    final key = role?.trim();
+    if (key == null || key.isEmpty) {
+      return roleInstructions[defaultSubagentRole] ?? '';
+    }
+    return roleInstructions[key] ??
+        defaultSubagentRoleInstructions[key] ??
+        roleInstructions[defaultSubagentRole] ??
+        '';
   }
 }
 
@@ -1085,6 +1121,11 @@ class Task {
   final String? rootTaskId;
   final int agentDepth;
   final String? agentName;
+  final String? agentPath;
+  final String? agentRole;
+  final String? agentForkTurns;
+  final List<String> agentMailbox;
+  final String? agentSummary;
   final String status;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -1109,6 +1150,11 @@ class Task {
     this.rootTaskId,
     this.agentDepth = 0,
     this.agentName,
+    this.agentPath,
+    this.agentRole,
+    this.agentForkTurns,
+    this.agentMailbox = const [],
+    this.agentSummary,
     required this.status,
     required this.createdAt,
     required this.updatedAt,
@@ -1146,6 +1192,11 @@ class Task {
       rootTaskId: map['rootTaskId'] as String?,
       agentDepth: _readOptionalInt(map['agentDepth']) ?? 0,
       agentName: map['agentName'] as String?,
+      agentPath: map['agentPath'] as String?,
+      agentRole: map['agentRole'] as String?,
+      agentForkTurns: map['agentForkTurns'] as String?,
+      agentMailbox: _readTaskMailbox(map['agentMailbox']),
+      agentSummary: map['agentSummary'] as String?,
       status: map['status'] as String,
       createdAt: _readTime(map['createdAt']),
       updatedAt: _readTime(map['updatedAt']),
@@ -1172,6 +1223,11 @@ class Task {
     'rootTaskId': rootTaskId,
     'agentDepth': agentDepth,
     'agentName': agentName,
+    'agentPath': agentPath,
+    'agentRole': agentRole,
+    'agentForkTurns': agentForkTurns,
+    'agentMailbox': jsonEncode(agentMailbox),
+    'agentSummary': agentSummary,
     'status': status,
     'createdAt': _writeTime(createdAt),
     'updatedAt': _writeTime(updatedAt),
@@ -1196,6 +1252,11 @@ class Task {
     Object? rootTaskId = _taskFieldUnset,
     int? agentDepth,
     Object? agentName = _taskFieldUnset,
+    Object? agentPath = _taskFieldUnset,
+    Object? agentRole = _taskFieldUnset,
+    Object? agentForkTurns = _taskFieldUnset,
+    Object? agentMailbox = _taskFieldUnset,
+    Object? agentSummary = _taskFieldUnset,
     String? status,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -1237,6 +1298,21 @@ class Task {
       agentName: identical(agentName, _taskFieldUnset)
           ? this.agentName
           : agentName as String?,
+      agentPath: identical(agentPath, _taskFieldUnset)
+          ? this.agentPath
+          : agentPath as String?,
+      agentRole: identical(agentRole, _taskFieldUnset)
+          ? this.agentRole
+          : agentRole as String?,
+      agentForkTurns: identical(agentForkTurns, _taskFieldUnset)
+          ? this.agentForkTurns
+          : agentForkTurns as String?,
+      agentMailbox: identical(agentMailbox, _taskFieldUnset)
+          ? this.agentMailbox
+          : _readTaskMailbox(agentMailbox),
+      agentSummary: identical(agentSummary, _taskFieldUnset)
+          ? this.agentSummary
+          : agentSummary as String?,
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -1277,6 +1353,22 @@ List<String> _readTaskServerIds(Object? value, {String? fallback}) {
     ids.insert(0, active);
   }
   return List.unmodifiable(ids);
+}
+
+List<String> _readTaskMailbox(Object? value) {
+  Object? decoded = value;
+  if (value is String && value.trim().isNotEmpty) {
+    try {
+      decoded = jsonDecode(value);
+    } on FormatException {
+      decoded = const [];
+    }
+  }
+  if (decoded is! Iterable) return const [];
+  return List.unmodifiable([
+    for (final item in decoded)
+      if (item is String && item.trim().isNotEmpty) item.trim(),
+  ]);
 }
 
 class TaskEvent {

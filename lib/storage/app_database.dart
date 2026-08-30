@@ -109,7 +109,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 15,
+      version: 16,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -169,6 +169,11 @@ class AppDatabase {
             rootTaskId TEXT,
             agentDepth INTEGER NOT NULL DEFAULT 0,
             agentName TEXT,
+            agentPath TEXT,
+            agentRole TEXT,
+            agentForkTurns TEXT,
+            agentMailbox TEXT NOT NULL DEFAULT '[]',
+            agentSummary TEXT,
             status TEXT NOT NULL,
             createdAt TEXT NOT NULL,
             updatedAt TEXT NOT NULL
@@ -345,6 +350,15 @@ class AppDatabase {
           await db.execute(
             "ALTER TABLE providers ADD COLUMN customReasoningEfforts TEXT NOT NULL DEFAULT '[]'",
           );
+        }
+        if (oldVersion < 16) {
+          await db.execute('ALTER TABLE tasks ADD COLUMN agentPath TEXT');
+          await db.execute('ALTER TABLE tasks ADD COLUMN agentRole TEXT');
+          await db.execute('ALTER TABLE tasks ADD COLUMN agentForkTurns TEXT');
+          await db.execute(
+            "ALTER TABLE tasks ADD COLUMN agentMailbox TEXT NOT NULL DEFAULT '[]'",
+          );
+          await db.execute('ALTER TABLE tasks ADD COLUMN agentSummary TEXT');
         }
       },
     );

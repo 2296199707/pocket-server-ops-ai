@@ -17,17 +17,18 @@
 
 ### 2.1 Codex 源码
 
-- 仓库：`/www/mobile-agent-tooling/openai-codex-research.oZMeyF`；
-- 固定 commit：`f5420174dafba153913a3e697f89002c338dfd7e`；
-- 读取方式：优先使用 `git -C /www/mobile-agent-tooling/openai-codex-research.oZMeyF show <commit>:<path>`；
+- 当前主快照：`/www/mobile-agent-tooling/openai-codex-source`；
+- 当前子代理专项固定 commit：`6478a751fde8884b2fdc76486fe23175a8e795d4`；历史条目保留各自
+  已封存的 commit，不因更新主快照而重做调查；
+- 读取方式：优先使用 `git -C /www/mobile-agent-tooling/openai-codex-source show <commit>:<path>`；
 - 目录状态：当前 checkout 是稀疏/删除状态，不能直接把工作区文件是否存在当作源码证据；先用 `git ls-tree` 核对路径；
 - 后续不重复进行无边界搜索。只有当前条目缺少证据时，才读取该条目列出的源码和测试。
 
 ### 2.2 当前应用
 
 - canonical app：`/www/server-agent/workspace/apps/mobile-agent-v1`；
-- 当前 beta：`1.0.3-beta.20`；
-- 当前基线 commit：`526b80c`（版本提交：`923b5d5`）；
+- 当前 beta：`1.0.4-beta.4`；
+- 当前基线 commit：`440c975`；
 - legacy app `/www/server-agent/workspace/apps/mobile` 不属于审查和修改范围；
 - 构建、缓存和 APK 继续使用 `/www` 数据盘路径。
 
@@ -69,7 +70,7 @@
 | --- | --- | --- | --- | --- |
 | PRO-01 | `codex-rs/codex-api/src/common.rs`；`codex-rs/codex-api/src/endpoint/compact.rs`；`codex-rs/core/src/client.rs` | `lib/agent/openai_compatible_client.dart` | 普通 Responses 与独立 compact 请求的字段边界、历史、工具和 reasoning | 需修复已处理（普通请求按阈值发送 `context_management`；手动兼容路径关闭该字段；不做协议回退） |
 | PRO-02 | `codex-rs/codex-api/src/sse/responses.rs`；相关 Responses 测试 | `lib/agent/openai_compatible_client.dart` | `response.completed`、incomplete、failed、cancelled、断流和 multiline SSE 的终止与保存顺序 | 已等价（已覆盖关键事件） |
-| PRO-03 | `codex-rs/core/src/responses_retry.rs`；`codex-rs/core/src/responses_retry_tests.rs` | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | 仅模型请求按明确可重试错误退避；取消立即打断；不得重放远程工具副作用 | 架构差异（客户端不自动重试，工具副作用不会重放） |
+| PRO-03 | `codex-rs/core/src/responses_retry.rs`；`codex-rs/core/src/responses_retry_tests.rs` | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | 仅模型请求按明确可重试错误退避；取消立即打断；不得重放远程工具副作用 | 需修复已处理（模型请求有限重试，工具副作用不会重放） |
 | PRO-04 | `codex-rs/core/src/context_manager/normalize.rs`；Responses 请求源码 | `lib/agent/openai_compatible_client.dart`、`lib/agent/chat_completions_client.dart` | Responses 与 Chat Completions 是显式协议；不支持时直接报错，不自动 fallback；跨协议历史转换不伪造 opaque 状态 | 已等价 |
 | PRO-05 | 模型元数据和 endpoint 相关测试 | `lib/providers/provider_connection_tester.dart`、`lib/domain/models.dart` | `/models` 只有真实能力字段时才更新元数据；普通模型 ID 响应不能覆盖用户已配置限制 | 需修复已处理（ID-only Codex 模型 fallback） |
 | PRO-06 | SSE/请求错误处理源码和测试 | `lib/agent/openai_compatible_client.dart`、`lib/agent/ai_client_factory.dart` | API key 不进入错误事件；HTTP 错误、解析错误、超时和取消对用户/任务状态区分明确 | 已等价（关键路径有定向测试） |
@@ -1230,9 +1231,10 @@ thread。每个子代理有自己的线程、轮次、历史、状态和工具�
 只接收结构化的状态/邮箱通知或完成摘要，不把子代理的完整中间输出自动塞回父线程上下文。
 
 本版 Mobile Agent 没有复制完整的 Codex app-server，而是把上述控制面能力压缩成适合手机端
-的首版子集：每个子代理使用独立隐藏 `Task` 和独立 `AgentLoop` 历史；每个根对话维护一棵
-内存控制树；父子之间通过协作工具传递短状态和摘要。完整 fork 历史、独立 graph store、
-驻留淘汰和重启后拓扑恢复仍明确不属于本版。
+的轻量子集：每个子代理使用独立隐藏 `Task` 和独立 `AgentLoop` 历史；每个根对话维护一棵
+内存控制树；父子之间通过协作工具传递短状态和摘要。当前已实现按 turn 的 fork、角色配置、
+启动时的轻量拓扑/邮箱快照恢复和终态运行期引用释放；完整 graph store 和 Codex LRU residency
+淘汰仍明确不属于本版。
 
 #### V1 和 V2 工具面
 
@@ -1331,12 +1333,12 @@ Codex 将“线程历史”和“父子拓扑”分开保存：
 | --- | --- | --- |
 | 独立 agent thread 和控制树 | `lib/agent/subagents.dart:SubagentTree` 为每个根任务维护子节点；`AppController._createSubagentTree()` 为每个子节点启动独立 `runTask()` 和独立事件历史 | 首版已实现；未复制 Codex 的 app-server thread manager |
 | 根树共享控制器、父子关系和限制 | `SubagentNode` 保存 `parentId`、`rootTaskId`、`depth`；树内统一计算并发和递归限制，子节点只能通过所属树解析 | 首版已实现；没有 Codex canonical agent path |
-| 独立持久化历史 | `AppController._prepareSubagentTask()` 创建隐藏 `Task`；子任务的 `TaskEvent` 独立保存，父任务只记录子代理状态/摘要事件 | 首版已实现；创建参数固定为不 fork 父历史 |
+| 独立持久化历史 | `AppController._prepareSubagentTask()` 创建隐藏 `Task`；子任务的 `TaskEvent` 独立保存，父任务只记录子代理状态/摘要事件；`_forkSubagentHistory()` 按 `fork_turns` 复制合法历史和附件 | 首版已实现；不复制完整运行期对象 |
 | 数据库拓扑 | `lib/domain/models.dart:Task` 和 `lib/storage/app_database.dart:onUpgrade` 增加 `isSubagent`、父/根 ID、深度和名称字段 | 部分实现；没有独立 spawn-edge、mailbox 或 residency 表 |
 | 协作通信 | `SubagentTree` 提供 `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`list_agents`、`interrupt_agent`；等待结果只返回状态和最多 1200 字摘要 | 首版已实现；mailbox 只在内存中存在 |
-| 配置继承与凭据边界 | `_prepareSubagentTask()` 从父任务快照继承 provider、模型、推理、工作模式、项目、服务器、目录和审批回调；只保存 provider 引用，不复制 API key、密码或私钥 | 首版已实现；子任务配置变更和独立角色文件暂不支持 |
+| 配置继承与凭据边界 | `_prepareSubagentTask()` 从父任务快照继承 provider、模型、推理、工作模式、项目、服务器、目录和审批回调；`roleInstructions` 注入角色提示；只保存 provider 引用，不复制 API key、密码或私钥 | 首版已实现；角色配置采用轻量 settings 快照 |
 | 取消、关闭和迟到操作 | `SubagentTree.close()` 先阻止新操作，再取消子树并等待创建/启动操作；`deleteTask()` 和 `dispose()` 使用关闭流程 | 首版已实现；这是对 Codex 关闭/中断语义的轻量实现 |
-| 重启、驻留和 UI 活动 | 子任务默认隐藏于侧栏，根任务事件显示子代理活动；数据库启动时会恢复任务状态，但不会重建内存控制树或自动重放子任务 | 明确缺口；不作为本版自动恢复能力 |
+| 重启、驻留和 UI 活动 | 子任务默认隐藏于侧栏，根任务事件显示子代理活动；`_restoreSubagentTrees()` 按任务字段重建控制树、角色、fork 配置和 mailbox，运行中状态恢复为 `unknown`，不自动重放；终态观察器释放运行期 Future 引用 | 轻量恢复已实现；没有独立 graph store/LRU residency |
 
 #### 本版实现边界（已编码）
 
@@ -1348,7 +1350,9 @@ Codex 将“线程历史”和“父子拓扑”分开保存：
 4. 不同根对话可以并发；同一根树共享并发计数。创建过程、父任务停止、删除和应用退出都有取消收敛路径，pending 创建不会在树关闭后启动。
 5. 任务字段迁移同时写入新数据库和 `oldVersion < 13` 的 SQLite 升级路径；旧任务默认作为普通任务读取，子任务由 `isSubagent` 区分。
 
-以下能力留给后续明确需求，不在本版伪装成已支持：完整/最近 N 轮历史 fork、持久化 graph store、mailbox 恢复、residency eviction、子任务独立角色配置、重启后子树自动恢复。
+以下能力留给后续明确需求，不在本版伪装成已支持：独立持久化 graph store、完整 Codex LRU
+residency eviction、跨进程 mailbox 投递，以及 app-server 级别的 thread RPC。当前 fork、角色、
+任务字段恢复和运行期引用释放是 Mobile 的轻量等价实现。
 
 #### 最小验证矩阵和封存规则
 
@@ -1366,13 +1370,13 @@ Codex 将“线程历史”和“父子拓扑”分开保存：
 - 实现文件：`lib/agent/subagents.dart`、`lib/domain/models.dart`、
   `lib/storage/app_database.dart`、`lib/app_controller.dart`、`lib/ui/chat_page.dart`、
   `lib/ui/home_shell.dart`。
-- 定向测试：`test/subagents_test.dart` 6 项通过；`test/app_controller_test.dart` 和
-  `test/ui/chat_page_test.dart` 合计 61 项通过，共 67 项。
+- 首版落地时的历史记录：`test/subagents_test.dart` 6 项通过；
+  `test/app_controller_test.dart` 和 `test/ui/chat_page_test.dart` 合计 61 项通过，共 67 项。
 - 静态分析：`/www/mobile-agent-tooling/flutter/bin/flutter analyze --no-pub` 通过。
 - 关闭竞态修复：`SubagentTree.close()` 会先阻止新创建和 follow-up，再等待 pending
   创建/启动操作与活动轮次收敛；父任务删除和 AppController `dispose()` 都调用该入口。
-- 仍未实现的部分以本节“本版实现边界”为准，后续不得把 Codex 的 graph store、fork
-  历史或重启恢复误报为当前能力。
+- 仍未实现的部分以本节“本版实现边界”为准，后续不得把 Mobile 的轻量恢复和 fork 误报为
+  Codex 的 graph store 或完整 residency。
 
 Codex 对照测试入口固定为：
 
@@ -1388,9 +1392,9 @@ Codex 对照测试入口固定为：
 - `codex-rs/agent-graph-store/src/local.rs`：直接子节点、状态过滤和 breadth-first 后代
   查询测试。
 
-专项状态：`SA-01` 控制树、`SA-03` 协作工具和基础状态已实现；`SA-02` 仅实现独立历史，
-没有历史 fork；`SA-04` 仅实现任务字段持久化，没有独立拓扑表；`SA-05` 已实现运行期状态
-和关闭收敛，但没有驻留淘汰或重启后子树恢复。只有 Codex 固定 commit 变化、上述 Mobile
+专项状态：`SA-01` 控制树、`SA-02` 独立历史与按 turn 的历史 fork、`SA-03` 协作工具和基础状态
+已实现；`SA-04` 使用任务字段持久化父子关系，没有独立拓扑表；`SA-05` 已实现轻量重启恢复、
+运行期状态和关闭收敛，但没有 Codex 的驻留淘汰。只有 Codex 固定 commit 变化、上述 Mobile
 对应实现开始改动、相关定向测试失败，或协议明确改变时，才重新读取同一组源码；普通 UI
 改动、模型名称变化和“想再确认一次”不触发重复调查。
 
@@ -1642,3 +1646,241 @@ beta.3；后续只有模型目录协议、上述实现或对应测试改变时�
 - 发布结果：已推送到远端 `beta` 分支并创建 GitHub Pre-release
   `v1.0.4-beta.4`，上传上述 APK。
   Release 地址：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.4`。
+
+### 2026-08-29：子代理功能现状复核（以当前源码为准）
+
+本条是对前面“首版子代理控制面”记录的及时补充。复核基线为 Mobile Agent
+`440c975`（版本 `1.0.4-beta.4`），没有修改业务代码、没有发布版本。后续处理子代理问题时，
+先从本节和下面的 ID 进入，不重复搜索已经封存的 Codex 源码。
+
+#### 本次查询的固定证据
+
+- 官方 OpenAI 文档：
+  `https://developers.openai.com/codex/agent-configuration/subagents.md`。
+- Codex 本地只读快照：`/www/mobile-agent-tooling/openai-codex-source`；固定 commit：
+  `6478a751fde8884b2fdc76486fe23175a8e795d4`。
+- 创建/配置：`codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs`、
+  `multi_agents_common.rs`；通信和 follow-up：
+  `codex-rs/core/src/tools/handlers/multi_agents_v2/message_tool.rs`；等待和中断：
+  `multi_agents_v2/wait.rs`、`interrupt_agent.rs`、`multi_agents_spec.rs`。
+- 控制面：`codex-rs/core/src/agent/control.rs`、`agent/control/spawn.rs`、
+  `agent/control/residency.rs`、`agent/registry.rs`；父子拓扑：
+  `codex-rs/agent-graph-store/src/store.rs`、`local.rs` 和
+  `codex-rs/state/migrations/0021_thread_spawn_edges.sql`。
+- 当前 Mobile 对应实现：`lib/agent/subagents.dart:SubagentTree`、
+  `lib/app_controller.dart:2587-2753,654-705`、
+  `lib/ui/chat_page.dart:4237-4322,5160-5175`、
+  `lib/local/local_file_access.dart:16-141`。
+
+#### 当前已确认可用的范围
+
+- 每个根对话有独立的内存控制树；子代理有独立 `Task`、AgentLoop、事件历史、供应商、
+  模型、推理强度、工作模式和工具范围。
+- `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`list_agents`、
+  `interrupt_agent` 已暴露；并发数、递归深度、同一父节点下的任务名冲突和关闭期间的
+  pending 创建已有基础处理。
+- 子任务及父/根 ID、深度、名称会写入 `tasks` 表；父任务删除和 App dispose 有运行期
+  取消收敛。API Key、密码和私钥不会复制到子任务设置或事件。
+
+这些能力说明“基础委派可以工作”，不等于已经具备 Codex 的完整子代理生命周期和恢复能力。
+
+#### 当前缺口和优先级
+
+| ID | 优先级 | 当前证据和实际结果 | Codex 期望不变量 | 结论 |
+| --- | --- | --- | --- | --- |
+| SA-06 | P1 | `subagent.*` 事件现在由 `_SubagentEventTile` 展示运行、完成、失败和中断状态；完成/失败项可点击“查看”进入隐藏子任务历史 | 活动、完成和失败应有可读状态；独立 transcript 仍可从父子关系访问 | 已修复（本轮） |
+| SA-07 | P0 | 运行中 follow-up 进入 mailbox；`_observe()` 在终态事件完成后重新检查 mailbox 并自动启动后续 turn，失败也保留待处理消息 | follow-up 在当前 turn 结束后应被触发或明确报告仍待处理，不能静默丢在邮箱 | 已修复（本轮） |
+| SA-08 | P1 | `_localHistory()` 将有界的 `<subagent_notification>` 追加到父代理下一次请求；嵌套子代理事件同时镜像到直接父任务 | 完成 watcher/mailbox 应把有界的完成信号交给父控制面；不能把完整子 transcript 自动塞入父上下文 | 已修复（本轮） |
+| SA-09 | P1 | 启动时 `_restoreSubagentTrees()` 按 `Task` 字段重建控制树、角色、fork 配置和 mailbox；运行中/排队中的子任务只恢复为 `unknown`，不会自动重放工具 | 拓扑和历史分开持久化；重启后可恢复/读取 thread，但不得自动重放有副作用工具 | 已修复（轻量恢复） |
+| SA-10 | P1 | `toolsFor()` 已暴露 `close_agent`、`resume_agent`；关闭保留历史，恢复后由 `followup_task` 启动新轮次 | close、interrupt、resume、completed 是不同状态；关闭后可按协议恢复已关闭 thread | 已修复（轻量实现） |
+| SA-11 | P1 | `SubagentNode.agentPath` 使用受限任务名构成稳定路径；目标先按当前代理可见范围解析 id/path，歧义名称会报错 | 目标解析应使用稳定的 canonical path/id，不能依赖遍历顺序 | 已修复（本轮） |
+| SA-12 | P1 | spawn 时把父节点当前 `activeTurnId` 保存到 `parentTurnId`；迟到事件写入该快照，不再依赖根任务当前运行句柄 | spawn 时保存来源 turn，迟到事件仍归属于创建它的父 turn | 已修复（本轮） |
+| SA-13 | P1 | `_target()` 拒绝 caller 自身路径/id，也拒绝 root；子代理只能中断自己可见的后代 | self-target interrupt 必须拒绝，避免代理把自己的生命周期误当成外部目标 | 已修复（本轮） |
+| SA-14 | P0 | 父子任务共享 `LocalFileAccessStore`；撤销或切换项目时清空对象并移除所有同实例映射，运行中的子代理立即失去授权 | 权限撤销应立即影响所有继承该授权的子代理，不能因引用仍存活而绕过用户撤销 | 已修复（本轮） |
+| SA-15 | P1 | 等待审批、主机密钥或账号输入时同步更新 `SubagentNode.status` 为 `waiting`，恢复后回到 `running` | 对外状态应由统一状态机推导，waiting/approval 不得显示为 running | 已修复（本轮） |
+| SA-16 | P1 | 当前 `wait_agent` 等待目标进入终态；Codex V2 wait 还可等待 mailbox、新输入/steer 或超时，二者语义没有明确区分 | 选择并声明一种版本语义，超时、消息和完成信号不能混用 | 架构差异，需明确 |
+| SA-17 | P2 | `spawn_agent` 支持 `fork_turns=none/all/最近 N 轮`；`_forkSubagentHistory()` 按 turn 选取、过滤不完整工具对并复制附件 | fork 是按 turn 的独立历史快照，不是按字符拼接父上下文 | 已修复（轻量实现） |
+| SA-18 | P2 | `SubagentNode.role` 和 `SubagentSettings.roleInstructions` 支持 default/worker/explorer 及自定义角色提示；创建时写入独立任务快照 | default/worker/explorer 或自定义角色应能有独立指令和配置 | 已修复（轻量实现） |
+| SA-19 | P1 | 终态观察器会清空 `run`/`observation` 等运行期引用，历史和任务记录仍保留；没有 Codex 独立 graph store 或完整 LRU residency eviction | residency eviction 只卸载空闲 agent，保留 rollout/拓扑；关闭和历史删除要区分 | 部分实现（明确架构差异） |
+| SA-20 | P2 | `SubagentSettings` 存在全局 `settings`，不是每个根对话独立配置；树创建时取快照，运行中修改不会立即作用于已有树 | 配置作用域和继承时点应明确，不能让不同会话意外串设置 | 产品语义待确认 |
+| SA-21 | P1 | `_createSubagentTree()` 提供 discard 回调；spawn 后续准备/启动失败会删除已持久化的隐藏子任务并移除内存节点 | reservation/创建失败应回滚拓扑、任务记录和占用 | 已修复（本轮） |
+
+#### 2026-08-29：本轮修复记录
+
+- SA-06/08：根任务事件增加子代理状态卡片和进入子任务历史的入口；父代理下一轮只接收
+  有界的 `<subagent_notification>`，不会导入子代理完整 transcript。
+- SA-07：运行中 follow-up 先进入 mailbox，当前 turn 完成后自动消费；自动启动失败会留下
+  失败状态和待处理消息。完成事件写入期间若显式 follow-up 已经抢先启动，观察器会重新检查
+  mailbox，避免重复或空 prompt turn。
+- SA-11/12/13：引入 `/root/...` canonical agent path，目标解析限制在 caller 的后代范围，
+  拒绝自操作和根代理操作；spawn 时保存 `parentTurnId`，迟到事件仍带原始来源 turn。
+- SA-14：父子任务共享同一 `LocalFileAccessStore` 时，撤销授权或切换项目会清空共享对象并
+  删除所有同实例映射，子代理持有的旧引用立即失效。
+- SA-15：审批、主机密钥和账号输入前后同步 `SubagentNode.status`，模型读取的状态与 UI
+  等待状态一致。
+- SA-21：子任务已写入数据库后，准备/启动失败会通过 discard 回调删除隐藏任务，避免孤儿记录。
+- 关闭收敛：`close()` 等待所有运行观察和终态事件 sink 完成；关闭期间尚未启动的 follow-up
+  返回 `starts_turn: false` 和 `interrupted: true`。消息事件也纳入关闭操作集合。
+- 容量等待：已接受的自动 follow-up 在并发已满时等待任一兄弟释放槽位，不阻塞到所有兄弟结束；
+  关闭流程仍等待全部活动和操作。
+
+#### 处理顺序（最小修改）
+
+1. SA-06/07/08/09/10/11/12/13/14/15/17/18/21 已完成并由定向测试覆盖；本轮没有复制
+   完整 Codex 控制面，也没有改变工具审批策略。
+2. SA-16/19/20 仍是架构差异或产品配置语义；完整 graph store、跨进程 mailbox 和 LRU
+   residency 不在本版顺手实现。
+
+#### 本轮验证与封存规则
+
+- 本轮继续使用同一固定 Codex commit `6478a751fde8884b2fdc76486fe23175a8e795d4`；没有
+  重复扫描已封存源码，只针对当前实现和审查发现的竞态做修复。
+- `test/subagents_test.dart`：15 项通过，覆盖运行中/失败后的 follow-up、容量等待、重复
+  follow-up 竞态、关闭等待终态事件、关闭前未启动 follow-up、路径隔离、自中断拒绝和失败清理。
+- `test/local_file_access_test.dart`：3 项通过，覆盖 canonical scope、符号链接边界和共享
+  授权清空。
+- `flutter analyze --no-pub`：通过。
+- 该次子代理修复的历史聚焦矩阵当时通过共 109 项：
+  `test/subagents_test.dart`、`test/local_file_access_test.dart`、
+  `test/app_controller_test.dart`、`test/agent_loop_test.dart` 和
+  `test/ui/chat_page_test.dart`。
+- 已查过的 Codex 文件和 commit 以上述 ID 封存；除非该 ID 对应的 Mobile 实现、固定 Codex
+  commit 或定向测试发生变化，不重复查询同一源码。
+- 后续若要处理 SA-16/19/20，先在本节追加新的证据和范围，再修改代码；不把
+  “基础委派已修复”写成“子代理功能完整”。
+
+### 2026-08-29：Codex 风格模型流断线重连
+
+#### 源码和官方资料证据
+
+- 官方 OpenAI 文档 `https://developers.openai.com/codex/agent-configuration/subagents.md`
+  只说明子代理线程、独立历史和界面状态；它没有规定移动端 HTTP 重试参数，因此重连的
+  行为以固定 Codex commit 的实现和测试为准。
+- `codex-rs/core/src/responses_retry.rs` 将采样流重试放在同一个 turn 内：普通 retry budget
+  使用指数退避，连接恢复分支单独维护 connection retry 计数，并向 UI 发送
+  `Reconnecting...`。`codex-rs/core/src/session/turn.rs:1362-1460` 在每次重试前从同一会话
+  历史重新构建 prompt；首次输入只保留一次，后续不把半截流当成新的 assistant 消息。
+- `codex-rs/core/tests/suite/stream_no_completed.rs` 验证没有 `response.completed` 的提前断流
+  会再次请求，并验证网络暂时不可达后恢复仍完成原 turn。`retry_after.rs` 还区分了普通
+  HTTP/传输重试与明确的服务过载：过载响应不能被当作普通网络波动无限重放。
+- Codex 的工具调用在完整的模型输出交回 turn 后才进入工具执行路径。Mobile 保持同一边界：
+  流断开时没有把未完成的 assistant/tool call 加入历史，所以重试不会重放已经开始的
+  服务器命令；已有远程工具失败仍按“先确认服务器状态”交回 Agent。
+
+#### Mobile 实现
+
+- `AiResponseStreamDisconnected` 只表示传输在终端事件前结束，与供应商明确返回的
+  `incomplete` 分开，避免把模型输出长度不足误判为网络故障。
+- `AiRetryPolicy` 默认将有限重试拆成 Codex 的两套预算：普通 HTTP 请求最多重试 4 次，已建立
+  响应流后的 SSE 断流最多重试 5 次；退避从 200ms、400ms 开始，单次上限 5s。可重试范围
+  只有建连/读取的 `http.ClientException`、超时、提前断流和普通 5xx；用户取消、401/4xx、
+  响应解析/协议错误、响应过大不会重试。流内明确的 `overload` 会保持终态；HTTP 5xx 仍按
+  请求层短暂失败重试，429/`rate_limit` 也会重试，但明确的 quota/usage limit 不重试。
+- 首次响应头超时会归类为 `AiConnectionFailure`；正式 Agent 任务开启独立连接重试，首次等待
+  5s、之后指数退避至 60s。基础 `AiRetryPolicy` 默认不启用无限连接等待，压缩等特殊调用可
+  明确关闭该分支。
+- Responses 和 Chat Completions 都重新创建 `http.Request` 发送同一份 JSON body；每次重试仍
+  使用相同的 messages/tools/model，不切换协议、不切换供应商。Responses 的 compaction 请求
+  也经过同一传输重试路径。
+- `AppController` 在重试前记录轻量 `assistant.retrying` 事件、更新前台任务进度为
+  `网络重连 n/2`，并清理未持久化的流式半截文本。下一次成功响应才写入一个完整
+  `assistant.completed`，历史不会出现重复半句。
+
+#### 定向测试和结论
+
+- `test/openai_compatible_client_test.dart` 覆盖 Responses 提前断流后成功重试、响应头超时进入
+  独立连接预算、取消重连立即退出、重试耗尽时仍返回断流错误和显式服务过载只请求一次；
+  `test/chat_completions_client_test.dart` 覆盖 Chat Completions 提前断流和响应头超时重连。
+- `flutter analyze --no-pub` 通过；该轮上述两个客户端测试以及 `test/agent_loop_test.dart`
+  共 61 项通过。当前实现由“客户端不自动重试”的架构差异改为“模型传输有限重试”，
+  工具调用仍不自动重放。后续只有 retry 分类、请求历史重建、取消或 SSE 终止语义改变时才
+  重新审查 PRO-03，不重复扫描已封存的 Codex 源码。
+
+### 2026-08-29：断线重连和 fork 回滚补充修复
+
+本次继续使用已封存的 Codex commit
+`6478a751fde8884b2fdc76486fe23175a8e795d4`，没有重复扫描源码。
+
+- Codex 的 `ConnectionFailed` 与响应流已经建立后的 `ResponseStreamFailed` 是两条不同
+  路径。Mobile 现在把 Responses/Chat Completions 首次等待响应头的 `TimeoutException`
+  归类为 `AiConnectionFailure`，和 Socket/HTTP 建连失败一样进入独立连接重试；响应建立后
+  的流断开仍使用有限的同一 turn 重试。
+- 正式 `AppController` Agent 任务使用 `unboundedConnectionRetries: true`：尚未收到响应头的
+  连接重试从 5 秒开始，指数退避并封顶 60 秒；其余普通 HTTP 请求默认最多 4 次，已建立流的
+  断流默认最多 5 次。取消信号同时作用于请求和退避等待，取消后不会发起下一次请求。
+  Responses/Chat Completions 都重新创建相同 body 的 request，不切换供应商或协议。
+- fork 创建的事务边界已补齐：子任务写入数据库后，历史/附件复制任一步失败都会删除子任务
+  记录、事件和附件目录；树的 reservation 随后再移除，不留下重启后才出现的隐藏孤儿任务。
+- 流式半截文本仍只保存在本次尝试的临时缓冲中；只有终态响应才发布 delta 和写入
+  `assistant.completed`，因此连接重试不会重复显示文本，也不会重放远程工具副作用。
+
+本次定向验证：
+
+- `test/openai_compatible_client_test.dart`：Responses 响应头超时重连、取消连接重试、流断开
+  重试和错误分类；
+- `test/chat_completions_client_test.dart`：Chat Completions 响应头超时重连；
+- `test/app_controller_test.dart`：fork 附件复制失败后任务、数据库附件和附件目录均回滚；
+- `flutter analyze --no-pub` 和上述测试均需通过后，才进入下一次发布准备；这些验证已在本轮
+  收尾时再次执行。
+
+当前边界：这是按 Codex retry 分类实现的移动端 HTTP 重连，不等同于完整 Codex app-server
+的 transport fallback 或持久化线程管理；远程命令和文件写入仍不自动重放。
+
+### 2026-08-29：当前 Goal 收尾验证
+
+- 固定对照仍为 Codex commit `6478a751fde8884b2fdc76486fe23175a8e795d4`；本轮没有重复扫描已
+  封存源码，只修正审查记录中把已完成的 fork/重启恢复误写成“未实现”的旧结论。
+- 聚焦矩阵重新执行并通过，共 146 项：
+  `test/openai_compatible_client_test.dart`、`test/chat_completions_client_test.dart`、
+  `test/app_controller_test.dart`、`test/agent_loop_test.dart`、`test/subagents_test.dart`、
+  `test/ui/chat_page_test.dart`。
+- 断线重连覆盖响应头失败、SSE 提前断流、取消、Chat Completions、重试分类和半截输出不重复；
+  子代理覆盖 fork、重启拓扑恢复、follow-up、关闭收敛、失败回滚和运行期引用释放。
+- `flutter analyze --no-pub` 与 `git diff --check` 通过；本 Goal 不包含构建、提交或发布。
+
+### 2026-08-30：Codex 独立请求/流重试预算修正
+
+本条只记录本轮已完成的重试实现修正，后续不再因为同一问题重复查询源码。
+
+#### 固定证据
+
+- 官方 OpenAI 文档：`https://developers.openai.com/codex/config-file/config-reference.md`，明确记录
+  `model_providers.<id>.request_max_retries` 默认 4、`stream_max_retries` 默认 5。
+- 固定 Codex commit：`6478a751fde8884b2fdc76486fe23175a8e795d4`。
+- `codex-rs/model-provider-info/src/lib.rs:28-29,357-369` 定义并解析两个默认值；其中
+  `request_max_retries` 是 HTTP 请求失败重试次数，`stream_max_retries` 是已建立流断开后的
+  重连次数。
+- `codex-rs/core/src/responses_retry.rs` 另维护尚未建立响应的 `ConnectionFailed` 连接重试，
+  正式采样在启用 `UnboundedConnectionRetries` 时使用 5 秒起步、指数退避、60 秒封顶的持续重连。
+
+#### Mobile 修正
+
+- `AiRetryPolicy` 默认值改为 `requestMaxRetries: 4`、`streamMaxRetries: 5`；旧的
+  `maxRetries` 参数仍作为显式兼容覆盖，同时覆盖两套有限预算。
+- Responses 和 Chat Completions 各自维护 request/stream 两个计数器：HTTP 状态错误和响应前
+  连接错误使用 request 预算；响应头已返回后的 SSE 提前结束、读取异常或读取超时使用 stream
+  预算。正式 Agent 的 `unboundedConnectionRetries` 连接路径保持独立，不会被有限预算吞掉。
+- 流式尝试的增量文本继续只写入临时缓冲，终态成功后才发布；重试不会重复半截回复，也不
+  会重放已经交给工具层的远程副作用。明确的协议、认证、上下文、配额和 overload 错误仍直接
+  返回，不把它们伪装成网络重连。
+
+#### 定向验证
+
+- `test/openai_compatible_client_test.dart` 验证默认 4/5、Responses HTTP 使用 request 预算、
+  SSE 使用 stream 预算、旧 `maxRetries` 覆盖仍有效和独立连接重试。
+- `test/chat_completions_client_test.dart` 验证 Chat Completions HTTP 使用 request 预算、SSE
+  使用 stream 预算和响应头超时的连接分类。
+
+### 2026-08-30：Codex 断线重连修正 Beta 1.0.4-beta.5 发布记录
+
+- 版本：`1.0.4-beta.5+42`；发布内容为普通 HTTP 请求 4 次、已建立 SSE 断流 5 次的独立
+  重试预算，以及连接前失败、读取超时和半截输出处理修正。
+- 验证：`flutter analyze --no-pub`、`git diff --check` 和本轮聚焦测试通过；四个关联测试文件
+  共 123 项通过。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.5-release.apk`；
+  大小 `79259271` bytes；SHA-256
+  `b2875833695ad42cfc78f344a42a3345506cbfc9b834656c1f970c4be376e1bd`。
+  APK manifest 已核对为 `versionName=1.0.4-beta.5`、`versionCode=42`。
+- 发布目标：远端 `beta` 分支和 GitHub Pre-release
+  `v1.0.4-beta.5`；Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.5`。
