@@ -1884,3 +1884,18 @@ beta.3；后续只有模型目录协议、上述实现或对应测试改变时�
 - 发布目标：远端 `beta` 分支和 GitHub Pre-release
   `v1.0.4-beta.5`；Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.5`。
+
+### 2026-08-30：子代理详情抽屉与手机本地 MCP Beta 1.0.4-beta.6 发布记录
+
+- 功能与版本提交：`955db8f`；版本：`1.0.4-beta.6+43`。
+- 子代理调用事件继续单独保留，卡片支持展开/收缩；“查看”进入半屏详情抽屉，支持返回、拖动关闭、Android 返回键和运行中刷新，不替换主对话；详情包含完整历史、工具调用和命令结果。
+- 终端结果展开后直接显示内容；增加手机本地 MCP Streamable HTTP 客户端、服务配置、工具定义缓存和 Agent 工具接入，MCP 令牌仅存放在安全存储。
+- 验证：`flutter analyze --no-pub`、`test/ui/chat_page_test.dart`、`test/mcp_client_test.dart` 和
+  `git diff --check` 通过。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.4-beta.6-release.apk`；大小
+  `79472595` bytes；SHA-256
+  `bad66ce59b27f517bb76851b5cfada0de7ebfda24ce2bdd3611b71cf942b16af`。
+  APK manifest 已核对为 `versionName=1.0.4-beta.6`、`versionCode=43`。
+- 发布目标：远端 `beta` 分支和 GitHub Pre-release
+  `v1.0.4-beta.6`；Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.6`。
