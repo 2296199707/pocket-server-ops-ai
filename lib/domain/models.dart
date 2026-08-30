@@ -1668,6 +1668,20 @@ class ServerNetwork {
   );
 }
 
+class ServerCpuCore {
+  const ServerCpuCore({required this.name, required this.usage});
+
+  final String name;
+  final int usage;
+
+  Map<String, Object?> toMap() => {'name': name, 'usage': usage};
+
+  factory ServerCpuCore.fromMap(Map<String, Object?> map) => ServerCpuCore(
+    name: map['name'] as String? ?? 'cpu?',
+    usage: _readOptionalInt(map['usage']) ?? 0,
+  );
+}
+
 class ServerDashboard {
   const ServerDashboard({
     required this.hostname,
@@ -1680,6 +1694,7 @@ class ServerDashboard {
     required this.disk,
     required this.statusScriptInstalled,
     this.cpuUsage,
+    this.cpuCores = const [],
     this.disks = const [],
     this.network,
     this.processCount,
@@ -1692,6 +1707,7 @@ class ServerDashboard {
   final String load;
   final String cpu;
   final int? cpuUsage;
+  final List<ServerCpuCore> cpuCores;
   final String memory;
   final String disk;
   final bool statusScriptInstalled;
@@ -1703,6 +1719,7 @@ class ServerDashboard {
     final decoded = jsonDecode(value);
     if (decoded is! Map) throw const FormatException('服务器状态缓存格式无效');
     final map = Map<String, Object?>.from(decoded);
+    final rawCpuCores = map['cpuCores'];
     final rawDisks = map['disks'];
     final rawNetwork = map['network'];
     return ServerDashboard(
@@ -1713,6 +1730,13 @@ class ServerDashboard {
       load: map['load'] as String? ?? 'unknown',
       cpu: map['cpu'] as String? ?? 'unknown',
       cpuUsage: _readOptionalInt(map['cpuUsage']),
+      cpuCores: rawCpuCores is List
+          ? [
+              for (final item in rawCpuCores)
+                if (item is Map)
+                  ServerCpuCore.fromMap(Map<String, Object?>.from(item)),
+            ]
+          : const [],
       memory: map['memory'] as String? ?? 'unknown',
       disk: map['disk'] as String? ?? 'unknown',
       statusScriptInstalled: map['statusScriptInstalled'] == true,
@@ -1738,6 +1762,7 @@ class ServerDashboard {
     'load': load,
     'cpu': cpu,
     'cpuUsage': cpuUsage,
+    'cpuCores': [for (final item in cpuCores) item.toMap()],
     'memory': memory,
     'disk': disk,
     'statusScriptInstalled': statusScriptInstalled,

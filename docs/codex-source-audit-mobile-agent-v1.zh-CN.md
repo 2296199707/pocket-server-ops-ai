@@ -1899,3 +1899,107 @@ beta.3；后续只有模型目录协议、上述实现或对应测试改变时�
 - 发布目标：远端 `beta` 分支和 GitHub Pre-release
   `v1.0.4-beta.6`；Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.4-beta.6`。
+
+### 2026-08-30：OpenCode Go 第三方官方网关分流核验（纠正前一轮判断）
+
+本条根据用户补充的实际情况修正：第三方供应商销售的是 OpenCode Go 套餐，第三方不一定
+自己提供模型，也不等于脱离 OpenCode 官方网关。Sub2API 可以把它作为 OpenAI API Key
+账号接入官方 OpenCode Zen/Go 上游；“第三方供应商”描述的是账号/网关入口，不是模型的
+实际归属。
+
+#### Sub2API 的配置模型
+
+- Sub2API 没有独立的 `opencode-go` 平台类型。常见配置是 `platform=openai`、
+  `type=apikey`，账号凭证中的 `base_url` 指向上游地址（例如官方
+  `https://opencode.ai/zen/go/v1`），另有 API Key、模型映射等普通 OpenAI 账号字段。
+- `accounts.extra.openai_responses_mode` 是账号级协议覆盖：`auto`、
+  `force_responses`、`force_chat_completions`。
+- `accounts.extra.openai_responses_supported` 是能力探测结果：`true` 表示 Responses，
+  `false` 表示 Chat Completions，缺失表示尚未探测。手动 `openai_responses_mode` 的覆盖
+  优先级高于探测结果。
+- `accounts.extra.openai_passthrough` 只控制透传/少量兼容处理，不能覆盖上面的协议分流。
+  它是在协议选择之后执行的，不能据此推断最终一定访问 `/responses`。
+
+对应源码：
+
+- `sub2api-research/backend/internal/pkg/openai_compat/upstream_capability.go:38-115`
+- `sub2api-research/backend/internal/service/account.go:1998-2014`
+- `sub2api-research/backend/internal/service/openai_gateway_forward.go:1266-1283`
+
+#### 真实分流
+
+对于 APP 发送给 Sub2API 的 `/v1/responses` 请求，可能是以下任一条链路：
+
+```text
+APP Responses
+  → Sub2API 账号 force_responses / supported=true / 未探测
+  → 官方 OpenCode Go /zen/go/v1/responses
+```
+
+```text
+APP Responses
+  → Sub2API 账号 force_chat_completions / supported=false
+  → Responses 转 Chat Completions
+  → 官方 OpenCode Go /zen/go/v1/chat/completions
+  → 响应转换回 Responses
+```
+
+第二条链路仍然可以使用 OpenCode 官方网关，只是协议路径不同，不应解释成“第三方改用了
+另一个模型”。`forwardResponsesViaRawChatCompletions` 明确实现了这条转换路径；普通
+Responses 路径则按 `base_url` 组装上游 `/responses`。
+
+对应源码：
+
+- `sub2api-research/backend/internal/service/openai_gateway_responses_chat_fallback.go:20-126`
+- `sub2api-research/backend/internal/service/openai_gateway_cc_pipeline.go:152-164`
+- `sub2api-research/backend/internal/service/openai_gateway_forward.go:1285-1316`
+- `sub2api-research/backend/internal/service/openai_gateway_request_body.go:39-55`
+
+#### 为什么“官方 OpenCode 直连 500、第三方 OpenCode Go 正常”不能只看供应商名称
+
+两边即使最终都到 OpenCode 官方网关，仍可能不同：
+
+1. 第三方 Sub2API 可能将 APP 的 Responses 请求转成官方 Chat Completions，而直连 APP
+   发送的是官方 Responses；
+2. Sub2API 可能做了模型映射、请求字段清洗、工具格式转换、推理字段归一化和请求头处理；
+3. 两边发给官方网关的模型 ID、请求体、`originator`/User-Agent、工具定义和历史消息结构
+   可能不同；
+4. 直连官方地址和第三方入口使用的 API Key/套餐账号、路由会话或额度状态也可能不同。
+
+因此目前不能仅凭“第三方正常、官方直连 500”判断是模型不支持，也不能仅凭 APP 选择了
+Responses 判断 Sub2API 的实际出站协议。
+
+#### 当前定位结论与下一步证据
+
+- Sub2API 的 Responses 能力探测会向 `{base_url}/v1/responses` 发送带
+  `tool_choice=required` 的函数工具探测。404/405 或明确无工具调用可能写入 `false`；
+  网络失败或无法判定时保留 unknown。对 OpenCode Go 账号若探测结果不适合该模型，可能
+  造成后续请求自动走 Chat Completions，因此应以账号实际保存的覆盖模式和探测标记为准，
+  不能只看页面显示的协议。
+- 要解释具体的 `glm-5.3` 500，必须对比脱敏后的实际请求记录：`base_url`、
+  `openai_responses_mode`、`openai_responses_supported`、`openai_passthrough`、模型映射、
+  最终上游 endpoint、最终模型 ID、HTTP 状态和错误正文。API Key 不需要提供，也不应写入
+  日志或文档。
+- 当前没有修改 APP 代码。APP 现有 OpenCode 预设位于
+  `lib/ui/profile_sheets.dart:393-401`，地址是官方 OpenCode Go，但 `wireApi` 当前为
+  `chat-completions`；这只能说明 APP 的默认入口选择，不能代表第三方 Sub2API 的实际
+  上游路径。后续若要调整默认值，应先决定是要求 OpenCode Go 强制 Responses，还是保留
+  用户可见的协议选择，并配套记录最终上游 endpoint。
+
+固定结论：第三方 OpenCode Go 套餐仍可能使用 OpenCode 官方网关；本项目排查时必须同时区分
+“APP → 第三方入口”的协议和“Sub2API → 官方 OpenCode”的出站协议，后续不再把二者混为一谈，
+也不因同一问题重复扫描 Sub2API 源码。
+
+### 2026-08-30：服务器仪表盘每核心 CPU 监控正式版 1.0.5
+
+- 版本：`1.0.5+44`；Android `versionName=1.0.5`，`versionCode=44`。
+- 状态脚本升级为 `script_version=3`，从 Linux `/proc/stat` 采样总 CPU 和每个逻辑核心的
+  使用率；旧状态脚本缺少核心字段时仍保留总 CPU 使用率。
+- APP 新增核心使用率模型、持久化字段和仪表盘展示；旧仪表盘缓存读取兼容，缺少核心数据时
+  显示“状态脚本未返回各核心明细”。
+- 验证：状态脚本实际输出正常；`flutter analyze` 通过；服务器仪表盘数据解析测试通过；
+  release APK 构建通过。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-release.apk`；
+  大小 `79,472,707` bytes；SHA-256
+  `61784d6b37f8d115a6bdd528f1afb939edbe3add4da8fc84237b96db6dc1cf03`。
+- 发布结果：待推送后创建 GitHub 正式版 `v1.0.5`。

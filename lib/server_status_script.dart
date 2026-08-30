@@ -85,32 +85,54 @@ disk_details_value=$(df -P -h 2>/dev/null | awk 'NR > 1 && $6 ~ /^\// {gsub("%",
 network_value=$(awk 'NR > 2 {name=$1; sub(/:/, "", name); if (name != "lo") {iface=name; rx += $2; tx += $10}} END {if (iface != "") printf "%s|%.0f|%.0f", iface, rx, tx}' /proc/net/dev 2>/dev/null)
 process_value=$(ps -e 2>/dev/null | awk 'NR > 1 {count++} END {print count + 0}')
 cpu_snapshot() {
-  awk 'NR == 1 && $1 == "cpu" {print ($2+$3+$4+$5+$6+$7+$8+$9+$10), ($5+$6); exit}' /proc/stat 2>/dev/null
+  awk '$1 == "cpu" || $1 ~ /^cpu[0-9]+$/ {
+    total = $2+$3+$4+$5+$6+$7+$8+$9+$10
+    idle = $5+$6
+    print $1 " " total " " idle
+  }' /proc/stat 2>/dev/null
 }
 cpu_before=$(cpu_snapshot)
 sleep 0.2
 cpu_after=$(cpu_snapshot)
-cpu_usage=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
-  first_count = split(first, first_values, " ")
-  second_count = split(second, second_values, " ")
-  total = second_values[1] - first_values[1]
-  idle = second_values[2] - first_values[2]
-  if (first_count >= 2 && second_count >= 2 && total > 0) {
+cpu_metrics=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
+  first_count = split(first, first_lines, "\n")
+  for (i = 1; i <= first_count; i++) {
+    field_count = split(first_lines[i], fields, "[[:space:]]+")
+    if (field_count >= 3) {
+      first_total[fields[1]] = fields[2]
+      first_idle[fields[1]] = fields[3]
+    }
+  }
+  second_count = split(second, second_lines, "\n")
+  for (i = 1; i <= second_count; i++) {
+    field_count = split(second_lines[i], fields, "[[:space:]]+")
+    name = fields[1]
+    if (field_count < 3 || !(name in first_total)) continue
+    total = fields[2] - first_total[name]
+    idle = fields[3] - first_idle[name]
+    if (total <= 0) continue
     value = (total - idle) * 100 / total
     if (value < 0) value = 0
     if (value > 100) value = 100
-    printf "%.0f", value
+    if (name == "cpu") {
+      total_usage = sprintf("%.0f", value)
+    } else if (name ~ /^cpu[0-9]+$/) {
+      if (core_usage != "") core_usage = core_usage ","
+      core_usage = core_usage name ":" sprintf("%.0f", value)
+    }
   }
+  print "cpu_usage=" total_usage
+  print "cpu_core_usage=" core_usage
 }')
 
-printf 'script_version=2\n'
+printf 'script_version=3\n'
 printf 'hostname=%s\n' "$(clean_value "$hostname_value")"
 printf 'os=%s\n' "$(clean_value "$os_value")"
 printf 'kernel=%s\n' "$(clean_value "$kernel_value")"
 printf 'uptime=%s\n' "$(clean_value "$uptime_value")"
 printf 'load=%s\n' "$(clean_value "$load_value")"
 printf 'cpu=%s cores\n' "$(clean_value "$cpu_value")"
-printf 'cpu_usage=%s\n' "$(clean_value "$cpu_usage")"
+printf '%s\n' "$cpu_metrics"
 printf 'memory=%s\n' "$(clean_value "$memory_value")"
 printf 'disk=%s\n' "$(clean_value "$disk_value")"
 printf 'disk_details=%s\n' "$(clean_value "$disk_details_value")"
@@ -118,32 +140,72 @@ printf 'network=%s\n' "$(clean_value "$network_value")"
 printf 'processes=%s\n' "$(clean_value "$process_value")"
 ''';
 
-const statusProbeCommand =
-    r'''if [ -x "$HOME/.local/bin/mobile-agent-status" ]; then
+const statusProbeCommand = r'''cpu_snapshot() {
+  awk '$1 == "cpu" || $1 ~ /^cpu[0-9]+$/ {
+    total = $2+$3+$4+$5+$6+$7+$8+$9+$10
+    idle = $5+$6
+    print $1 " " total " " idle
+  }' /proc/stat 2>/dev/null
+}
+
+calculate_cpu_metrics() {
+  awk -v first="$1" -v second="$2" 'BEGIN {
+    first_count = split(first, first_lines, "\n")
+    for (i = 1; i <= first_count; i++) {
+      field_count = split(first_lines[i], fields, "[[:space:]]+")
+      if (field_count >= 3) {
+        first_total[fields[1]] = fields[2]
+        first_idle[fields[1]] = fields[3]
+      }
+    }
+    second_count = split(second, second_lines, "\n")
+    for (i = 1; i <= second_count; i++) {
+      field_count = split(second_lines[i], fields, "[[:space:]]+")
+      name = fields[1]
+      if (field_count < 3 || !(name in first_total)) continue
+      total = fields[2] - first_total[name]
+      idle = fields[3] - first_idle[name]
+      if (total <= 0) continue
+      value = (total - idle) * 100 / total
+      if (value < 0) value = 0
+      if (value > 100) value = 100
+      if (name == "cpu") {
+        total_usage = sprintf("%.0f", value)
+      } else if (name ~ /^cpu[0-9]+$/) {
+        if (core_usage != "") core_usage = core_usage ","
+        core_usage = core_usage name ":" sprintf("%.0f", value)
+      }
+    }
+    print "cpu_usage=" total_usage
+    print "cpu_core_usage=" core_usage
+  }'
+}
+
+metric_line() {
+  metric_name=$1
+  metric_output=$2
+  printf '%s\n' "$metric_output" | awk -v name="$metric_name" 'index($0, name "=") == 1 {print; exit}'
+}
+
+if [ -x "$HOME/.local/bin/mobile-agent-status" ]; then
   status_output=$("$HOME/.local/bin/mobile-agent-status")
   printf '%s\n' "$status_output"
   case "$status_output" in
     *cpu_usage=*) ;;
     *)
-      cpu_snapshot() {
-        awk 'NR == 1 && $1 == "cpu" {print ($2+$3+$4+$5+$6+$7+$8+$9+$10), ($5+$6); exit}' /proc/stat 2>/dev/null
-      }
       cpu_before=$(cpu_snapshot)
       sleep 0.2
       cpu_after=$(cpu_snapshot)
-      cpu_usage=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
-        first_count = split(first, first_values, " ")
-        second_count = split(second, second_values, " ")
-        total = second_values[1] - first_values[1]
-        idle = second_values[2] - first_values[2]
-        if (first_count >= 2 && second_count >= 2 && total > 0) {
-          value = (total - idle) * 100 / total
-          if (value < 0) value = 0
-          if (value > 100) value = 100
-          printf "%.0f", value
-        }
-      }')
-      printf 'cpu_usage=%s\n' "$cpu_usage"
+      metric_line cpu_usage "$(calculate_cpu_metrics "$cpu_before" "$cpu_after")"
+      ;;
+  esac
+  case "$status_output" in
+    *cpu_core_usage=*) ;;
+    *)
+      cpu_before=$(cpu_snapshot)
+      sleep 0.2
+      cpu_after=$(cpu_snapshot)
+      metric_line cpu_core_usage "$(calculate_cpu_metrics "$cpu_before" "$cpu_after")"
       ;;
   esac
 else
@@ -159,25 +221,10 @@ else
   printf 'disk_details=%s\n' "$(df -P -h 2>/dev/null | awk 'NR > 1 && $6 ~ /^\// {gsub("%", "", $5); printf "%s|%s|%s|%s|%s;", $6, $2, $3, $4, $5}')"
   printf 'network=%s\n' "$(awk 'NR > 2 {name=$1; sub(/:/, "", name); if (name != "lo") {iface=name; rx += $2; tx += $10}} END {if (iface != "") printf "%s|%.0f|%.0f", iface, rx, tx}' /proc/net/dev 2>/dev/null)"
   printf 'processes=%s\n' "$(ps -e 2>/dev/null | awk 'NR > 1 {count++} END {print count + 0}')"
-  cpu_snapshot() {
-    awk 'NR == 1 && $1 == "cpu" {print ($2+$3+$4+$5+$6+$7+$8+$9+$10), ($5+$6); exit}' /proc/stat 2>/dev/null
-  }
   cpu_before=$(cpu_snapshot)
   sleep 0.2
   cpu_after=$(cpu_snapshot)
-  cpu_usage=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
-    first_count = split(first, first_values, " ")
-    second_count = split(second, second_values, " ")
-    total = second_values[1] - first_values[1]
-    idle = second_values[2] - first_values[2]
-    if (first_count >= 2 && second_count >= 2 && total > 0) {
-      value = (total - idle) * 100 / total
-      if (value < 0) value = 0
-      if (value > 100) value = 100
-      printf "%.0f", value
-    }
-  }')
-  printf 'cpu_usage=%s\n' "$cpu_usage"
+  calculate_cpu_metrics "$cpu_before" "$cpu_after"
 fi''';
 
 final statusScriptInstallCommand = [

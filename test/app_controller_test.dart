@@ -3117,6 +3117,10 @@ void main() {
 
     expect(dashboard.hostname, 'test-server');
     expect(dashboard.cpuUsage, 5);
+    expect(
+      dashboard.cpuCores.map((core) => '${core.name}:${core.usage}').toList(),
+      ['cpu0:3', 'cpu1:7'],
+    );
     expect(dashboard.statusScriptInstalled, isTrue);
     expect(
       controller.cachedServerDashboard(controller.servers.single),
@@ -3328,6 +3332,7 @@ class _FakeConnection implements SshConnection {
           'load=0.1 0.2 0.3\n'
           'cpu=2 cores\n'
           'cpu_usage=5\n'
+          'cpu_core_usage=cpu0:3,cpu1:7\n'
           'memory=20%\n'
           'disk=2G / 10G (20%)\n',
       stderr: '',

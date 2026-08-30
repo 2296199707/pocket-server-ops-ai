@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5",
+      "title": "PocketServerOps AI v1.0.5",
+      "notes": "服务器仪表盘新增总 CPU 使用率和每个逻辑 CPU 核心使用率；状态脚本、缓存和旧脚本回退保持兼容。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5/pocket-server-ops-ai-v1.0.5-release.apk",
+      "prerelease": false,
+      "published_at": "2026-08-30T09:31:42Z"
+    },
+    {
       "version": "1.0.4-beta.6",
       "title": "PocketServerOps AI v1.0.4-beta.6",
       "notes": "优化子代理查看交互：保留每次子代理调用记录，支持展开和收缩；查看进入半屏详情抽屉，可返回、下滑关闭并实时查看完整历史、工具调用和命令结果；终端结果展开后直接显示内容。增加手机本地 MCP 客户端配置、工具缓存和 Agent 调用支持。",

@@ -150,6 +150,8 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
               const SizedBox(height: 12),
               _SystemOverviewCard(dashboard: dashboard),
               const SizedBox(height: 12),
+              _CpuUsageCard(dashboard: dashboard),
+              const SizedBox(height: 12),
               _MemoryCard(dashboard: dashboard),
               const SizedBox(height: 12),
               _StorageCard(dashboard: dashboard),
@@ -363,6 +365,147 @@ class _SystemOverviewCard extends StatelessWidget {
           _ValueRow(
             label: '进程数',
             value: dashboard.processCount?.toString() ?? '暂无数据',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CpuUsageCard extends StatelessWidget {
+  const _CpuUsageCard({required this.dashboard});
+
+  final ServerDashboard dashboard;
+
+  @override
+  Widget build(BuildContext context) {
+    final totalUsage = dashboard.cpuUsage;
+    final cores = dashboard.cpuCores;
+    return _DashboardCard(
+      title: 'CPU 使用情况',
+      icon: Icons.speed_outlined,
+      trailing: totalUsage == null ? null : Text('$totalUsage%'),
+      child: totalUsage == null && cores.isEmpty
+          ? const Text('暂无 CPU 使用率数据')
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (totalUsage != null)
+                  _UsageBar(label: '总使用率', usage: totalUsage),
+                if (cores.isEmpty && totalUsage != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '状态脚本未返回各核心明细',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+                if (cores.isNotEmpty) ...[
+                  if (totalUsage != null) const SizedBox(height: 14),
+                  Text('各逻辑核心', style: Theme.of(context).textTheme.bodySmall),
+                  const SizedBox(height: 8),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final columns = constraints.maxWidth >= 560
+                          ? 4
+                          : constraints.maxWidth >= 320
+                          ? 3
+                          : 2;
+                      final width =
+                          (constraints.maxWidth - (columns - 1) * 8) / columns;
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final core in cores)
+                            SizedBox(
+                              width: width,
+                              child: _CpuCoreTile(core: core),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ],
+            ),
+    );
+  }
+}
+
+class _UsageBar extends StatelessWidget {
+  const _UsageBar({required this.label, required this.usage});
+
+  final String label;
+  final int usage;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = usage.clamp(0, 100).toDouble() / 100;
+    final colors = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text(label)),
+            Text('$usage%'),
+          ],
+        ),
+        const SizedBox(height: 7),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(5),
+          child: LinearProgressIndicator(
+            minHeight: 8,
+            value: value,
+            color: _usageColor(context, value),
+            backgroundColor: colors.surfaceContainerHighest,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CpuCoreTile extends StatelessWidget {
+  const _CpuCoreTile({required this.core});
+
+  final ServerCpuCore core;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final value = core.usage.clamp(0, 100).toDouble() / 100;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  core.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text('${core.usage}%'),
+            ],
+          ),
+          const SizedBox(height: 5),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              minHeight: 5,
+              value: value,
+              color: _usageColor(context, value),
+              backgroundColor: colors.surface,
+            ),
           ),
         ],
       ),

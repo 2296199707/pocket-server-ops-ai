@@ -4847,6 +4847,12 @@ class AppController extends ChangeNotifier {
         load: '0.18 0.22 0.20',
         cpu: '4 cores',
         cpuUsage: 5,
+        cpuCores: [
+          ServerCpuCore(name: 'cpu0', usage: 4),
+          ServerCpuCore(name: 'cpu1', usage: 7),
+          ServerCpuCore(name: 'cpu2', usage: 5),
+          ServerCpuCore(name: 'cpu3', usage: 3),
+        ],
         memory: '38% (1.5 / 4 GiB)',
         disk: '12G / 50G (24%)',
         statusScriptInstalled: true,
@@ -7039,6 +7045,7 @@ class AppController extends ChangeNotifier {
       load: values['load'] ?? 'unknown',
       cpu: values['cpu'] ?? 'unknown',
       cpuUsage: int.tryParse(values['cpu_usage']?.trim() ?? ''),
+      cpuCores: _parseCpuCores(values['cpu_core_usage']),
       memory: values['memory'] ?? 'unknown',
       disk: values['disk'] ?? 'unknown',
       statusScriptInstalled:
@@ -7047,6 +7054,20 @@ class AppController extends ChangeNotifier {
       network: _parseNetwork(values['network']),
       processCount: int.tryParse(values['processes'] ?? ''),
     );
+  }
+
+  static List<ServerCpuCore> _parseCpuCores(String? value) {
+    if (value == null || value.trim().isEmpty) return const [];
+    final cores = <ServerCpuCore>[];
+    for (final item in value.split(',')) {
+      final separator = item.indexOf(':');
+      if (separator <= 0) continue;
+      final name = item.substring(0, separator).trim();
+      final usage = int.tryParse(item.substring(separator + 1).trim());
+      if (name.isEmpty || usage == null) continue;
+      cores.add(ServerCpuCore(name: name, usage: usage));
+    }
+    return cores;
   }
 
   static List<ServerDisk> _parseDisks(String? value) {
