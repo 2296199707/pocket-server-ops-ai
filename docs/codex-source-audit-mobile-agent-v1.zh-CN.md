@@ -1992,7 +1992,8 @@ Responses 判断 Sub2API 的实际出站协议。
 
 ### 2026-08-30：服务器仪表盘每核心 CPU 监控正式版 1.0.5
 
-- 版本：`1.0.5+44`；Android `versionName=1.0.5`，`versionCode=44`。
+- 功能与版本提交：`b9a4f2a`；版本：`1.0.5+44`；Android `versionName=1.0.5`，
+  `versionCode=44`。
 - 状态脚本升级为 `script_version=3`，从 Linux `/proc/stat` 采样总 CPU 和每个逻辑核心的
   使用率；旧状态脚本缺少核心字段时仍保留总 CPU 使用率。
 - APP 新增核心使用率模型、持久化字段和仪表盘展示；旧仪表盘缓存读取兼容，缺少核心数据时
@@ -2002,4 +2003,5 @@ Responses 判断 Sub2API 的实际出站协议。
 - APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-release.apk`；
   大小 `79,472,707` bytes；SHA-256
   `61784d6b37f8d115a6bdd528f1afb939edbe3add4da8fc84237b96db6dc1cf03`。
-- 发布结果：待推送后创建 GitHub 正式版 `v1.0.5`。
+- 发布结果：已推送 `main` 并创建 GitHub 正式版 `v1.0.5`，标签指向 `b9a4f2a`；Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5`。
