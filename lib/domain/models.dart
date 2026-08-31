@@ -110,9 +110,7 @@ class SubagentSettings {
     final providerId = map['providerId'] ?? map['provider_id'];
     final effort = map['reasoningEffort'] ?? map['reasoning_effort'];
     final rawRoles = map['roleInstructions'] ?? map['role_instructions'];
-    final roles = <String, String>{
-      ...defaultSubagentRoleInstructions,
-    };
+    final roles = <String, String>{...defaultSubagentRoleInstructions};
     if (rawRoles is Map) {
       for (final entry in rawRoles.entries) {
         if (entry.key is! String || entry.value is! String) continue;
@@ -1154,6 +1152,45 @@ class Project {
   }
 }
 
+/// A user message submitted while another turn is running.
+///
+/// Attachment values are durable metadata maps (usually attachment IDs), not
+/// the attachment bytes themselves. The controller resolves them only when a
+/// turn is about to send a request.
+class QueuedTaskInput {
+  final String id;
+  final String prompt;
+  final List<Map<String, Object?>> attachments;
+  final DateTime createdAt;
+
+  const QueuedTaskInput({
+    required this.id,
+    required this.prompt,
+    this.attachments = const [],
+    required this.createdAt,
+  });
+
+  factory QueuedTaskInput.fromMap(Map<String, Object?> map) {
+    final rawAttachments = map['attachments'];
+    return QueuedTaskInput(
+      id: map['id'] as String,
+      prompt: map['prompt'] as String? ?? '',
+      attachments: [
+        for (final item in rawAttachments is List ? rawAttachments : const [])
+          if (item is Map) Map<String, Object?>.from(item),
+      ],
+      createdAt: _readTime(map['createdAt']),
+    );
+  }
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'prompt': prompt,
+    'attachments': attachments,
+    'createdAt': _writeTime(createdAt),
+  };
+}
+
 List<String> reasoningEffortValuesForModel(
   ProviderProfile provider,
   String model, {
@@ -1258,6 +1295,7 @@ class Task {
   final String? agentRole;
   final String? agentForkTurns;
   final List<String> agentMailbox;
+  final List<QueuedTaskInput> pendingInputs;
   final String? agentSummary;
   final String status;
   final DateTime createdAt;
@@ -1287,6 +1325,7 @@ class Task {
     this.agentRole,
     this.agentForkTurns,
     this.agentMailbox = const [],
+    this.pendingInputs = const [],
     this.agentSummary,
     required this.status,
     required this.createdAt,
@@ -1329,6 +1368,7 @@ class Task {
       agentRole: map['agentRole'] as String?,
       agentForkTurns: map['agentForkTurns'] as String?,
       agentMailbox: _readTaskMailbox(map['agentMailbox']),
+      pendingInputs: _readPendingTaskInputs(map['pendingInputs']),
       agentSummary: map['agentSummary'] as String?,
       status: map['status'] as String,
       createdAt: _readTime(map['createdAt']),
@@ -1360,6 +1400,9 @@ class Task {
     'agentRole': agentRole,
     'agentForkTurns': agentForkTurns,
     'agentMailbox': jsonEncode(agentMailbox),
+    'pendingInputs': jsonEncode([
+      for (final input in pendingInputs) input.toMap(),
+    ]),
     'agentSummary': agentSummary,
     'status': status,
     'createdAt': _writeTime(createdAt),
@@ -1389,6 +1432,7 @@ class Task {
     Object? agentRole = _taskFieldUnset,
     Object? agentForkTurns = _taskFieldUnset,
     Object? agentMailbox = _taskFieldUnset,
+    Object? pendingInputs = _taskFieldUnset,
     Object? agentSummary = _taskFieldUnset,
     String? status,
     DateTime? createdAt,
@@ -1443,6 +1487,9 @@ class Task {
       agentMailbox: identical(agentMailbox, _taskFieldUnset)
           ? this.agentMailbox
           : _readTaskMailbox(agentMailbox),
+      pendingInputs: identical(pendingInputs, _taskFieldUnset)
+          ? this.pendingInputs
+          : _readPendingTaskInputs(pendingInputs),
       agentSummary: identical(agentSummary, _taskFieldUnset)
           ? this.agentSummary
           : agentSummary as String?,
@@ -1502,6 +1549,40 @@ List<String> _readTaskMailbox(Object? value) {
     for (final item in decoded)
       if (item is String && item.trim().isNotEmpty) item.trim(),
   ]);
+}
+
+List<QueuedTaskInput> _readPendingTaskInputs(Object? value) {
+  Object? decoded = value;
+  if (value is String && value.trim().isNotEmpty) {
+    try {
+      decoded = jsonDecode(value);
+    } on FormatException {
+      decoded = const [];
+    }
+  }
+  if (decoded is! Iterable) return const [];
+  final inputs = <QueuedTaskInput>[];
+  for (final item in decoded) {
+    if (item is QueuedTaskInput) {
+      if (item.id.trim().isNotEmpty &&
+          (item.prompt.trim().isNotEmpty || item.attachments.isNotEmpty)) {
+        inputs.add(item);
+      }
+      continue;
+    }
+    if (item is! Map) continue;
+    try {
+      final input = QueuedTaskInput.fromMap(Map<String, Object?>.from(item));
+      if (input.id.trim().isEmpty ||
+          (input.prompt.trim().isEmpty && input.attachments.isEmpty)) {
+        continue;
+      }
+      inputs.add(input);
+    } on Object {
+      // Ignore one malformed queue entry while keeping the conversation usable.
+    }
+  }
+  return List.unmodifiable(inputs);
 }
 
 class TaskEvent {

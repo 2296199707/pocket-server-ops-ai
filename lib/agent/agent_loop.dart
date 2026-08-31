@@ -7,12 +7,56 @@ import 'ai_protocol.dart';
 import 'chat_completions_client.dart';
 import 'openai_compatible_client.dart';
 
+class AgentTurnInput {
+  const AgentTurnInput({
+    required this.prompt,
+    this.attachments = const [],
+    this.id,
+  });
+
+  final String prompt;
+  final List<AiAttachment> attachments;
+  final String? id;
+}
+
 class AgentCancellation {
   bool _cancelled = false;
   final Completer<void> _cancelledSignal = Completer<void>();
+  final List<AgentTurnInput> _pendingTurnInputs = [];
+  final Set<String> _consumedTurnInputIds = {};
 
   bool get isCancelled => _cancelled;
   Future<void> get whenCancelled => _cancelledSignal.future;
+
+  /// Queues input for the next safe model request in the current turn.
+  /// Returns false after cancellation so the durable queue remains the source
+  /// of truth for a later retry.
+  bool enqueueTurnInput(AgentTurnInput input) {
+    if (_cancelled) return false;
+    _pendingTurnInputs.add(input);
+    return true;
+  }
+
+  List<AgentTurnInput> takePendingTurnInputs() {
+    if (_pendingTurnInputs.isEmpty) return const [];
+    final result = List<AgentTurnInput>.of(_pendingTurnInputs);
+    _pendingTurnInputs.clear();
+    return result;
+  }
+
+  void markTurnInputsConsumed(Iterable<AgentTurnInput> inputs) {
+    for (final input in inputs) {
+      final id = input.id;
+      if (id != null && id.isNotEmpty) _consumedTurnInputIds.add(id);
+    }
+  }
+
+  Set<String> takeConsumedTurnInputIds() {
+    if (_consumedTurnInputIds.isEmpty) return const <String>{};
+    final result = Set<String>.of(_consumedTurnInputIds);
+    _consumedTurnInputIds.clear();
+    return result;
+  }
 
   void cancel() {
     if (_cancelled) return;
@@ -38,6 +82,10 @@ class AgentResult {
 class AgentLoop {
   const AgentLoop({required this.client, required this.tools});
 
+  static const _repeatedNoProgressCycleLimit = 3;
+  static const _repeatedPollingCycleLimit = 10;
+  static const _repeatedPatternLimit = 3;
+  static const _pollingTools = <String>{'terminal.poll', 'wait_agent'};
   static const _maxStructuredPreviewItems = 16;
   static const _truncatedMarkerKey = '__mobile_agent_truncated';
   static const _omittedItemsKey = '__mobile_agent_omitted_items';
@@ -52,8 +100,11 @@ class AgentLoop {
     List<AiMessage> initialMessages = const [],
     String executionMode = 'confirm',
     AgentCancellation? cancellation,
-    int maxSteps = 64,
-    int maxToolCalls = 128,
+    // Task-level budgets are opt-in for tests or a deliberate deployment
+    // policy. The normal Agent turn ends on a model result, cancellation, or
+    // an actual request/tool error instead of an arbitrary call count.
+    int? maxSteps,
+    int? maxToolCalls,
     int? maxContextCharacters,
     int? toolOutputLimit,
     bool toolOutputLimitInTokens = false,
@@ -126,6 +177,12 @@ class AgentLoop {
     var steps = 0;
     var toolCallCount = 0;
     var remoteOperationStarted = false;
+    String? previousToolCycleSignature;
+    var repeatedNoProgressCycles = 0;
+    String? previousPollingCycleSignature;
+    var repeatedPollingCycles = 0;
+    final recentCycleSignatures = <String>[];
+    var repeatedPatternCycles = 0;
     var deltaEvents = Future<void>.value();
     final handledToolCallIds = <String>{};
     final outputCharacterLimit = _toolOutputCharacterLimit(
@@ -161,7 +218,7 @@ class AgentLoop {
     }
 
     while (!stop.isCancelled) {
-      if (steps++ >= maxSteps) {
+      if (maxSteps != null && steps++ >= maxSteps) {
         const message = '任务达到步骤上限，请检查当前服务器状态后继续。';
         final type = remoteOperationStarted ? 'task.unknown' : 'task.failed';
         await _emit(onEvent, type, {'error': message});
@@ -310,10 +367,39 @@ class AgentLoop {
         );
       }
 
+      final toolCycleOutcomes = <String>[];
+      final pollingProgressOutcomes = <String>[];
+      final toolCycleNames = <String>[];
+      void recordToolOutcome(String name, Object? arguments, Object? result) {
+        toolCycleNames.add(name);
+        final canonicalArguments = _canonicalizeForSignature(arguments);
+        final progressArguments = _pollingSignatureArguments(
+          name,
+          canonicalArguments,
+        );
+        final canonicalResult = _canonicalizeForSignature(
+          _signatureResult(name, result),
+        );
+        toolCycleOutcomes.add(
+          jsonEncode({
+            'name': name,
+            'arguments': canonicalArguments,
+            'result': canonicalResult,
+          }),
+        );
+        pollingProgressOutcomes.add(
+          jsonEncode({
+            'name': name,
+            'arguments': progressArguments,
+            'result': canonicalResult,
+          }),
+        );
+      }
+
       for (final call in assistantForHistory.toolCalls) {
         if (stop.isCancelled) break;
         toolCallCount++;
-        if (toolCallCount > maxToolCalls) {
+        if (maxToolCalls != null && toolCallCount > maxToolCalls) {
           const message = '任务达到工具调用上限，请检查当前服务器状态后继续。';
           await appendUnresolvedToolResults(
             assistantForHistory.toolCalls,
@@ -337,6 +423,7 @@ class AgentLoop {
             'error': error,
           });
           addToolResult(call, error);
+          recordToolOutcome(call.name, call.arguments, error);
           continue;
         }
         Map<String, Object?> arguments;
@@ -351,6 +438,7 @@ class AgentLoop {
             'error': message,
           });
           addToolResult(call, message);
+          recordToolOutcome(tool.definition.name, call.arguments, message);
           continue;
         }
 
@@ -449,6 +537,7 @@ class AgentLoop {
               'error': message,
             });
             addToolResult(call, message);
+            recordToolOutcome(tool.definition.name, arguments, message);
             break;
           }
           if (!allowed) {
@@ -462,6 +551,7 @@ class AgentLoop {
               'error': message,
             });
             addToolResult(call, message);
+            recordToolOutcome(tool.definition.name, arguments, message);
             continue;
           }
         }
@@ -509,6 +599,7 @@ class AgentLoop {
             'result': eventResult,
           });
           addToolResult(call, _toolResultContent(serialized));
+          recordToolOutcome(tool.definition.name, arguments, eventResult);
           if (stop.isCancelled) {
             final isUnknown = remoteOperationStarted;
             final message = isUnknown
@@ -555,6 +646,7 @@ class AgentLoop {
             call,
             _truncateToolResult(message, outputCharacterLimit),
           );
+          recordToolOutcome(tool.definition.name, arguments, message);
           if (stop.isCancelled) {
             final isUnknown = remoteOperationStarted;
             final cancellationMessage = isUnknown
@@ -594,6 +686,69 @@ class AgentLoop {
         );
       }
 
+      if (!stop.isCancelled && toolCycleOutcomes.isNotEmpty) {
+        final signature = toolCycleOutcomes.join('\n');
+        if (signature == previousToolCycleSignature) {
+          repeatedNoProgressCycles++;
+        } else {
+          previousToolCycleSignature = signature;
+          repeatedNoProgressCycles = 1;
+        }
+        final pollingOnly = toolCycleNames.every(_pollingTools.contains);
+        final pollingSignature = pollingProgressOutcomes.join('\n');
+        if (pollingOnly && pollingSignature == previousPollingCycleSignature) {
+          repeatedPollingCycles++;
+        } else if (pollingOnly) {
+          previousPollingCycleSignature = pollingSignature;
+          repeatedPollingCycles = 1;
+        } else {
+          previousPollingCycleSignature = null;
+          repeatedPollingCycles = 0;
+        }
+
+        recentCycleSignatures.add(signature);
+        if (recentCycleSignatures.length > 4) {
+          recentCycleSignatures.removeAt(0);
+        }
+        final repeatsTwoCyclePattern =
+            recentCycleSignatures.length == 4 &&
+            recentCycleSignatures[0] == recentCycleSignatures[2] &&
+            recentCycleSignatures[1] == recentCycleSignatures[3];
+        if (repeatsTwoCyclePattern) {
+          repeatedPatternCycles++;
+        } else if (recentCycleSignatures.length == 4) {
+          repeatedPatternCycles = 0;
+        }
+
+        final stalled =
+            repeatedNoProgressCycles >= _repeatedNoProgressCycleLimit ||
+            repeatedPollingCycles >= _repeatedPollingCycleLimit ||
+            repeatedPatternCycles >= _repeatedPatternLimit;
+        if (stalled) {
+          const message = 'AI 连续重复相同工具操作且结果没有变化，已暂停任务；请检查当前状态后继续。';
+          await _emit(onEvent, 'task.stalled', {
+            'error': message,
+            'repeated_cycles': repeatedNoProgressCycles,
+            'repeated_polling_cycles': repeatedPollingCycles,
+            'repeated_pattern_cycles': repeatedPatternCycles,
+          });
+          final type = remoteOperationStarted ? 'task.unknown' : 'task.failed';
+          await _emit(onEvent, type, {'error': message});
+          return AgentResult(
+            status: remoteOperationStarted ? 'unknown' : 'failed',
+            messages: List.unmodifiable(messages),
+            error: StateError(message),
+          );
+        }
+      } else {
+        previousToolCycleSignature = null;
+        repeatedNoProgressCycles = 0;
+        previousPollingCycleSignature = null;
+        repeatedPollingCycles = 0;
+        recentCycleSignatures.clear();
+        repeatedPatternCycles = 0;
+      }
+
       if (!stop.isCancelled && compactHistory != null) {
         try {
           final compacted = await compactHistory(messages);
@@ -625,6 +780,23 @@ class AgentLoop {
           );
         }
       }
+      final steeredInputs = stop.takePendingTurnInputs();
+      if (steeredInputs.isNotEmpty) {
+        for (final input in steeredInputs) {
+          messages.add(
+            AiMessage.user(input.prompt, attachments: input.attachments),
+          );
+        }
+        stop.markTurnInputsConsumed(steeredInputs);
+        // A user steer is new context and therefore resets the repeated-tool
+        // detector for the preceding request sequence.
+        previousToolCycleSignature = null;
+        repeatedNoProgressCycles = 0;
+        previousPollingCycleSignature = null;
+        repeatedPollingCycles = 0;
+        recentCycleSignatures.clear();
+        repeatedPatternCycles = 0;
+      }
     }
 
     final status = remoteOperationStarted ? 'unknown' : 'cancelled';
@@ -633,10 +805,7 @@ class AgentLoop {
       status == 'unknown' ? 'task.unknown' : 'task.cancelled',
       const {},
     );
-    return AgentResult(
-      status: status,
-      messages: List.unmodifiable(messages),
-    );
+    return AgentResult(status: status, messages: List.unmodifiable(messages));
   }
 
   AgentTool? _findTool(List<AgentTool> availableTools, String name) {
@@ -683,6 +852,46 @@ class AgentLoop {
 
   static String _toolResultContent(String value) {
     return value;
+  }
+
+  static Object? _canonicalizeForSignature(Object? value) {
+    if (value is Map) {
+      final entries = [
+        for (final entry in value.entries)
+          MapEntry('${entry.key}', _canonicalizeForSignature(entry.value)),
+      ]..sort((left, right) => left.key.compareTo(right.key));
+      return <String, Object?>{
+        for (final entry in entries) entry.key: entry.value,
+      };
+    }
+    if (value is Iterable) {
+      return [for (final item in value) _canonicalizeForSignature(item)];
+    }
+    return value;
+  }
+
+  static Object? _pollingSignatureArguments(String name, Object? arguments) {
+    if (arguments is! Map) return arguments;
+    if (name != 'terminal.poll' && name != 'wait_agent') return arguments;
+    final normalized = <String, Object?>{
+      for (final entry in arguments.entries)
+        if (entry.key is String) entry.key as String: entry.value,
+    };
+    // Waiting longer is not progress. Ignore that presentation detail so a
+    // model cannot evade the no-progress guard by changing only the timeout.
+    normalized.remove(name == 'terminal.poll' ? 'wait_ms' : 'timeout_ms');
+    return normalized;
+  }
+
+  static Object? _signatureResult(String name, Object? result) {
+    if (name != 'terminal.exec' && name != 'terminal.start') return result;
+    if (result is! Map) return result;
+    // Process IDs are allocated for each new invocation. They are not proof
+    // that repeating the same command made progress.
+    return {
+      for (final entry in result.entries)
+        if (entry.key != 'process_id') '${entry.key}': entry.value,
+    };
   }
 
   static int? _toolOutputCharacterLimit(int? limit, {required bool inTokens}) {

@@ -74,6 +74,24 @@ class _CachedServerFileContent {
   final DateTime? modified;
 }
 
+class _TaskTurnRequest {
+  const _TaskTurnRequest({
+    required this.prompt,
+    required this.attachments,
+    required this.recordUserMessage,
+    this.userMessagePrompt,
+    this.userMessageAttachments,
+    this.excludedQueuedInputIds = const <String>{},
+  });
+
+  final String prompt;
+  final List<AiAttachment> attachments;
+  final bool recordUserMessage;
+  final String? userMessagePrompt;
+  final List<AiAttachment>? userMessageAttachments;
+  final Set<String> excludedQueuedInputIds;
+}
+
 class AppController extends ChangeNotifier {
   AppController({
     AppDatabase? database,
@@ -112,6 +130,9 @@ class AppController extends ChangeNotifier {
   final Map<String, AgentCancellation> _runningTasks = {};
   final Map<String, Future<AgentResult>> _taskRuns = {};
   final Map<String, String> _taskRunIds = {};
+  final Map<String, String> _taskRunSessionIds = {};
+  final Set<String> _acceptingTaskInputs = {};
+  final Map<String, Future<void>> _taskInputTails = {};
   final Map<String, SubagentTree> _subagentTrees = {};
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
@@ -273,6 +294,48 @@ class AppController extends ChangeNotifier {
   }
 
   bool isTaskRunning(String taskId) => _runningTasks.containsKey(taskId);
+
+  int pendingTaskInputCount(String taskId) =>
+      taskForId(taskId)?.pendingInputs.length ?? 0;
+
+  /// Queues a user message for the active conversation turn. The message is
+  /// durable immediately, while its model request is started after the
+  /// current turn reaches a terminal result.
+  Future<void> appendTask(
+    Task task, {
+    required String prompt,
+    List<AiAttachment> attachments = const [],
+  }) {
+    if (prompt.trim().isEmpty && attachments.isEmpty) {
+      throw ArgumentError('追加任务不能为空');
+    }
+    if (!_taskRuns.containsKey(task.id) ||
+        !_acceptingTaskInputs.contains(task.id)) {
+      throw StateError('当前任务已经结束，请直接发送新消息');
+    }
+    final previous = _taskInputTails[task.id] ?? Future<void>.value();
+    late Future<void> current;
+    current = previous.then<void>(
+      (_) => _appendTaskInputNow(
+        taskId: task.id,
+        prompt: prompt,
+        attachments: attachments,
+      ),
+    );
+    final settled = current.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    _taskInputTails[task.id] = settled;
+    unawaited(
+      settled.then<void>((_) {
+        if (identical(_taskInputTails[task.id], settled)) {
+          _taskInputTails.remove(task.id);
+        }
+      }),
+    );
+    return current;
+  }
 
   Task? taskForId(String taskId) {
     for (final task in _tasks) {
@@ -1573,6 +1636,7 @@ class AppController extends ChangeNotifier {
       agentRole: current.agentRole,
       agentForkTurns: current.agentForkTurns,
       agentMailbox: current.agentMailbox,
+      pendingInputs: current.pendingInputs,
       agentSummary: current.agentSummary,
       status: current.status,
       createdAt: current.createdAt,
@@ -1695,10 +1759,38 @@ class AppController extends ChangeNotifier {
     required String type,
     required Map<String, Object?> payload,
   }) {
+    return _enqueueTaskEvent(taskId: taskId, type: type, payload: payload);
+  }
+
+  Future<TaskEvent> _appendTaskEventWithTaskUpdate({
+    required String taskId,
+    required String type,
+    required Map<String, Object?> payload,
+    required Task Function(Task current) updateTask,
+  }) {
+    return _enqueueTaskEvent(
+      taskId: taskId,
+      type: type,
+      payload: payload,
+      updateTask: updateTask,
+    );
+  }
+
+  Future<TaskEvent> _enqueueTaskEvent({
+    required String taskId,
+    required String type,
+    required Map<String, Object?> payload,
+    Task Function(Task current)? updateTask,
+  }) {
     final previous = _taskEventTails[taskId] ?? Future<void>.value();
     late Future<TaskEvent> current;
     current = previous.then<TaskEvent>(
-      (_) => _appendTaskEventNow(taskId: taskId, type: type, payload: payload),
+      (_) => _appendTaskEventNow(
+        taskId: taskId,
+        type: type,
+        payload: payload,
+        updateTask: updateTask,
+      ),
     );
     final settled = current.then<void>(
       (_) {},
@@ -1719,6 +1811,7 @@ class AppController extends ChangeNotifier {
     required String taskId,
     required String type,
     required Map<String, Object?> payload,
+    Task Function(Task current)? updateTask,
   }) async {
     final statusTail = _taskStatusTails[taskId];
     if (statusTail != null) await statusTail;
@@ -1730,10 +1823,16 @@ class AppController extends ChangeNotifier {
       timestamp: DateTime.now().toUtc(),
       payload: _eventPayload(payload),
     );
-    await _database.saveEvent(event);
     final task = _tasks.firstWhere((value) => value.id == taskId);
-    final updatedTask = task.copyWith(updatedAt: event.timestamp);
-    await _database.saveTask(updatedTask);
+    final updatedTask = (updateTask?.call(task) ?? task).copyWith(
+      updatedAt: event.timestamp,
+    );
+    if (updateTask == null) {
+      await _database.saveEvent(event);
+      await _database.saveTask(updatedTask);
+    } else {
+      await _database.saveTaskAndEvent(updatedTask, event);
+    }
     _events = {
       ..._events,
       taskId: List.unmodifiable([...eventsFor(taskId), event]),
@@ -1754,13 +1853,9 @@ class AppController extends ChangeNotifier {
       final rootRun = _taskRuns[task.id];
       if (rootRun != null) {
         stopTask(task.id);
-        try {
-          await rootRun;
-        } catch (_) {
-          // The task is being deleted; its final error is no longer actionable.
-        }
+        await _awaitCleanupResult(rootRun);
       }
-      await treeClose;
+      if (treeClose != null) await _awaitCleanup(treeClose);
       final descendants = _tasks
           .where((item) => item.rootTaskId == task.id)
           .toList(growable: false);
@@ -1772,34 +1867,27 @@ class AppController extends ChangeNotifier {
     final run = _taskRuns[task.id];
     if (run != null) {
       stopTask(task.id);
-      try {
-        await run;
-      } catch (_) {
-        // The task is being deleted; its final error is no longer actionable.
-      }
+      await _awaitCleanupResult(run);
     }
     await _releasePhoneTask(task.id);
     final eventTail = _taskEventTails[task.id];
-    if (eventTail != null) await eventTail;
+    if (eventTail != null) await _awaitCleanup(eventTail);
+    final inputTail = _taskInputTails[task.id];
+    if (inputTail != null) await _awaitCleanup(inputTail);
     final eventLoad = _eventLoads[task.id];
-    if (eventLoad != null) await eventLoad;
+    if (eventLoad != null) await _awaitCleanup(eventLoad);
     final migration = _attachmentMigrations[task.id];
-    if (migration != null) await migration;
+    if (migration != null) await _awaitCleanup(migration);
     _localAccess.remove(task.id);
     final statusTail = _taskStatusTails[task.id];
-    if (statusTail != null) await statusTail;
+    if (statusTail != null) await _awaitCleanup(statusTail);
     _invalidateTaskContextUsage(task.id);
     _disposeStreamingAssistantState(task.id);
-    await _database.deleteTask(task.id);
+    await _awaitCleanup(_database.deleteTask(task.id));
     if (_lastConversationTaskId == task.id) {
-      await setLastConversationTask(null);
+      await _awaitCleanup(setLastConversationTask(null));
     }
-    try {
-      await _attachmentStore.deleteTask(task.id);
-    } catch (_) {
-      // A private orphan is safer than deleting files before the database
-      // transaction succeeds.
-    }
+    await _awaitCleanup(_attachmentStore.deleteTask(task.id));
     _tasks = [
       for (final item in _tasks)
         if (item.id != task.id) item,
@@ -1812,6 +1900,10 @@ class AppController extends ChangeNotifier {
     _hasEarlierTaskEvents.remove(task.id);
     _eventLoads.remove(task.id);
     _attachmentMigrations.remove(task.id);
+    _taskInputTails.remove(task.id);
+    _acceptingTaskInputs.remove(task.id);
+    _taskRunSessionIds.remove(task.id);
+    _taskRunIds.remove(task.id);
     _notify();
   }
 
@@ -2112,11 +2204,16 @@ class AppController extends ChangeNotifier {
     if (_taskCompactions.containsKey(task.id)) {
       throw StateError('上下文正在压缩');
     }
-    final turnId = _newId('turn');
-    _taskRunIds[task.id] = turnId;
-    final future = _runTask(
+    final runSessionId = _newId('run');
+    final cancellation = AgentCancellation();
+    _taskRunSessionIds[task.id] = runSessionId;
+    _acceptingTaskInputs.add(task.id);
+    // Register the sequence-level cancellation before asynchronous setup so
+    // stopTask can also cancel history and attachment preparation.
+    _runningTasks[task.id] = cancellation;
+    final future = _runTaskSequence(
       task,
-      turnId: turnId,
+      cancellation: cancellation,
       prompt: prompt,
       attachments: attachments,
       confirm: confirm,
@@ -2129,20 +2226,264 @@ class AppController extends ChangeNotifier {
     _taskRuns[task.id] = future;
     unawaited(
       future.then<void>(
-        (_) => _finishTask(task.id, turnId, future),
+        (_) => _finishTask(task.id, runSessionId, future),
         onError: (Object error, StackTrace stackTrace) {
-          _finishTask(task.id, turnId, future);
+          _finishTask(task.id, runSessionId, future);
         },
       ),
     );
     return future;
   }
 
+  Future<AgentResult> _runTaskSequence(
+    Task task, {
+    required AgentCancellation cancellation,
+    required String prompt,
+    required List<AiAttachment> attachments,
+    Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
+    confirm,
+    Future<bool> Function(
+      Task task,
+      AgentTool tool,
+      Map<String, Object?> arguments,
+    )?
+    confirmForTask,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FutureOr<bool> Function(Task task, SshHostKey key)? onFirstHostKeyForTask,
+    SshUserInfoHandler? onUserInfoRequest,
+    FutureOr<List<String>?> Function(Task task, SshUserInfoRequest request)?
+    onUserInfoRequestForTask,
+  }) async {
+    try {
+      final current = taskForId(task.id) ?? task;
+      final consumedInputIds = {
+        ...await _database.loadConsumedTaskInputIds(task.id),
+      };
+      final initialPending = [
+        for (final input in current.pendingInputs)
+          if (!consumedInputIds.contains(input.id)) input,
+      ];
+      var pendingToClear = <String>{
+        for (final input in initialPending) input.id,
+      };
+      var request = await _buildTaskTurnRequest(
+        taskId: task.id,
+        prompt: prompt,
+        attachments: attachments,
+        pendingInputs: initialPending,
+      );
+
+      while (true) {
+        if (cancellation.isCancelled) {
+          final turnId = _newId('turn');
+          _taskRunIds[task.id] = turnId;
+          try {
+            await appendTaskEvent(
+              taskId: task.id,
+              type: 'task.cancelled',
+              payload: {'turn_id': turnId},
+            );
+            await updateTaskStatus(task.id, 'cancelled', turnId: turnId);
+          } catch (_) {
+            // Keep the cancellation result when setup persistence is already
+            // unavailable; the recovery pass can inspect the saved status.
+          }
+          return const AgentResult(status: 'cancelled', messages: []);
+        }
+        final activeTask = taskForId(task.id) ?? task;
+        final turnId = _newId('turn');
+        _taskRunIds[task.id] = turnId;
+        final result = await _runTask(
+          activeTask,
+          cancellation: cancellation,
+          turnId: turnId,
+          prompt: request.prompt,
+          attachments: request.attachments,
+          recordUserMessage: request.recordUserMessage,
+          userMessagePrompt: request.userMessagePrompt,
+          userMessageAttachments: request.userMessageAttachments,
+          excludedQueuedInputIds: request.excludedQueuedInputIds,
+          confirm: confirm,
+          confirmForTask: confirmForTask,
+          onFirstHostKey: onFirstHostKey,
+          onFirstHostKeyForTask: onFirstHostKeyForTask,
+          onUserInfoRequest: onUserInfoRequest,
+          onUserInfoRequestForTask: onUserInfoRequestForTask,
+        );
+        final inputWritesFinished = await _waitForTaskInputWrites(
+          task.id,
+          cancellation: cancellation,
+        );
+        if (!inputWritesFinished) return result;
+        if (result.status != 'completed') return result;
+
+        if (pendingToClear.isNotEmpty) {
+          final consumed = pendingToClear.toList(growable: false);
+          await _appendTaskEventWithTaskUpdate(
+            taskId: task.id,
+            type: 'task.input_consumed',
+            payload: {'turn_id': turnId, 'queued_input_ids': consumed},
+            updateTask: (current) => current.copyWith(
+              pendingInputs: [
+                for (final input in current.pendingInputs)
+                  if (!pendingToClear.contains(input.id)) input,
+              ],
+            ),
+          );
+          consumedInputIds.addAll(pendingToClear);
+          pendingToClear = <String>{};
+        }
+        var latest = taskForId(task.id) ?? task;
+        final pending = [
+          for (final input in latest.pendingInputs)
+            if (!consumedInputIds.contains(input.id)) input,
+        ];
+        if (pending.isEmpty) {
+          // Close admission before the final queue drain. An append that
+          // passed the synchronous admission check before this point is
+          // already represented by _taskInputTails and is still consumed;
+          // later appends must start a separate turn instead of being stranded
+          // after this run finishes.
+          _acceptingTaskInputs.remove(task.id);
+          final inputWritesFinished = await _waitForTaskInputWrites(
+            task.id,
+            cancellation: cancellation,
+          );
+          if (!inputWritesFinished) return result;
+          latest = taskForId(task.id) ?? task;
+          final latestPending = [
+            for (final input in latest.pendingInputs)
+              if (!consumedInputIds.contains(input.id)) input,
+          ];
+          if (latestPending.isEmpty) return result;
+          _acceptingTaskInputs.add(task.id);
+          pendingToClear = {for (final input in latestPending) input.id};
+          request = _taskTurnRequestFromPending(latestPending);
+          continue;
+        }
+
+        final batch = pending;
+        pendingToClear = {for (final input in batch) input.id};
+        request = _taskTurnRequestFromPending(batch);
+      }
+    } finally {
+      _acceptingTaskInputs.remove(task.id);
+    }
+  }
+
+  Future<_TaskTurnRequest> _buildTaskTurnRequest({
+    required String taskId,
+    required String prompt,
+    required List<AiAttachment> attachments,
+    required List<QueuedTaskInput> pendingInputs,
+  }) async {
+    if (pendingInputs.isEmpty) {
+      return _TaskTurnRequest(
+        prompt: prompt,
+        attachments: attachments,
+        recordUserMessage: true,
+      );
+    }
+    final persistedAttachments = await _persistAttachments(taskId, attachments);
+    final pendingAttachments = [
+      for (final input in pendingInputs) ..._readAttachments(input.attachments),
+    ];
+    return _TaskTurnRequest(
+      prompt: _joinTaskPrompts([
+        for (final input in pendingInputs) input.prompt,
+        prompt,
+      ]),
+      attachments: [...pendingAttachments, ...persistedAttachments],
+      recordUserMessage:
+          prompt.trim().isNotEmpty || persistedAttachments.isNotEmpty,
+      userMessagePrompt: prompt,
+      userMessageAttachments: persistedAttachments,
+      excludedQueuedInputIds: {for (final input in pendingInputs) input.id},
+    );
+  }
+
+  _TaskTurnRequest _taskTurnRequestFromPending(
+    List<QueuedTaskInput> pendingInputs,
+  ) {
+    return _TaskTurnRequest(
+      prompt: _joinTaskPrompts([
+        for (final input in pendingInputs) input.prompt,
+      ]),
+      attachments: [
+        for (final input in pendingInputs)
+          ..._readAttachments(input.attachments),
+      ],
+      recordUserMessage: false,
+      excludedQueuedInputIds: {for (final input in pendingInputs) input.id},
+    );
+  }
+
+  static String _joinTaskPrompts(Iterable<String> prompts) {
+    return prompts
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .join('\n\n');
+  }
+
+  Future<bool> _waitForTaskInputWrites(
+    String taskId, {
+    required AgentCancellation cancellation,
+  }) async {
+    while (true) {
+      final tail = _taskInputTails[taskId];
+      if (tail == null) return true;
+      final finished = await Future.any<bool>([
+        tail.then((_) => true),
+        cancellation.whenCancelled.then((_) => false),
+      ]);
+      if (!finished) return false;
+      if (identical(_taskInputTails[taskId], tail)) return true;
+    }
+  }
+
+  Future<void> _appendTaskInputNow({
+    required String taskId,
+    required String prompt,
+    required List<AiAttachment> attachments,
+  }) async {
+    final persistedAttachments = await _persistAttachments(taskId, attachments);
+    final input = QueuedTaskInput(
+      id: _newId('input'),
+      prompt: prompt,
+      attachments: [
+        for (final attachment in persistedAttachments) attachment.toJson(),
+      ],
+      createdAt: DateTime.now().toUtc(),
+    );
+    final activeTurnId = _taskRunIds[taskId];
+    await _appendTaskEventWithTaskUpdate(
+      taskId: taskId,
+      type: 'user.message',
+      payload: {
+        'text': prompt,
+        'queued': true,
+        'queued_input_id': input.id,
+        'turn_id': ?activeTurnId,
+        if (persistedAttachments.isNotEmpty)
+          'attachments': persistedAttachments
+              .map((item) => item.toJson())
+              .toList(),
+      },
+      updateTask: (current) =>
+          current.copyWith(pendingInputs: [...current.pendingInputs, input]),
+    );
+  }
+
   Future<AgentResult> _runTask(
     Task task, {
+    required AgentCancellation cancellation,
     required String turnId,
     required String prompt,
     required List<AiAttachment> attachments,
+    required bool recordUserMessage,
+    String? userMessagePrompt,
+    List<AiAttachment>? userMessageAttachments,
+    Set<String> excludedQueuedInputIds = const <String>{},
     Future<bool> Function(AgentTool tool, Map<String, Object?> arguments)?
     confirm,
     Future<bool> Function(
@@ -2178,7 +2519,6 @@ class AppController extends ChangeNotifier {
       }
       return AgentResult(status: 'failed', messages: const [], error: error);
     }
-    final cancellation = AgentCancellation();
     _runningTasks[task.id] = cancellation;
     _clearStreamingAssistantText(task.id);
     _notify();
@@ -2195,7 +2535,7 @@ class AppController extends ChangeNotifier {
     ProviderProfile? provider;
     AiChatClient? client;
     var serviceStarted = false;
-    var userMessageRecorded = false;
+    var userMessageRecorded = !recordUserMessage;
     var durableAttachments = const <AiAttachment>[];
     final workMode = task.effectiveWorkMode;
     final useLocalTools = workModeUsesLocal(workMode);
@@ -2204,9 +2544,9 @@ class AppController extends ChangeNotifier {
     Future<void> handleAiRetry(AiRetryEvent retry) async {
       _publishTaskProgress(
         task.id,
-        retry.unbounded
-            ? '网络重连 ${retry.attempt}'
-            : '网络重连 ${retry.attempt}/${retry.maxRetries}',
+        retry.maxRetries > 0
+            ? '网络重连 ${retry.attempt}/${retry.maxRetries}'
+            : '网络重连 ${retry.attempt}',
       );
       if (_taskRunIds[task.id] == turnId) {
         // A failed stream may already have delivered partial text. It is not
@@ -2231,14 +2571,17 @@ class AppController extends ChangeNotifier {
     Future<void> appendUserMessage(
       List<AiAttachment> messageAttachments,
     ) async {
+      if (!recordUserMessage) return;
+      final eventPrompt = userMessagePrompt ?? prompt;
+      final eventAttachments = userMessageAttachments ?? messageAttachments;
       await appendTaskEvent(
         taskId: task.id,
         type: 'user.message',
         payload: {
           'turn_id': turnId,
-          'text': prompt,
-          if (messageAttachments.isNotEmpty)
-            'attachments': messageAttachments
+          'text': eventPrompt,
+          if (eventAttachments.isNotEmpty)
+            'attachments': eventAttachments
                 .map((item) => item.toJson())
                 .toList(),
         },
@@ -2317,12 +2660,27 @@ class AppController extends ChangeNotifier {
       durableAttachments = requestAttachments;
       await _migrateLegacyAttachments(task.id);
       provider = previewMode ? null : _providerForTask(task);
+      final queuedInputIds = {
+        ...excludedQueuedInputIds,
+        for (final input
+            in taskForId(task.id)?.pendingInputs ?? const <QueuedTaskInput>[])
+          input.id,
+      };
       final useResponsesHistory = provider?.wireApi != 'chat-completions';
       previousEvents = await _database.loadModelEvents(
         task.id,
         useCompactionBoundary: useResponsesHistory,
       );
-      await appendUserMessage(requestAttachments);
+      if (queuedInputIds.isNotEmpty) {
+        previousEvents = [
+          for (final event in previousEvents)
+            if (event.payload['queued_input_id'] is! String ||
+                !queuedInputIds.contains(event.payload['queued_input_id']))
+              event,
+        ];
+      }
+      durableAttachments = userMessageAttachments ?? requestAttachments;
+      await appendUserMessage(durableAttachments);
       if (previewMode) {
         return await _runPreviewTask(
           task,
@@ -2333,6 +2691,7 @@ class AppController extends ChangeNotifier {
             _systemPrompt(task),
             previousEvents,
             useResponsesCompaction: true,
+            excludedQueuedInputIds: queuedInputIds,
           ),
           cancellation: cancellation,
           turnId: turnId,
@@ -2689,10 +3048,10 @@ class AppController extends ChangeNotifier {
                 contextWindowMode: activeProvider.contextWindowMode,
               )
             : null,
-        // Match Codex's separate unbounded connection-retry loop. This only
-        // applies before a response is received; stream retries retain the
-        // finite policy and explicit provider errors remain terminal.
-        retryPolicy: const AiRetryPolicy(unboundedConnectionRetries: true),
+        // Keep the normal app path on Codex's finite request/stream retry
+        // budgets. The source feature named UnboundedConnectionRetries is an
+        // explicit opt-in, not a default for ordinary mobile tasks.
+        retryPolicy: const AiRetryPolicy(),
         onRetry: handleAiRetry,
       );
       final truncationPolicy =
@@ -2705,6 +3064,7 @@ class AppController extends ChangeNotifier {
         previousEvents,
         useResponsesCompaction: activeProvider.wireApi == 'responses',
         providerId: activeProvider.id,
+        excludedQueuedInputIds: queuedInputIds,
       );
 
       var eventQueue = Future<void>.value();
@@ -2888,19 +3248,25 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  void _finishTask(String taskId, String turnId, Future<AgentResult> future) {
-    if (_taskRunIds[taskId] != turnId ||
+  void _finishTask(
+    String taskId,
+    String runSessionId,
+    Future<AgentResult> future,
+  ) {
+    if (_taskRunSessionIds[taskId] != runSessionId ||
         !identical(_taskRuns[taskId], future)) {
       return;
     }
+    final activeTurnId = _taskRunIds[taskId];
     _taskRuns.remove(taskId);
+    _taskRunSessionIds.remove(taskId);
     _taskRunIds.remove(taskId);
     _runningTasks.remove(taskId);
     final task = taskForId(taskId);
-    if (task != null) {
+    if (task != null && activeTurnId != null) {
       _subagentTrees[task.rootTaskId ?? task.id]?.clearActiveTurn(
         taskId,
-        turnId,
+        activeTurnId,
       );
     }
     _taskProgressLabels.remove(taskId);
@@ -3594,6 +3960,22 @@ class AppController extends ChangeNotifier {
 
   static String _taskProgressForTool(Object? name, Object? arguments) =>
       toolActionSummary(name, arguments);
+
+  Future<void> _awaitCleanup(Future<void> operation) async {
+    try {
+      await operation.timeout(_cleanupTimeout);
+    } catch (_) {
+      // Cleanup is best effort and must not block other resources.
+    }
+  }
+
+  Future<void> _awaitCleanupResult<T>(Future<T> operation) async {
+    try {
+      await operation.timeout(_cleanupTimeout);
+    } catch (_) {
+      // Cleanup is best effort and must not block other resources.
+    }
+  }
 
   void _notify() {
     if (!_disposed) notifyListeners();
@@ -5821,6 +6203,7 @@ class AppController extends ChangeNotifier {
     List<TaskEvent> events, {
     required bool useResponsesCompaction,
     String? providerId,
+    Set<String> excludedQueuedInputIds = const <String>{},
   }) async {
     final messages = <AiMessage>[
       AiMessage(role: 'system', content: systemPrompt),
@@ -5830,6 +6213,37 @@ class AppController extends ChangeNotifier {
     // Responses uses the output item id for the assistant call and a
     // separate call_id for the function_call_output.
     var activeToolCallIds = <String, String>{};
+    final deferredQueuedMessages = <TaskEvent>[];
+    final terminalTurnIds = <String>{};
+
+    void appendUserEvent(TaskEvent event) {
+      final text = event.payload['text'];
+      final attachments = _readAttachments(event.payload['attachments']);
+      if ((text is String && text.isNotEmpty) || attachments.isNotEmpty) {
+        messages.add(
+          AiMessage.user(text is String ? text : '', attachments: attachments),
+        );
+      }
+      assistantIndex = null;
+      activeToolCallIds = <String, String>{};
+    }
+
+    void flushQueuedMessagesForTurn(Object? value) {
+      if (value is! String || value.isEmpty) return;
+      terminalTurnIds.add(value);
+      final ready = <TaskEvent>[];
+      deferredQueuedMessages.removeWhere((event) {
+        if (event.payload['turn_id'] == value) {
+          ready.add(event);
+          return true;
+        }
+        return false;
+      });
+      for (final event in ready) {
+        appendUserEvent(event);
+      }
+    }
+
     int? latestProviderProjectionSequence;
     for (final event in events) {
       if (event.type == 'task.context_changed' &&
@@ -5842,18 +6256,27 @@ class AppController extends ChangeNotifier {
     for (final event in events) {
       switch (event.type) {
         case 'user.message':
-          final text = event.payload['text'];
-          final attachments = _readAttachments(event.payload['attachments']);
-          if ((text is String && text.isNotEmpty) || attachments.isNotEmpty) {
-            messages.add(
-              AiMessage.user(
-                text is String ? text : '',
-                attachments: attachments,
-              ),
-            );
+          if (event.payload['queued'] == true) {
+            final queuedInputId = event.payload['queued_input_id'];
+            if (queuedInputId is String &&
+                excludedQueuedInputIds.contains(queuedInputId)) {
+              // The active Agent turn receives this input through its prompt;
+              // replaying the durable event here would send it twice.
+              continue;
+            }
+            final queuedTurnId = event.payload['turn_id'];
+            if (queuedTurnId is String &&
+                terminalTurnIds.contains(queuedTurnId)) {
+              appendUserEvent(event);
+            } else {
+              // A queued message may have been persisted between an assistant
+              // tool call and its result. Hold it until that turn's terminal
+              // event so Responses never receives a broken call/result pair.
+              deferredQueuedMessages.add(event);
+            }
+            continue;
           }
-          assistantIndex = null;
-          activeToolCallIds = <String, String>{};
+          appendUserEvent(event);
         case 'assistant.completed':
           final isChatCompletions =
               event.payload['wire_api'] == 'chat-completions';
@@ -6007,6 +6430,8 @@ class AppController extends ChangeNotifier {
             ),
           );
           activeToolCallIds.remove(id);
+        case 'task.completed':
+          flushQueuedMessagesForTurn(event.payload['turn_id']);
         case 'task.recovered':
           _appendPendingToolResults(
             messages,
@@ -6014,6 +6439,7 @@ class AppController extends ChangeNotifier {
             'The previous mobile task was interrupted. Inspect the server '
             'before continuing.',
           );
+          flushQueuedMessagesForTurn(event.payload['turn_id']);
         case 'task.cancelled':
           _appendPendingToolResults(
             messages,
@@ -6021,6 +6447,7 @@ class AppController extends ChangeNotifier {
             'The tool call was cancelled. The remote result is unknown; '
             'inspect the server before continuing.',
           );
+          flushQueuedMessagesForTurn(event.payload['turn_id']);
         case 'task.unknown':
           final error = event.payload['error'];
           _appendPendingToolResults(
@@ -6031,12 +6458,14 @@ class AppController extends ChangeNotifier {
                 : 'The remote tool result is unknown; inspect the server '
                       'before continuing.',
           );
+          flushQueuedMessagesForTurn(event.payload['turn_id']);
         case 'task.failed':
           _appendPendingToolResults(
             messages,
             activeToolCallIds,
             'The task failed before the tool result was recorded.',
           );
+          flushQueuedMessagesForTurn(event.payload['turn_id']);
         case 'task.context_changed':
           if (_isHistoryBoundary(event.payload)) {
             subagentNotifications.clear();
@@ -6087,6 +6516,12 @@ class AppController extends ChangeNotifier {
     // so a late child event can never split an assistant tool call from its
     // matching tool result.
     messages.addAll(subagentNotifications);
+    // Old queued events may not carry a turn id. They cannot be matched to a
+    // terminal marker, but retaining them at the end is safer than dropping a
+    // user request from the next model context.
+    for (final event in deferredQueuedMessages) {
+      appendUserEvent(event);
+    }
     for (var index = 0; index < messages.length; index++) {
       final message = messages[index];
       if (message.attachments.isEmpty) continue;
@@ -6727,30 +7162,21 @@ class AppController extends ChangeNotifier {
         connectionKeys.add(_sshPoolKey(taskId, serverId));
       }
     }
-    try {
-      await tools?.close();
-      await toolGroup?.close();
-    } finally {
-      for (final key in connectionKeys) {
-        await _sshPool.release(key);
-      }
-    }
+    await Future.wait<void>([
+      if (tools != null) _awaitCleanup(tools.close()),
+      if (toolGroup != null) _awaitCleanup(toolGroup.close()),
+    ], eagerError: false);
+    await Future.wait<void>([
+      for (final key in connectionKeys) _awaitCleanup(_sshPool.release(key)),
+    ], eagerError: false);
   }
 
   Future<void> _closePhoneTasks() async {
     final taskIds = <String>{..._phoneTools.keys, ..._phoneToolGroups.keys};
-    for (final taskId in taskIds) {
-      try {
-        await _releasePhoneTask(taskId);
-      } catch (_) {
-        // Continue closing the remaining task connections.
-      }
-    }
-    try {
-      await _sshPool.close();
-    } catch (_) {
-      // Resource cleanup is best effort during app shutdown.
-    }
+    await Future.wait<void>([
+      for (final taskId in taskIds) _releasePhoneTask(taskId),
+    ], eagerError: false);
+    await _awaitCleanup(_sshPool.close());
   }
 
   AgentTool _imageGenerationTool(
@@ -7146,30 +7572,26 @@ class AppController extends ChangeNotifier {
     List<SubagentTree> trees,
   ) async {
     await Future.wait([
-      for (final tree in trees) tree.close(),
+      for (final tree in trees) _awaitCleanup(tree.close()),
     ], eagerError: false);
     await _closePhoneTasks();
-    try {
-      await Future.wait(runs, eagerError: false);
-    } catch (_) {
-      // Continue closing resources after a task failure.
-    }
+    await Future.wait([
+      for (final run in runs) _awaitCleanupResult(run),
+    ], eagerError: false);
     for (final client in _mcpClients.values) {
       client.close();
     }
     _mcpClients.clear();
-    await Future.wait(
-      List<Future<void>>.of(_taskEventTails.values),
-      eagerError: false,
-    );
-    await Future.wait(
-      List<Future<void>>.of(_taskStatusTails.values),
-      eagerError: false,
-    );
-    await _localPreview.close();
+    await Future.wait([
+      for (final tail in _taskEventTails.values) _awaitCleanup(tail),
+    ], eagerError: false);
+    await Future.wait([
+      for (final tail in _taskStatusTails.values) _awaitCleanup(tail),
+    ], eagerError: false);
+    await _awaitCleanup(_localPreview.close());
     _providerUsageClient.close();
     _localAccess.clear();
-    await _database.close();
+    await _awaitCleanup(_database.close());
   }
 }
 
@@ -7181,6 +7603,7 @@ class _ContextUsageEvent {
 }
 
 const _agentAutoExecuteSetting = 'agent_auto_execute';
+const _cleanupTimeout = Duration(seconds: 5);
 const _betaUpdatesSetting = 'beta_updates_enabled';
 const _floatingCapsuleSetting = 'floating_capsule_enabled';
 const _floatingCapsuleScaleSetting = 'floating_capsule_scale';

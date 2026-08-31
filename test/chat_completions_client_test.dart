@@ -54,6 +54,7 @@ void main() {
       );
       addTearDown(client.close);
       expect(client.maxResponseBytes, isNull);
+      expect(client.timeout, Duration.zero);
 
       final response = await client.complete(
         messages: [

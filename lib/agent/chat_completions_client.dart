@@ -53,6 +53,8 @@ class ChatCompletionsClient implements AiChatClient {
     bool? deepSeekThinking,
     bool stream = true,
     http.Client? client,
+    // This is an inactivity limit for the provider transport, not a
+    // wall-clock limit for a remote command running behind a tool call.
     Duration timeout = const Duration(minutes: 5),
     int? maxResponseBytes,
     AiRetryPolicy retryPolicy = const AiRetryPolicy(),
@@ -181,13 +183,18 @@ class ChatCompletionsClient implements AiChatClient {
       } catch (error) {
         if (retryPolicy.unboundedConnectionRetries &&
             isAiConnectionError(error)) {
+          final maxConnectionRetries =
+              retryPolicy.effectiveConnectionMaxRetries;
+          if (connectionRetries >= maxConnectionRetries) {
+            rethrow;
+          }
           connectionRetries++;
           final delay = retryPolicy.connectionDelayFor(connectionRetries);
           try {
             await onRetry?.call(
               AiRetryEvent(
                 attempt: connectionRetries,
-                maxRetries: 0,
+                maxRetries: maxConnectionRetries,
                 delay: delay,
                 error: error,
                 unbounded: true,
@@ -244,7 +251,7 @@ class ChatCompletionsClient implements AiChatClient {
     late http.StreamedResponse response;
     try {
       response = await _awaitCancellation(
-        _client.send(request).timeout(timeout),
+        _withTimeout(_client.send(request)),
         cancellation,
       );
     } on AiRequestCancelled {
@@ -261,10 +268,9 @@ class ChatCompletionsClient implements AiChatClient {
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final body = await _awaitCancellation(
-        _readLimitedText(
-          response.stream,
-          maxBytes: _maxProviderErrorBytes,
-        ).timeout(timeout),
+        _withTimeout(
+          _readLimitedText(response.stream, maxBytes: _maxProviderErrorBytes),
+        ),
         cancellation,
       );
       final safeBody = _sanitizeProviderError(body, _apiKey);
@@ -304,10 +310,9 @@ class ChatCompletionsClient implements AiChatClient {
     late String body;
     try {
       body = await _awaitCancellation(
-        _readLimitedText(
-          response.stream,
-          maxBytes: maxResponseBytes,
-        ).timeout(timeout),
+        _withTimeout(
+          _readLimitedText(response.stream, maxBytes: maxResponseBytes),
+        ),
         cancellation,
       );
     } on AiRequestCancelled {
@@ -353,6 +358,16 @@ class ChatCompletionsClient implements AiChatClient {
       throw const AiRequestCancelled();
     });
     return Future.any<T>([operation, cancelled]);
+  }
+
+  Future<T> _withTimeout<T>(Future<T> operation) {
+    final limit = timeout;
+    return limit <= Duration.zero ? operation : operation.timeout(limit);
+  }
+
+  Stream<T> _withStreamTimeout<T>(Stream<T> stream) {
+    final limit = timeout;
+    return limit <= Duration.zero ? stream : stream.timeout(limit);
   }
 
   Future<AiMessage> _readSse(
@@ -428,11 +443,12 @@ class ChatCompletionsClient implements AiChatClient {
       _mergeStreamToolCalls(toolCalls, deltaMap['tool_calls']);
     }
 
-    await for (final line
-        in _limitedBytes(response.stream, maxBytes: maxResponseBytes)
-            .transform(const Utf8Decoder(allowMalformed: true))
-            .transform(const LineSplitter())
-            .timeout(timeout)) {
+    final lines = _withStreamTimeout(
+      _limitedBytes(response.stream, maxBytes: maxResponseBytes)
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter()),
+    );
+    await for (final line in lines) {
       if (line.isEmpty) {
         processEvent();
         if (streamDone) break;

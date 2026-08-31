@@ -148,6 +148,12 @@ class MemoryAppDatabase extends AppDatabase {
   }
 
   @override
+  Future<void> saveTaskAndEvent(Task task, TaskEvent event) async {
+    _tasks[task.id] = task;
+    _events[event.eventId] = event;
+  }
+
+  @override
   Future<List<Task>> loadTasks() async {
     final values = _tasks.values.toList()
       ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
@@ -164,6 +170,23 @@ class MemoryAppDatabase extends AppDatabase {
   @override
   Future<void> saveEvent(TaskEvent event) async {
     _events[event.eventId] = event;
+  }
+
+  @override
+  Future<Set<String>> loadConsumedTaskInputIds(String taskId) async {
+    final ids = <String>{};
+    for (final event in _events.values) {
+      if (event.taskId != taskId || event.type != 'task.input_consumed') {
+        continue;
+      }
+      final values = event.payload['queued_input_ids'];
+      if (values is Iterable) {
+        for (final value in values) {
+          if (value is String && value.isNotEmpty) ids.add(value);
+        }
+      }
+    }
+    return Set.unmodifiable(ids);
   }
 
   @override

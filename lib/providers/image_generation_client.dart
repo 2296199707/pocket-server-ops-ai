@@ -71,7 +71,9 @@ class ImageGenerationClient {
     required String baseUrl,
     required String apiKey,
     http.Client? client,
-    Duration timeout = const Duration(minutes: 2),
+    // Zero means wait for the provider response or image download. A positive
+    // duration is an explicit caller-selected timeout.
+    Duration timeout = Duration.zero,
     int? maxResponseBytes,
   }) {
     return ImageGenerationClient._(
@@ -90,9 +92,6 @@ class ImageGenerationClient {
     this.timeout,
     this.maxResponseBytes,
   ) {
-    if (timeout <= Duration.zero) {
-      throw ArgumentError.value(timeout, 'timeout', 'must be positive');
-    }
     final responseLimit = maxResponseBytes;
     if (responseLimit != null && responseLimit <= 0) {
       throw ArgumentError.value(
@@ -136,13 +135,13 @@ class ImageGenerationClient {
     request.body = jsonEncode(requestBody);
 
     final response = await _awaitCancellation(
-      _client.send(request).timeout(timeout),
+      _withTimeout(_client.send(request)),
       cancellation,
     );
     final isError = response.statusCode < 200 || response.statusCode >= 300;
     final bodyLimit = isError ? _maxErrorBodyBytes : maxResponseBytes;
     final body = await _awaitCancellation(
-      _readLimitedText(response.stream, maxBytes: bodyLimit).timeout(timeout),
+      _withTimeout(_readLimitedText(response.stream, maxBytes: bodyLimit)),
       cancellation,
     );
 
@@ -166,15 +165,14 @@ class ImageGenerationClient {
       throw const ImageGenerationInvalidResponseException('图片供应商返回的 URL 无效');
     }
     final response = await _awaitCancellation(
-      _client.send(http.Request('GET', uri)).timeout(timeout),
+      _withTimeout(_client.send(http.Request('GET', uri))),
       cancellation,
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final body = await _awaitCancellation(
-        _readLimitedText(
-          response.stream,
-          maxBytes: _maxErrorBodyBytes,
-        ).timeout(timeout),
+        _withTimeout(
+          _readLimitedText(response.stream, maxBytes: _maxErrorBodyBytes),
+        ),
         cancellation,
       );
       throw ImageGenerationHttpException(
@@ -183,10 +181,9 @@ class ImageGenerationClient {
       );
     }
     final bytes = await _awaitCancellation(
-      _readLimitedBytes(
-        response.stream,
-        maxBytes: maxResponseBytes,
-      ).timeout(timeout),
+      _withTimeout(
+        _readLimitedBytes(response.stream, maxBytes: maxResponseBytes),
+      ),
       cancellation,
     );
     final contentType = response.headers['content-type']
@@ -281,6 +278,11 @@ class ImageGenerationClient {
       throw const ImageGenerationCancelled();
     });
     return Future.any<T>([operation, cancelled]);
+  }
+
+  Future<T> _withTimeout<T>(Future<T> operation) {
+    final limit = timeout;
+    return limit <= Duration.zero ? operation : operation.timeout(limit);
   }
 
   static Future<String> _readLimitedText(

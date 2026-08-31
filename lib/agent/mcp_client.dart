@@ -105,6 +105,8 @@ class McpClient {
     http.Client? client,
     this.clientName = 'pocket-server-ops-ai',
     this.clientVersion = '1.0.4',
+    // The default bounds transport waits. An explicit zero disables the
+    // timeout for callers that expect a long-running MCP operation.
     this.requestTimeout = const Duration(minutes: 2),
   })
     // ignore: prefer_initializing_formals
@@ -170,8 +172,12 @@ class McpClient {
   Future<List<McpToolDescriptor>> listTools() async {
     await initialize();
     final descriptors = <McpToolDescriptor>[];
+    final seenCursors = <String>{};
     String? cursor;
     while (true) {
+      if (cursor != null && !seenCursors.add(cursor)) {
+        throw const McpException('MCP tools/list 分页 cursor 循环');
+      }
       final params = <String, Object?>{};
       if (cursor != null) params['cursor'] = cursor;
       Object? result;
@@ -196,7 +202,7 @@ class McpClient {
         );
       }
       final next = result['nextCursor'];
-      if (next is! String || next.trim().isEmpty || next == cursor) break;
+      if (next is! String || next.trim().isEmpty) break;
       cursor = next;
     }
     return List.unmodifiable(descriptors);
@@ -271,9 +277,14 @@ class McpClient {
     }
     late http.Response response;
     try {
-      response = await _client
-          .post(uri, headers: headers, body: jsonEncode(body))
-          .timeout(requestTimeout);
+      final request = _client.post(
+        uri,
+        headers: headers,
+        body: jsonEncode(body),
+      );
+      response = requestTimeout <= Duration.zero
+          ? await request
+          : await request.timeout(requestTimeout);
     } on TimeoutException catch (error) {
       throw McpException('MCP 请求超时', cause: error);
     } on SocketException catch (error) {

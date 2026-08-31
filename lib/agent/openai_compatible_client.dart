@@ -136,6 +136,7 @@ class AiRetryPolicy {
     this.unboundedConnectionRetries = false,
     this.connectionInitialDelay = const Duration(seconds: 5),
     this.connectionMaxDelay = const Duration(seconds: 60),
+    this.connectionMaxRetries = 5,
   }) : _legacyMaxRetries = maxRetries;
 
   final int requestMaxRetries;
@@ -146,10 +147,16 @@ class AiRetryPolicy {
   final bool unboundedConnectionRetries;
   final Duration connectionInitialDelay;
   final Duration connectionMaxDelay;
+  final int connectionMaxRetries;
 
   int get effectiveRequestMaxRetries => _legacyMaxRetries ?? requestMaxRetries;
 
   int get effectiveStreamMaxRetries => _legacyMaxRetries ?? streamMaxRetries;
+
+  /// The legacy flag selects a separate connection budget; it never means
+  /// that a task may wait forever. A negative value is treated as disabled.
+  int get effectiveConnectionMaxRetries =>
+      connectionMaxRetries < 0 ? 0 : connectionMaxRetries;
 
   /// Backwards-compatible alias. New callers should choose the request or
   /// stream budget explicitly.
@@ -199,8 +206,8 @@ class AiRetryEvent {
   final Duration delay;
   final Object error;
 
-  /// True for Codex's separate connection retry loop. Its attempt count is
-  /// independent from the finite sampling retry budget, so [maxRetries] is 0.
+  /// True when the legacy separate connection budget was selected. Despite the
+  /// historical name, that budget is finite and [maxRetries] contains its cap.
   final bool unbounded;
 }
 
@@ -351,6 +358,9 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required String model,
     String reasoningEffort = 'default',
     http.Client? client,
+    // Match Codex's configurable five-minute stream idle timeout. This is an
+    // inactivity limit for the provider transport, not a wall-clock limit for
+    // a remote command running behind a completed tool call.
     Duration timeout = const Duration(minutes: 5),
     int? maxResponseBytes,
     List<String>? inputModalities,
@@ -455,6 +465,8 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       tools: tools,
       onContentDelta: onContentDelta,
       cancellation: cancellation,
+      allowUnboundedConnectionRetries:
+          retryPolicy.unboundedConnectionRetries,
     );
   }
 
@@ -463,7 +475,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required List<AiToolDefinition> tools,
     String? instructions,
     bool useContextManagement = true,
-    bool allowUnboundedConnectionRetries = true,
+    bool allowUnboundedConnectionRetries = false,
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
   }) {
@@ -540,7 +552,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     http.Request request, {
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
-    bool allowUnboundedConnectionRetries = true,
+    bool allowUnboundedConnectionRetries = false,
   }) async {
     var requestRetries = 0;
     var streamRetries = 0;
@@ -559,13 +571,18 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
         if (allowUnboundedConnectionRetries &&
             retryPolicy.unboundedConnectionRetries &&
             isAiConnectionError(error)) {
+          final maxConnectionRetries =
+              retryPolicy.effectiveConnectionMaxRetries;
+          if (connectionRetries >= maxConnectionRetries) {
+            rethrow;
+          }
           connectionRetries++;
           final delay = retryPolicy.connectionDelayFor(connectionRetries);
           try {
             await onRetry?.call(
               AiRetryEvent(
                 attempt: connectionRetries,
-                maxRetries: 0,
+                maxRetries: maxConnectionRetries,
                 delay: delay,
                 error: error,
                 unbounded: true,
@@ -611,6 +628,16 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     }
   }
 
+  Future<T> _withTimeout<T>(Future<T> operation) {
+    final limit = timeout;
+    return limit <= Duration.zero ? operation : operation.timeout(limit);
+  }
+
+  Stream<T> _withStreamTimeout<T>(Stream<T> stream) {
+    final limit = timeout;
+    return limit <= Duration.zero ? stream : stream.timeout(limit);
+  }
+
   Future<AiMessage> _sendOnce(
     http.Request request, {
     void Function(String delta)? onContentDelta,
@@ -625,7 +652,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     late http.StreamedResponse response;
     try {
       response = await _awaitCancellation(
-        _client.send(request).timeout(timeout),
+        _withTimeout(_client.send(request)),
         cancellation,
       );
     } on AiRequestCancelled {
@@ -644,10 +671,9 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final body = await _awaitCancellation(
-        _readLimitedText(
-          response.stream,
-          maxBytes: _maxProviderErrorBytes,
-        ).timeout(timeout),
+        _withTimeout(
+          _readLimitedText(response.stream, maxBytes: _maxProviderErrorBytes),
+        ),
         cancellation,
       );
       throw _ProviderHttpError(
@@ -679,10 +705,9 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     late String body;
     try {
       body = await _awaitCancellation(
-        _readLimitedText(
-          response.stream,
-          maxBytes: maxResponseBytes,
-        ).timeout(timeout),
+        _withTimeout(
+          _readLimitedText(response.stream, maxBytes: maxResponseBytes),
+        ),
         cancellation,
       );
     } on AiRequestCancelled {
@@ -948,11 +973,12 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       }
     }
 
-    await for (final line
-        in _limitedBytes(response.stream, maxBytes: maxResponseBytes)
-            .transform(const Utf8Decoder(allowMalformed: true))
-            .transform(const LineSplitter())
-            .timeout(timeout)) {
+    final lines = _withStreamTimeout(
+      _limitedBytes(response.stream, maxBytes: maxResponseBytes)
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter()),
+    );
+    await for (final line in lines) {
       if (line.isEmpty) {
         processEvent();
         if (streamDone || completedEvent) break;
@@ -1335,9 +1361,6 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   static List<AiToolCall> _finishResponseToolCalls(
     Map<String, _ResponsesToolCallAccumulator> calls,
   ) {
-    if (calls.length > _maxToolCallsPerResponse) {
-      throw const FormatException('AI response has too many tool calls');
-    }
     final result = <AiToolCall>[];
     for (var index = 0; index < calls.length; index++) {
       final call = calls.values.elementAt(index);
@@ -1488,7 +1511,6 @@ class _ResponsesToolCallAccumulator {
   bool inProgress = false;
 }
 
-const _maxToolCallsPerResponse = 128;
 const _maxProviderErrorBytes = 64 * 1024;
 
 String _redactProviderSecrets(String value, String apiKey) {

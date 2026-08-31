@@ -95,6 +95,7 @@ void main() {
         },
       );
       addTearDown(client.close);
+      expect(client.requestTimeout, const Duration(minutes: 2));
 
       final tools = await client.listTools();
       final result = await client.callTool('inspect_apk', {'path': 'app.apk'});
@@ -110,6 +111,92 @@ void main() {
         'tools/call',
       ]);
       expect(requests[2]['params'], isEmpty);
+    },
+  );
+
+  test('applies an explicit MCP request timeout', () async {
+    server.listen((request) async {
+      await utf8.decoder.bind(request).join();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await _jsonResponse(request, {
+        'jsonrpc': '2.0',
+        'id': 1,
+        'result': {'protocolVersion': mcpProtocolVersion},
+      });
+    });
+
+    final client = McpClient(
+      url: 'http://${server.address.address}:${server.port}/mcp',
+      requestTimeout: const Duration(milliseconds: 10),
+    );
+    addTearDown(client.close);
+
+    await expectLater(
+      client.initialize(),
+      throwsA(
+        isA<McpException>().having(
+          (error) => error.message,
+          'message',
+          contains('MCP 请求超时'),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'reports a tools/list cursor loop without requesting a cursor twice',
+    () async {
+      final cursors = <String?>[];
+      server.listen((request) async {
+        final body = await utf8.decoder.bind(request).join();
+        final message = Map<String, Object?>.from(jsonDecode(body) as Map);
+        switch (message['method']) {
+          case 'initialize':
+            request.response.headers.add('Mcp-Session-Id', 'loop-session');
+            await _jsonResponse(request, {
+              'jsonrpc': '2.0',
+              'id': message['id'],
+              'result': {'protocolVersion': mcpProtocolVersion},
+            });
+          case 'notifications/initialized':
+            request.response.statusCode = 202;
+            await request.response.close();
+          case 'tools/list':
+            final params = Map<String, Object?>.from(message['params'] as Map);
+            cursors.add(params['cursor'] as String?);
+            final next = switch (params['cursor']) {
+              null => 'A',
+              'A' => 'B',
+              'B' => 'A',
+              _ => null,
+            };
+            await _jsonResponse(request, {
+              'jsonrpc': '2.0',
+              'id': message['id'],
+              'result': {'tools': [], if (next != null) 'nextCursor': next},
+            });
+          default:
+            request.response.statusCode = 404;
+            await request.response.close();
+        }
+      });
+
+      final client = McpClient(
+        url: 'http://${server.address.address}:${server.port}/mcp',
+      );
+      addTearDown(client.close);
+
+      await expectLater(
+        client.listTools(),
+        throwsA(
+          isA<McpException>().having(
+            (error) => error.message,
+            'message',
+            contains('分页 cursor 循环'),
+          ),
+        ),
+      );
+      expect(cursors, [null, 'A', 'B']);
     },
   );
 

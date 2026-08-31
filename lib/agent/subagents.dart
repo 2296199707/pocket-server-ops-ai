@@ -65,6 +65,10 @@ class SubagentNode {
   Completer<void>? startSettled;
   bool cancelRequested = false;
   bool followupPending = false;
+  // Set when shutdown could not prove that the underlying run settled. A late
+  // result must not make an uncertain lifecycle look completed.
+  bool lifecycleUnknown = false;
+  Completer<void>? lifecycleChange;
   final List<String> mailbox;
 
   bool get isActive =>
@@ -86,6 +90,7 @@ class SubagentTree {
     required this._start,
     required this._onEvent,
     required this._interrupt,
+    this.lifecycleTimeout = const Duration(seconds: 5),
     this._discard,
     this._onStateChanged,
     Iterable<SubagentNode> restoredNodes = const [],
@@ -106,11 +111,11 @@ class SubagentTree {
     }
   }
 
-  static const minWaitTimeout = Duration(seconds: 10);
-  static const maxWaitTimeout = Duration(hours: 1);
-  static const defaultWaitTimeout = Duration(seconds: 30);
+  static const _defaultWaitTimeout = Duration(seconds: 30);
+  static const _maxWaitTimeout = Duration(hours: 1);
 
   final String rootTaskId;
+  final Duration lifecycleTimeout;
   SubagentSettings settings;
   SubagentPrepare _prepare;
   SubagentStart _start;
@@ -209,48 +214,142 @@ class SubagentTree {
 
   Future<void> _cancelAll() async {
     _cancelling = true;
+    final deadline = DateTime.now().add(lifecycleTimeout);
     try {
       while (true) {
         final active = agents.where((node) => node.isActive).toList()
           ..sort((left, right) => right.depth.compareTo(left.depth));
+        if (active.isEmpty && _operations.isEmpty) return;
+        var remaining = deadline.difference(DateTime.now());
+        if (remaining <= Duration.zero) {
+          _markUnknownForCleanup(agents);
+          return;
+        }
         for (final node in active) {
           node.cancelRequested = true;
           try {
-            await _interrupt(node);
+            await _interrupt(node).timeout(remaining);
+          } on TimeoutException {
+            _markUnknown(node, '停止请求超时，远程状态未知');
           } catch (_) {
             // Keep cancelling the rest of the tree if one task is already gone.
           }
+          remaining = deadline.difference(DateTime.now());
+          if (remaining <= Duration.zero) break;
         }
-        await _waitForAll();
-        if (!hasActiveAgents && _operations.isEmpty) return;
+        remaining = deadline.difference(DateTime.now());
+        if (remaining <= Duration.zero) {
+          _markUnknownForCleanup(agents);
+          return;
+        }
+        final settled = await _waitForAll(timeout: remaining);
+        if (!settled) {
+          _markUnknownForCleanup(agents);
+          return;
+        }
       }
     } finally {
       _cancelling = false;
     }
   }
 
-  Future<void> waitForChildren() => _waitFor(agents);
+  Future<void> waitForChildren() async {
+    await _waitFor(agents);
+  }
 
-  Future<void> _waitFor(Iterable<SubagentNode> nodes) async {
+  Future<bool> _waitFor(
+    Iterable<SubagentNode> nodes, {
+    Duration? timeout,
+  }) async {
+    final deadline = timeout == null ? null : DateTime.now().add(timeout);
     while (true) {
       final pending = <Future<void>>[];
       for (final node in nodes) {
-        if (node.isActive) _addNodeWaitFuture(node, pending);
+        if (_hasPendingWork(node)) _addNodeWaitFuture(node, pending);
       }
-      if (pending.isEmpty) return;
-      await Future.wait(pending, eagerError: false);
+      if (pending.isEmpty) return true;
+      if (deadline == null) {
+        await Future.wait(pending, eagerError: false);
+        continue;
+      }
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) return false;
+      try {
+        await Future.wait(pending, eagerError: false).timeout(remaining);
+      } on TimeoutException {
+        return false;
+      }
     }
   }
 
-  Future<void> _waitForAll() async {
+  Future<bool> _waitForAll({Duration? timeout}) async {
+    final deadline = timeout == null ? null : DateTime.now().add(timeout);
     while (true) {
       final pending = <Future<void>>[..._operations];
       for (final node in agents) {
-        if (node.isActive) _addNodeWaitFuture(node, pending);
+        if (_hasPendingWork(node)) _addNodeWaitFuture(node, pending);
       }
-      if (pending.isEmpty) return;
-      await Future.wait(pending, eagerError: false);
+      if (pending.isEmpty) return true;
+      if (deadline == null) {
+        await Future.wait(pending, eagerError: false);
+        continue;
+      }
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) return false;
+      try {
+        await Future.wait(pending, eagerError: false).timeout(remaining);
+      } on TimeoutException {
+        return false;
+      }
     }
+  }
+
+  static bool _hasPendingWork(SubagentNode node) {
+    final startSettled = node.startSettled;
+    return node.isActive ||
+        node.run != null ||
+        node.observation != null ||
+        (startSettled != null && !startSettled.isCompleted);
+  }
+
+  void _markUnknownForCleanup(Iterable<SubagentNode> nodes) {
+    for (final node in nodes) {
+      if (_hasPendingWork(node)) _markUnknown(node);
+    }
+  }
+
+  void _markUnknown(SubagentNode node, [String reason = '停止请求超时，远程状态未知']) {
+    if (node.lifecycleUnknown) return;
+    node.lifecycleUnknown = true;
+    node.cancelRequested = true;
+    node.status = 'unknown';
+    node.summary = _summary(reason);
+    node.updatedAt = DateTime.now().toUtc();
+    node.lastEventType = 'subagent.unknown';
+    _signalLifecycleChange(node);
+    unawaited(
+      _emitLifecycleBestEffort(node, 'subagent.unknown', {
+        'agent_id': node.id,
+        'agent_path': node.agentPath,
+        'task_name': node.taskName,
+        'status': node.status,
+        'summary': node.summary,
+      }),
+    );
+  }
+
+  static Future<void> _lifecycleChangeFuture(SubagentNode node) {
+    final existing = node.lifecycleChange;
+    if (existing != null && !existing.isCompleted) return existing.future;
+    final created = Completer<void>();
+    node.lifecycleChange = created;
+    return created.future;
+  }
+
+  static void _signalLifecycleChange(SubagentNode node) {
+    final change = node.lifecycleChange;
+    if (change != null && !change.isCompleted) change.complete();
+    node.lifecycleChange = null;
   }
 
   static void _addNodeWaitFuture(
@@ -372,6 +471,7 @@ class SubagentTree {
                 'type': 'integer',
                 'minimum': 0,
                 'maximum': 3600000,
+                'description': 'Timeout in milliseconds. Defaults to 30000; maximum is 3600000.',
               },
             },
           },
@@ -602,6 +702,9 @@ class SubagentTree {
     final node = _target(caller, arguments['target']);
     final message = _requiredText(arguments, 'message');
     if (message.trim().isEmpty) throw ArgumentError('message is required');
+    if (node.lifecycleUnknown && _hasPendingWork(node)) {
+      throw StateError('子代理状态未知，底层任务尚未结束，请稍后再继续');
+    }
     if (node.status == 'closed') {
       throw StateError('子代理已关闭，请先调用 resume_agent');
     }
@@ -661,6 +764,7 @@ class SubagentTree {
   }) async {
     final previousStatus = node.status;
     node.cancelRequested = false;
+    node.lifecycleUnknown = false;
     node.status = 'pending';
     node.summary = '';
     node.run = null;
@@ -839,8 +943,12 @@ class SubagentTree {
     final deadline = DateTime.now().add(timeout);
     while (true) {
       final pending = <Future<void>>[];
+      final lifecycleChanges = <Future<void>>[];
       for (final node in targets) {
-        if (node.isActive) _addNodeWaitFuture(node, pending);
+        if (node.isActive) {
+          _addNodeWaitFuture(node, pending);
+          lifecycleChanges.add(_lifecycleChangeFuture(node));
+        }
       }
       if (pending.isEmpty) break;
       final remaining = deadline.difference(DateTime.now());
@@ -849,7 +957,9 @@ class SubagentTree {
         break;
       }
       try {
-        await Future.wait(pending, eagerError: false).timeout(remaining);
+        final allSettled = Future.wait(pending, eagerError: false);
+        await Future.any<void>([allSettled, ...lifecycleChanges])
+            .timeout(remaining);
       } on TimeoutException {
         timedOut = true;
         break;
@@ -894,22 +1004,35 @@ class SubagentTree {
       for (final child in agents)
         if (child != node && _isDescendantOf(child, node)) child,
     ]..sort((left, right) => right.depth.compareTo(left.depth));
+    final deadline = DateTime.now().add(lifecycleTimeout);
     for (final target in targets) {
       if (!target.isActive) continue;
       target.cancelRequested = true;
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) {
+        _markUnknown(target);
+        continue;
+      }
       try {
-        await _interrupt(target);
+        await _interrupt(target).timeout(remaining);
+      } on TimeoutException {
+        _markUnknown(target);
       } catch (_) {
         // A turn may have finished between the lookup and the close request.
       }
     }
-    await _waitFor(targets);
+    final remaining = deadline.difference(DateTime.now());
+    final settled = remaining <= Duration.zero
+        ? false
+        : await _waitFor(targets, timeout: remaining);
+    if (!settled) _markUnknownForCleanup(targets);
     for (final target in targets) {
       target.cancelRequested = false;
       target.followupPending = false;
+      if (target.lifecycleUnknown) continue;
       target.status = 'closed';
       target.updatedAt = DateTime.now().toUtc();
-      await _emit(target, 'subagent.closed', {
+      await _emitLifecycleBestEffort(target, 'subagent.closed', {
         'agent_id': target.id,
         'agent_path': target.agentPath,
         'task_name': target.taskName,
@@ -952,6 +1075,10 @@ class SubagentTree {
     } catch (error) {
       runError = error;
     }
+    if (node.lifecycleUnknown) {
+      _releaseRuntime(node, run);
+      return;
+    }
     final finalStatus = runError != null
         ? 'failed'
         : switch (result!.status) {
@@ -985,6 +1112,10 @@ class SubagentTree {
     // when the parent is being deleted at the same time. The task result and
     // the in-memory node remain authoritative even if persistence is gone.
     await _emitBestEffort(node, eventType, completionPayload);
+    if (node.lifecycleUnknown) {
+      _releaseRuntime(node, run);
+      return;
+    }
     // Re-check after the completion event. An explicit followup_task may be
     // delivered while the event is being persisted; in that case it already
     // consumed the mailbox and started the next turn. Starting from the old
@@ -995,6 +1126,7 @@ class SubagentTree {
         !_closed &&
         !_cancelling &&
         !node.cancelRequested &&
+        !node.lifecycleUnknown &&
         finalStatus != 'interrupted';
     if (pendingFollowup) {
       final prompt = node.mailbox.join('\n\n');
@@ -1140,6 +1272,18 @@ class SubagentTree {
     }
   }
 
+  Future<void> _emitLifecycleBestEffort(
+    SubagentNode node,
+    String type,
+    Map<String, Object?> payload,
+  ) async {
+    try {
+      await _emit(node, type, payload).timeout(lifecycleTimeout);
+    } catch (_) {
+      // Shutdown must not wait for a database or event sink that is offline.
+    }
+  }
+
   String _newId() {
     _idSequence++;
     return 'agent-${DateTime.now().microsecondsSinceEpoch}-$_idSequence';
@@ -1182,11 +1326,16 @@ class SubagentTree {
   }
 
   static Duration _waitDuration(Object? value) {
-    final requested = value is num ? value.toInt() : null;
-    if (requested == null) return defaultWaitTimeout;
+    if (value == null) return _defaultWaitTimeout;
+    if (value is! num) throw ArgumentError('timeout_ms must be an integer');
+    final requested = value.toInt();
+    if (requested < 0) {
+      throw ArgumentError('timeout_ms must be zero or greater');
+    }
     final duration = Duration(milliseconds: requested);
-    if (duration < minWaitTimeout) return minWaitTimeout;
-    if (duration > maxWaitTimeout) return maxWaitTimeout;
+    if (duration > _maxWaitTimeout) {
+      throw ArgumentError('timeout_ms must not exceed 3600000');
+    }
     return duration;
   }
 

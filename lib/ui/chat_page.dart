@@ -380,7 +380,6 @@ class ChatPageState extends State<ChatPage> {
                         keyboardType: TextInputType.multiline,
                         textInputAction: TextInputAction.newline,
                         enableInteractiveSelection: true,
-                        enabled: !_sending,
                         decoration: InputDecoration(
                           hintText: task?.mode == 'agent' || _mode == 'agent'
                               ? '告诉手机 Agent 要完成什么'
@@ -419,7 +418,6 @@ class ChatPageState extends State<ChatPage> {
                                 padding: EdgeInsets.zero,
                                 onPressed:
                                     widget.controller.providers.isEmpty ||
-                                        running ||
                                         _sending
                                     ? null
                                     : _openComposerActions,
@@ -481,7 +479,7 @@ class ChatPageState extends State<ChatPage> {
                                     ),
                                     const SizedBox(width: 2),
                                     if (running)
-                                      IconButton.filled(
+                                      IconButton(
                                         tooltip: '停止',
                                         visualDensity: VisualDensity.compact,
                                         constraints:
@@ -496,36 +494,34 @@ class ChatPageState extends State<ChatPage> {
                                               expectedTurnId: widget.controller
                                                   .activeTurnIdFor(task.id),
                                             ),
-                                        icon: const Icon(Icons.stop),
-                                      )
-                                    else
-                                      IconButton.filled(
-                                        tooltip: '发送',
-                                        visualDensity: VisualDensity.compact,
-                                        constraints:
-                                            const BoxConstraints.tightFor(
-                                              width: 34,
-                                              height: 34,
-                                            ),
-                                        padding: EdgeInsets.zero,
-                                        onPressed:
-                                            _sending ||
-                                                widget
-                                                    .controller
-                                                    .providers
-                                                    .isEmpty
-                                            ? null
-                                            : _send,
-                                        icon: _sending
-                                            ? const SizedBox.square(
-                                                dimension: 18,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
-                                              )
-                                            : const Icon(Icons.send_outlined),
+                                        icon: const Icon(Icons.stop_outlined),
                                       ),
+                                    IconButton.filled(
+                                      tooltip: running ? '追加任务' : '发送',
+                                      visualDensity: VisualDensity.compact,
+                                      constraints:
+                                          const BoxConstraints.tightFor(
+                                            width: 34,
+                                            height: 34,
+                                          ),
+                                      padding: EdgeInsets.zero,
+                                      onPressed:
+                                          _sending ||
+                                              widget
+                                                  .controller
+                                                  .providers
+                                                  .isEmpty
+                                          ? null
+                                          : _send,
+                                      icon: _sending
+                                          ? const SizedBox.square(
+                                              dimension: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(Icons.send_outlined),
+                                    ),
                                   ],
                                 ),
                               ),
@@ -2246,14 +2242,40 @@ class ChatPageState extends State<ChatPage> {
 
   Future<void> _send() async {
     final currentTask = _currentTask;
-    if (_sending ||
-        (currentTask != null &&
-            widget.controller.isTaskRunning(currentTask.id))) {
-      return;
-    }
+    if (_sending) return;
     final prompt = _prompt.text.trim();
     if (prompt.isEmpty && _pendingAttachments.isEmpty) return;
     final attachments = List<AiAttachment>.unmodifiable(_pendingAttachments);
+
+    if (currentTask != null &&
+        widget.controller.isTaskRunning(currentTask.id)) {
+      final sendingGeneration = ++_sendingGeneration;
+      setState(() => _sending = true);
+      try {
+        await widget.controller.appendTask(
+          currentTask,
+          prompt: prompt,
+          attachments: attachments,
+        );
+        if (mounted && sendingGeneration == _sendingGeneration) {
+          setState(() {
+            _prompt.clear();
+            _pendingAttachments = const [];
+          });
+        }
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('追加任务失败：$error')));
+        }
+      } finally {
+        if (mounted && sendingGeneration == _sendingGeneration) {
+          setState(() => _sending = false);
+        }
+      }
+      return;
+    }
+
     final providerId = _effectiveProviderId;
     if (providerId == null) {
       widget.onOpenSettings();
@@ -5531,11 +5553,16 @@ class _StatusTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final isError = event.type == 'task.failed' || event.type == 'task.unknown';
+    final isStalled = event.type == 'task.stalled';
+    final isError =
+        isStalled ||
+        event.type == 'task.failed' ||
+        event.type == 'task.unknown';
     final icon = switch (event.type) {
       'task.cancelled' => Icons.stop_circle_outlined,
       'task.recovered' => Icons.history_toggle_off_rounded,
       'task.unknown' => Icons.help_outline_rounded,
+      'task.stalled' => Icons.pause_circle_outline_rounded,
       _ => Icons.error_outline_rounded,
     };
     return Container(
@@ -5543,7 +5570,11 @@ class _StatusTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
       decoration: BoxDecoration(
-        color: isError ? colors.errorContainer : colors.surfaceContainerLow,
+        color: isStalled
+            ? colors.tertiaryContainer
+            : isError
+            ? colors.errorContainer
+            : colors.surfaceContainerLow,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -5590,6 +5621,7 @@ bool _isStatusEvent(String type) =>
     type == 'task.cancelled' ||
     type == 'task.failed' ||
     type == 'task.unknown' ||
+    type == 'task.stalled' ||
     type == 'task.recovered';
 
 String _prettyValue(Object? value) {
@@ -5621,6 +5653,8 @@ String _eventBody(TaskEvent event) {
     case 'task.failed':
     case 'task.unknown':
       return '${payload['error'] ?? '执行失败'}';
+    case 'task.stalled':
+      return '${payload['error'] ?? '检测到重复无进展，任务已暂停'}';
     case 'task.cancelled':
       return '任务已停止。';
     case 'task.recovered':

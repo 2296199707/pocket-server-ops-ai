@@ -289,7 +289,9 @@ abstract class SshConnection {
     String command, {
     String? workingDirectory,
     String? input,
-    Duration timeout = const Duration(minutes: 2),
+    // Zero means wait until the remote command exits. A positive duration is
+    // an explicit caller-selected command timeout.
+    Duration timeout = Duration.zero,
   });
 
   Future<List<SshDirectoryEntry>> listDirectory(String remotePath);
@@ -547,12 +549,12 @@ class DartSshConnection implements SshConnection {
     String command, {
     String? workingDirectory,
     String? input,
-    Duration timeout = const Duration(minutes: 2),
+    Duration timeout = Duration.zero,
   }) async {
     SshCommandStream? activeStream;
     var timedOut = false;
     try {
-      return await (() async {
+      Future<SshCommandResult> operation() async {
         final stream = await execute(
           command,
           workingDirectory: workingDirectory,
@@ -583,8 +585,14 @@ class DartSshConnection implements SshConnection {
           stdoutTruncated: stdoutBuffer.truncated,
           stderrTruncated: stderrBuffer.truncated,
         );
-      }()).timeout(timeout);
+      }
+
+      if (timeout <= Duration.zero) {
+        return await operation();
+      }
+      return await operation().timeout(timeout);
     } on TimeoutException {
+      if (timeout <= Duration.zero) rethrow;
       timedOut = true;
       try {
         await activeStream?.terminate();
@@ -673,7 +681,7 @@ class DartSshConnection implements SshConnection {
       }
       await _ensureRemotePathAbsent(sftp, destination);
       await _copySftpPath(sftp, source, destination, attributes);
-    });
+    }, timeout: Duration.zero);
   }
 
   @override
@@ -701,7 +709,7 @@ class DartSshConnection implements SshConnection {
       } finally {
         await file.close();
       }
-    });
+    }, timeout: Duration.zero);
   }
 
   @override
@@ -713,7 +721,7 @@ class DartSshConnection implements SshConnection {
       } finally {
         await file.close();
       }
-    });
+    }, timeout: Duration.zero);
   }
 
   @override
@@ -757,7 +765,7 @@ class DartSshConnection implements SshConnection {
       } finally {
         await file.close();
       }
-    });
+    }, timeout: _sftpChunkTimeout);
   }
 
   @override
@@ -874,7 +882,7 @@ class DartSshConnection implements SshConnection {
       } finally {
         await file.close();
       }
-    });
+    }, timeout: _sftpChunkTimeout);
   }
 
   @override
@@ -944,7 +952,7 @@ class DartSshConnection implements SshConnection {
       } finally {
         await file.close();
       }
-    });
+    }, timeout: _sftpChunkTimeout);
   }
 
   static Future<SftpFileAttrs?> _tryStat(
@@ -1196,7 +1204,7 @@ class DartSshConnection implements SshConnection {
           }
         }
       }
-    });
+    }, timeout: Duration.zero);
   }
 
   @override
@@ -1221,16 +1229,26 @@ class DartSshConnection implements SshConnection {
   @override
   Future<void> close() => _closeFuture ??= _client.close();
 
-  Future<T> _withSftp<T>(Future<T> Function(SftpClient sftp) operation) async {
+  Future<T> _withSftp<T>(
+    Future<T> Function(SftpClient sftp) operation, {
+    Duration timeout = _sftpControlTimeout,
+  }) async {
     SftpClient? sftp;
     try {
-      sftp = await _client.sftp().timeout(_sftpTimeout);
-      return await operation(sftp).timeout(_sftpTimeout);
+      final open = _client.sftp();
+      sftp = timeout <= Duration.zero
+          ? await open
+          : await open.timeout(timeout);
+      final result = operation(sftp);
+      return timeout <= Duration.zero
+          ? await result
+          : await result.timeout(timeout);
     } on TimeoutException {
+      if (timeout <= Duration.zero) rethrow;
       if (sftp == null) {
         unawaited(close());
       }
-      throw SshOperationTimeout(_sftpTimeout);
+      throw SshOperationTimeout(timeout);
     } finally {
       final activeSftp = sftp;
       if (activeSftp != null) {
@@ -1286,7 +1304,8 @@ class _RemoteUploadMetadata {
 const _defaultFileChunkBytes = 64 * 1024;
 const _defaultFileDownloadChunkBytes = 512 * 1024;
 const _maxSymlinkDepth = 16;
-const _sftpTimeout = Duration(minutes: 2);
+const _sftpControlTimeout = Duration(seconds: 15);
+const _sftpChunkTimeout = Duration(seconds: 30);
 
 /// Keeps command output bounded while preserving logical offsets for polling.
 /// The beginning and end are retained so a long-running command remains
@@ -1404,6 +1423,12 @@ String _joinRemotePath(String directory, String name) {
 }
 
 class TaskSshConnectionPool {
+  TaskSshConnectionPool({this.shutdownTimeout = const Duration(seconds: 5)});
+
+  /// Bounds cleanup only. Normal SSH operations keep their own connection
+  /// timeout and long-running commands are not shortened by this value.
+  final Duration shutdownTimeout;
+
   final Map<String, Future<SshConnection>> _connections = {};
   final Set<String> _pendingConnections = {};
 
@@ -1461,8 +1486,17 @@ class TaskSshConnectionPool {
   Future<void> release(String taskId) async {
     final pending = _connections.remove(taskId);
     _pendingConnections.remove(taskId);
-    final connection = await pending;
-    await connection?.close();
+    if (pending == null) return;
+    try {
+      final connection = await pending.timeout(shutdownTimeout);
+      await _closeConnection(connection);
+    } on TimeoutException {
+      // The connector may still complete after task cleanup. Close that
+      // connection when it arrives without keeping the task teardown open.
+      _closeWhenReady(pending);
+    } catch (_) {
+      // Releasing a failed or already closed lease is best effort.
+    }
   }
 
   Future<void> close() async {
@@ -1472,19 +1506,43 @@ class TaskSshConnectionPool {
       final pending = _connections.remove(taskId);
       final isPending = _pendingConnections.remove(taskId);
       if (pending == null) continue;
-      final closing = pending.then<void>(
-        (connection) => connection.close(),
-        onError: (Object error, StackTrace stackTrace) {},
-      );
       if (isPending) {
         // A connector may be waiting on a socket timeout. Do not make app
         // shutdown wait for that timeout; close the connection if it ever
         // arrives.
-        unawaited(closing);
+        unawaited(_closePending(pending));
       } else {
-        established.add(closing);
+        established.add(_closePending(pending));
       }
     }
     await Future.wait(established, eagerError: false);
+  }
+
+  Future<void> _closePending(Future<SshConnection> pending) async {
+    try {
+      final connection = await pending.timeout(shutdownTimeout);
+      await _closeConnection(connection);
+    } on TimeoutException {
+      _closeWhenReady(pending);
+    } catch (_) {
+      // The connection failed before it could be closed.
+    }
+  }
+
+  void _closeWhenReady(Future<SshConnection> pending) {
+    unawaited(
+      pending.then<void>(
+        _closeConnection,
+        onError: (Object error, StackTrace stackTrace) {},
+      ),
+    );
+  }
+
+  Future<void> _closeConnection(SshConnection connection) async {
+    try {
+      await connection.close().timeout(shutdownTimeout);
+    } catch (_) {
+      // Socket close is best effort during cleanup.
+    }
   }
 }

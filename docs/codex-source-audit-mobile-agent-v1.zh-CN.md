@@ -2005,3 +2005,126 @@ Responses 判断 Sub2API 的实际出站协议。
   `61784d6b37f8d115a6bdd528f1afb939edbe3add4da8fc84237b96db6dc1cf03`。
 - 发布结果：已推送 `main` 并创建 GitHub 正式版 `v1.0.5`，标签指向 `b9a4f2a`；Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5`。
+
+### 2026-08-31：长任务稳定性与追加任务 Beta 1.0.5-beta.1 发布记录
+
+- 功能范围：移除普通长任务的无依据时长、步骤和工具调用硬限制；增加持久化追加任务队列；
+  完善子代理取消、超时、未知状态和等待唤醒；改善 SSH/SFTP 长任务与资源清理；修复
+  `terminal.start` 并发登记竞态；保留真实错误返回、用户取消和副作用不自动重放规则。
+- 版本：`1.0.5-beta.1+45`；Android `versionName=1.0.5-beta.1`，`versionCode=45`。
+- 发布前验证：聚焦测试 122 项全部通过；`git diff --check` 通过；
+  `flutter analyze --no-pub` 仅保留已有的
+  `test/mcp_client_test.dart:176:39` 风格提示；release APK 构建通过。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.1-release.apk`。
+- 发布结果：已推送远端 `beta` 分支并创建 GitHub Pre-release `v1.0.5-beta.1`；Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.1`。
+- 后续非阻断项仍按审查文档记录：模型请求有限重试、少数本地编辑/预览路径的整文件读取、
+  Responses 响应头诊断元数据持久化；本次发布未扩大修改范围。
+
+### 2026-08-31：移除 Agent 默认步骤与工具调用总量中断
+
+- 当前 `AgentLoop` 的 `64` 个模型步骤和 `128` 次工具调用原本是 APP 自己的默认任务边界，
+  不是供应商响应、上下文压缩或 Codex API 返回的限制。达到步骤边界后还会因为此前执行过
+  远程写操作而标记 `task.unknown`，这会错误地强行结束仍可继续的对话。
+- 正式 Agent 现在不再默认传入这两个任务级预算；正常结束条件是模型返回最终文本、用户取消，
+  或真实的请求/工具错误。`maxSteps`、`maxToolCalls` 仅在调用方明确传入时生效，保留给定向测试
+  和确有需要的部署策略。
+- 单次模型响应的工具数组解析保护仍是协议解析边界，与任务级预算分开，不会把普通长任务误判为
+  `task.unknown`。回归测试覆盖超过原 `64/128` 默认值后仍能完成的连续工具链。
+
+### 长任务稳定性审查进度（持续记录）
+
+本节是后续上下文压缩后的审查索引。已确认的结论和待处理位置先固定在这里，后续只补充
+结果，不重复从头扫描。
+
+#### 已确认并已修复
+
+- `lib/agent/agent_loop.dart`：移除正式 Agent 默认的模型步骤总量和工具调用总量中断；显式
+  传入的测试/部署预算仍可用。
+- `lib/app_controller.dart`：正式任务使用独立的连接恢复策略；远程工具错误会作为工具结果
+  返回模型，提示先确认服务器状态，不因一次 SSH 错误直接结束 AI 轮次。
+- Responses/Chat Completions 的流式半截输出不会先写入可见历史，断流重试成功后只保留完整
+  的一次响应，避免重试把上下文和界面内容重复写入。
+
+#### 本轮已处理
+
+- `lib/agent/openai_compatible_client.dart`：移除 Responses 单个响应的 `128` 个 function
+  call 硬解析上限；保留每个调用的 ID、名称和参数完整性校验。
+- `lib/agent/openai_compatible_client.dart` 与 `lib/agent/chat_completions_client.dart`：AI
+  请求默认不设置人工请求/流空闲截止；正数 `timeout` 仍可由测试或特殊调用显式指定。
+- `lib/agent/agent_tools.dart` 与 `lib/ssh/ssh_connection.dart`：恢复模式 `terminal.exec` 和
+  底层 `SshConnection.run` 默认等待远程命令自然结束，不再在两分钟时停止进程；远程进程每次
+  只使用最多 30 秒的轮询等待，用户取消仍走显式停止路径。
+- `lib/agent/subagents.dart`：`wait_agent` 未指定 `timeout_ms` 时等待子代理结束；指定时使用
+  调用方给出的非负毫秒数，不再强制最短 10 秒或最长 1 小时。
+- `lib/agent/mcp_client.dart`、`lib/providers/image_generation_client.dart` 与
+  `lib/ssh/ssh_connection.dart`：MCP 请求、图片生成/下载和 SFTP 操作默认不设置两分钟人工
+  截止；正数 timeout 仍可显式保留，响应大小、取消和连接关闭语义不变。
+
+#### 本轮明确不删除的边界
+
+- Responses/Chat 协议的必需字段、无效工具参数和明确的认证/权限/上下文错误仍立即返回真实
+  错误，不伪装成成功或盲目重放有副作用的工具。
+- 工具输出 head/tail 缓冲、文件分块、SFTP 分块、服务器托管进程数量、MCP/图片/文件缓存和
+  UI 日志数量是内存/存储保护，不是 Agent 任务轮次限制；本轮不扩大到无限内存。
+- 用户取消、明确审批拒绝和不可恢复的协议错误仍会结束当前轮次；网络连接恢复只重试尚未
+  收到响应的模型请求，不自动重放已经执行过的远程命令。
+
+#### 验证进度
+
+- 已新增 Responses `129` 个工具调用解析回归测试，以及 `wait_agent` 显式短超时不再被夹逼
+  的回归测试。
+- 后续定向验证已执行；未构建或发布版本。本轮最终结果见 2026-08-30 收尾记录。
+
+### 2026-08-30：长任务生命周期与追加任务收尾记录
+
+本节覆盖本轮实际修改，作为后续上下文压缩后的继续入口；后续审查从这里开始，不重复扫描
+已经固定的 Codex 源码结论。
+
+#### 追加任务
+
+- Codex 对照仍是 `codex-rs/core/src/session/input_queue.rs` 和 app-server 的
+  `turn_steer`/`turn_interrupt`：活动 turn 的输入与 session mailbox 分开，只有 turn 消费
+  时才取出输入。手机端没有把普通 HTTP 请求伪装成 steer，而是在
+  `lib/app_controller.dart` 使用持久化 `Task.pendingInputs` 排队下一轮。
+- `AppController.appendTask` 在当前任务运行时追加用户文本和附件引用；消息进入数据库队列后
+  才返回。当前 turn 正常完成后按顺序执行下一轮；只有对应追加内容成功完成，才写入
+  `task.input_consumed`。失败、取消或应用退出时未消费输入保留，不静默丢失，也不重复记录当前
+  queued 用户消息。
+- `lib/ui/chat_page.dart` 的输入框在任务运行期间保持可编辑；`_sending` 只防止同一瞬间重复
+  提交，发送动作在运行任务上转为 `appendTask`。这与官方 steer 的协议形态不同，但符合手机
+  端稳定的“追加到下一轮”契约。
+
+#### 子代理生命周期
+
+- `SubagentTree` 的普通 `wait_agent` 用户等待语义和长任务时长没有缩短；生命周期专用的
+  `cancelAll`、`close` 和 `close_agent` 使用约 5 秒总清理期限，停止回调、运行观察和终态
+  事件写入不会无限阻塞关闭路径。
+- 到期仍无法证明运行已结束的节点标记为 `unknown`，保存“停止请求超时，远程状态未知”摘要，
+  并唤醒正在等待该节点的 wait。晚到的 `AgentResult` 只释放旧运行句柄，不会把 `unknown`
+  改成 `completed`，也不会自动启动 follow-up；底层运行仍未结束时显式 follow-up 会返回
+  状态未知错误，避免同一子代理并发启动两轮。
+- 这组超时只作用于关闭/取消/资源回收，不作用于正常模型轮次、`wait_agent` 的用户指定等待
+  时间或远程大文件传输，因此不会为避免死等待而强行截断正常长任务。
+
+#### SSH 与资源清理
+
+- `lib/ssh/ssh_connection.dart` 的 SFTP 控制操作单次无响应上限为 15 秒，UTF-8/二进制分块
+  读写每块上限为 30 秒；`copyPath`、整文件 `readFile`/`readFileBytes` 和整文件 `writeFile`
+  保持无总时长上限。大文件可以继续传输，单块失联则返回真实错误供 Agent 判断，不自动重放
+  已执行的远程副作用。
+- `lib/app_controller.dart` 的任务删除、手机工具释放和 dispose 对数据库、附件、事件尾、
+  SSH 工具、子代理和任务 Future 使用有限清理等待；某一路径超时会继续释放其他资源，不覆盖
+  原任务结果。SSH 连接池原有的 pending connection 关闭策略继续生效。
+- `lib/agent/agent_tools.dart` 修复了交互式 `terminal.start` 的并发槽位竞态：连接建立前
+  立即预留槽位，超过 64 个托管进程直接返回容量错误，不再因首次 `await` 延迟而让第 65 个
+  请求等待控制超时。64 是手机资源保护，不是 Agent 步骤或工具调用总量限制。
+
+#### 死循环检查与验证
+
+- 本轮没有重新加入普通任务的步骤数、工具调用数或总时长硬上限。`AgentLoop` 仍使用无进展
+  检测、用户取消和真实模型/工具错误作为结束条件；追加队列只在当前 turn 结束后推进，不能
+  在未结束的旧运行上递归启动新 turn。远程命令、文件写入和连接失败不会自动重放副作用。
+- 已通过：本轮聚焦测试命令共 122 项全部通过；`git diff --check` 通过。
+- `flutter analyze --no-pub` 仅剩已有的 `test/mcp_client_test.dart:176:39` 风格提示
+  `use_null_aware_elements`，本轮改动没有新增分析错误；未构建 APK，未提交或推送。

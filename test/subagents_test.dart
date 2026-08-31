@@ -113,6 +113,41 @@ void main() {
     },
   );
 
+  test(
+    'wait_agent has bounded timeout and supports immediate polling',
+    () async {
+      final run = Completer<AgentResult>();
+      final tree = SubagentTree(
+        rootTaskId: 'root',
+        settings: const SubagentSettings(),
+        prepare: (_, {required followup}) async {},
+        start: (_, _) => run.future,
+        onEvent: (_, _, _) async {},
+        interrupt: (_) async {},
+      );
+      final spawn = _tool(tree, 'spawn_agent');
+      final wait = _tool(tree, 'wait_agent');
+      final timeoutSchema =
+          ((wait.definition.parameters['properties'] as Map)['timeout_ms']
+              as Map);
+
+      expect(timeoutSchema['minimum'], 0);
+      expect(timeoutSchema['maximum'], 3600000);
+      expect(
+        timeoutSchema['description'],
+        contains('Defaults to 30000; maximum is 3600000'),
+      );
+
+      final created = await spawn.call({'task_name': 'long', 'message': 'run'});
+      final id = (created as Map<String, Object?>)['agent_id'] as String;
+      final result = await wait.call({'target': id, 'timeout_ms': 0});
+
+      expect((result as Map<String, Object?>)['timed_out'], isTrue);
+      run.complete(const AgentResult(status: 'completed', messages: []));
+      await tree.waitForChildren();
+    },
+  );
+
   test('interrupt reports interrupted without a completion event', () async {
     final run = Completer<AgentResult>();
     final events = <String>[];
@@ -493,6 +528,37 @@ void main() {
     expect(tree.nodeFor(id)?.status, 'interrupted');
     expect(tree.hasActiveAgents, isFalse);
   });
+
+  test(
+    'close marks an unsettled child unknown instead of waiting forever',
+    () async {
+      final run = Completer<AgentResult>();
+      final interruptNeverSettles = Completer<void>();
+      final tree = SubagentTree(
+        rootTaskId: 'root',
+        settings: const SubagentSettings(),
+        lifecycleTimeout: const Duration(milliseconds: 20),
+        prepare: (_, {required followup}) async {},
+        start: (_, _) => run.future,
+        onEvent: (_, _, _) async {},
+        interrupt: (_) => interruptNeverSettles.future,
+      );
+      final created = await _tool(
+        tree,
+        'spawn_agent',
+      ).call({'task_name': 'stuck', 'message': 'run'});
+      final id = (created as Map<String, Object?>)['agent_id'] as String;
+
+      await tree.close();
+      final node = tree.nodeFor(id)!;
+      expect(node.status, 'unknown');
+      expect(node.summary, contains('远程状态未知'));
+
+      run.complete(const AgentResult(status: 'completed', messages: []));
+      await tree.waitForChildren();
+      expect(node.status, 'unknown');
+    },
+  );
 
   test(
     'follow-up reports interruption when closing before it starts',

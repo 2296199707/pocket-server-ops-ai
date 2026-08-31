@@ -120,6 +120,7 @@ class RemoteProcessController {
               initialInput: initialInput,
             ),
             workingDirectory: workingDirectory,
+            timeout: _controlTimeout,
           );
           if (result.exitCode != 0) {
             throw StateError(
@@ -173,6 +174,7 @@ class RemoteProcessController {
           stderrOffset: stderrStart,
           waitMs: waitMs,
         ),
+        timeout: _pollTimeout(waitMs),
       ),
     );
     if (probe.exitCode != 0) {
@@ -218,7 +220,7 @@ class RemoteProcessController {
     final directory = await _directory(handle);
     final connection = await _ensureConnection();
     final command = _writeCommand(directory, input);
-    final result = await connection.run(command);
+    final result = await connection.run(command, timeout: _controlTimeout);
     if (result.exitCode != 0) {
       throw StateError(
         '远程进程输入失败：${result.stderr.trim().isEmpty ? result.stdout.trim() : result.stderr.trim()}',
@@ -230,7 +232,10 @@ class RemoteProcessController {
     final handle = _handle(processId);
     final directory = await _directory(handle);
     final result = await _recoverable(
-      (connection) => connection.run(_stopCommand(directory)),
+      (connection) => connection.run(
+        _stopCommand(directory),
+        timeout: _controlTimeout,
+      ),
     );
     if (result.exitCode != 0) {
       throw StateError(
@@ -244,10 +249,16 @@ class RemoteProcessController {
     if (_closing) return;
     _closing = true;
     final active = _handles.values.where((handle) => !handle.done).toList();
-    await Future.wait<void>([
-      for (final handle in active)
-        stop(handle.id).then<void>((_) {}, onError: (_, _) {}),
-    ], eagerError: false);
+    try {
+      await Future.wait<void>([
+        for (final handle in active)
+          stop(handle.id).then<void>((_) {}, onError: (_, _) {}),
+      ], eagerError: false).timeout(_shutdownTimeout);
+    } on TimeoutException {
+      // A stop request can be waiting on a broken SSH connection. Keep the
+      // handles unresolved so callers do not mistake shutdown for a clean
+      // remote exit; the in-flight stop operations may finish later.
+    }
   }
 
   RemoteProcessHandle _handle(String processId) {
@@ -265,7 +276,10 @@ class RemoteProcessController {
     final existing = handle.directory;
     if (existing != null && existing.isNotEmpty) return existing;
     final directory = await _recoverable((connection) async {
-      final result = await connection.run(_directoryCommand(handle.id));
+      final result = await connection.run(
+        _directoryCommand(handle.id),
+        timeout: _controlTimeout,
+      );
       if (result.exitCode != 0) {
         throw StateError('无法定位远程进程 ${handle.id}');
       }
@@ -289,7 +303,7 @@ class RemoteProcessController {
         '$directory/$name',
         offset: offset,
         length: _pollChunkBytes,
-      ),
+      ).timeout(_controlTimeout),
     );
     return _RemoteOutputChunk(
       content: utf8.decode(chunk.bytes, allowMalformed: true),
@@ -300,6 +314,7 @@ class RemoteProcessController {
 
   Future<SshConnection> _ensureConnection() async {
     if (!_connection.isClosed) return _connection;
+    if (_closing) throw StateError('远程进程管理器正在关闭');
     return _forceReconnect();
   }
 
@@ -527,6 +542,9 @@ class RemoteProcessController {
 
   static String _shellQuote(String value) =>
       "'${value.replaceAll("'", "'\\''")}'";
+
+  static Duration _pollTimeout(int waitMs) =>
+      Duration(milliseconds: waitMs) + _controlTimeout;
 }
 
 class _StartingRemoteProcess {
@@ -547,3 +565,6 @@ class _RemoteOutputChunk {
   final int nextOffset;
   final int? totalBytes;
 }
+
+const _controlTimeout = Duration(seconds: 15);
+const _shutdownTimeout = Duration(seconds: 5);

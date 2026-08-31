@@ -27,6 +27,7 @@ void main() {
     );
     addTearDown(client.close);
     expect(client.maxResponseBytes, isNull);
+    expect(client.timeout, Duration.zero);
 
     final result = await client.generate(
       prompt: 'a small server dashboard',

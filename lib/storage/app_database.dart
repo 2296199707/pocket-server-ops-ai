@@ -109,7 +109,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 16,
+      version: 17,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -173,6 +173,7 @@ class AppDatabase {
             agentRole TEXT,
             agentForkTurns TEXT,
             agentMailbox TEXT NOT NULL DEFAULT '[]',
+            pendingInputs TEXT NOT NULL DEFAULT '[]',
             agentSummary TEXT,
             status TEXT NOT NULL,
             createdAt TEXT NOT NULL,
@@ -360,6 +361,11 @@ class AppDatabase {
           );
           await db.execute('ALTER TABLE tasks ADD COLUMN agentSummary TEXT');
         }
+        if (oldVersion < 17) {
+          await db.execute(
+            "ALTER TABLE tasks ADD COLUMN pendingInputs TEXT NOT NULL DEFAULT '[]'",
+          );
+        }
       },
     );
   }
@@ -506,6 +512,27 @@ class AppDatabase {
     );
   }
 
+  /// Persists a task snapshot and its queue lifecycle event atomically. This
+  /// is used when an appended input is accepted or consumed so a crash cannot
+  /// leave the visible event and the durable queue disagreeing.
+  Future<void> saveTaskAndEvent(Task task, TaskEvent event) async {
+    final database = await _db;
+    final eventMap = Map<String, Object?>.from(event.toMap());
+    eventMap['payload'] = jsonEncode(event.payload);
+    await database.transaction((transaction) async {
+      await transaction.insert(
+        'tasks',
+        task.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await transaction.insert(
+        'task_events',
+        eventMap,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+  }
+
   Future<List<Task>> loadTasks() async {
     final rows = await (await _db).query('tasks', orderBy: 'updatedAt DESC');
     return rows
@@ -538,6 +565,27 @@ class AppDatabase {
       map,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<Set<String>> loadConsumedTaskInputIds(String taskId) async {
+    final rows = await (await _db).query(
+      'task_events',
+      columns: ['payload'],
+      where: "taskId = ? AND type = 'task.input_consumed'",
+      whereArgs: [taskId],
+      orderBy: 'sequence',
+    );
+    final ids = <String>{};
+    for (final row in rows) {
+      final decoded = _decodePayload(row['payload']);
+      final values = decoded['queued_input_ids'];
+      if (values is Iterable) {
+        for (final value in values) {
+          if (value is String && value.isNotEmpty) ids.add(value);
+        }
+      }
+    }
+    return Set.unmodifiable(ids);
   }
 
   Future<List<TaskEvent>> loadEvents(String taskId) async {

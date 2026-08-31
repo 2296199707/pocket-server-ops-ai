@@ -250,6 +250,91 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'appended input runs after the current turn and is consumed once',
+    () async {
+      final requestBodies = <Map<String, Object?>>[];
+      final firstRequestStarted = Completer<void>();
+      final releaseFirstRequest = Completer<void>();
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((request) async {
+        final body = await utf8.decoder.bind(request).join();
+        requestBodies.add(Map<String, Object?>.from(jsonDecode(body) as Map));
+        if (requestBodies.length == 1) {
+          firstRequestStarted.complete();
+          await releaseFirstRequest.future;
+        }
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          jsonEncode({
+            'status': 'completed',
+            'output': [
+              {
+                'type': 'message',
+                'role': 'assistant',
+                'content': [
+                  {
+                    'type': 'output_text',
+                    'text': '第${requestBodies.length}轮完成',
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        await request.response.close();
+      });
+
+      final database = MemoryAppDatabase();
+      final controller = AppController(
+        database: database,
+        credentials: MemoryCredentialStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      final provider = await controller.saveProvider(
+        name: '追加任务测试供应商',
+        baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        model: 'test-model',
+        secret: 'test-key',
+        isDefault: true,
+      );
+      final task = await controller.createTask(
+        mode: 'chat',
+        providerId: provider.id,
+        title: '追加任务',
+      );
+
+      final run = controller.runTask(task, prompt: '第一轮');
+      await firstRequestStarted.future;
+      await controller.appendTask(task, prompt: '追加任务');
+      expect(controller.pendingTaskInputCount(task.id), 1);
+      expect(controller.isTaskRunning(task.id), isTrue);
+      releaseFirstRequest.complete();
+
+      final result = await run;
+
+      expect(result.status, 'completed');
+      expect(requestBodies, hasLength(2));
+      final secondInput = jsonEncode(requestBodies[1]['input']);
+      expect(secondInput, contains('追加任务'));
+      expect(secondInput, isNot(contains('追加任务追加任务')));
+      expect(controller.pendingTaskInputCount(task.id), 0);
+      expect(
+        controller
+            .eventsFor(task.id)
+            .where(
+              (event) =>
+                  event.type == 'user.message' &&
+                  event.payload['text'] == '追加任务',
+            )
+            .length,
+        1,
+      );
+    },
+  );
+
   test('Agent default execution mode is persisted', () async {
     final database = MemoryAppDatabase();
     final controller = AppController(

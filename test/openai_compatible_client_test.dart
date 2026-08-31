@@ -183,6 +183,42 @@ void main() {
   );
 
   test(
+    'Responses accepts a large tool-call batch without an app-side cap',
+    () async {
+      final output = [
+        for (var index = 0; index < 129; index++)
+          {
+            'type': 'function_call',
+            'id': 'fc_$index',
+            'call_id': 'call_$index',
+            'name': 'terminal.exec',
+            'arguments': '{}',
+          },
+      ];
+      final client = OpenAiCompatibleClient(
+        baseUrl: 'https://provider.example/v1',
+        apiKey: 'test-key',
+        model: 'test-model',
+        client: MockClient(
+          (_) async => http.Response(
+            jsonEncode({'status': 'completed', 'output': output}),
+            200,
+            headers: {'content-type': 'application/json'},
+          ),
+        ),
+      );
+      addTearDown(client.close);
+
+      final response = await client.complete(
+        messages: [AiMessage.user('批量执行')],
+        tools: const [],
+      );
+
+      expect(response.toolCalls, hasLength(129));
+    },
+  );
+
+  test(
     'Responses compaction uses the ordinary endpoint and Codex local prompt',
     () async {
       late http.Request request;

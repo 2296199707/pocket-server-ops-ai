@@ -92,6 +92,40 @@ void main() {
   });
 
   test(
+    'terminal.exec yields a running process after the Codex wait window',
+    () async {
+      final home = await Directory.systemTemp.createTemp('remote-process-');
+      addTearDown(() => home.delete(recursive: true));
+      final tools = RemoteAgentTools(
+        _LocalShellConnection(home),
+        workingDirectory: home.path,
+      );
+      final exec = tools.tools.singleWhere(
+        (tool) => tool.definition.name == 'terminal.exec',
+      );
+
+      final first = await exec.call({
+        'command': 'sleep 1; printf later',
+        'yield_time_ms': 250,
+      }) as Map;
+
+      expect(first['done'], isFalse);
+      expect(first['process_id'], isA<String>());
+      final processId = first['process_id'] as String;
+      final poll = tools.tools.singleWhere(
+        (tool) => tool.definition.name == 'terminal.poll',
+      );
+      final result =
+          await poll.call({'process_id': processId, 'wait_ms': 2000}) as Map;
+
+      expect(result['done'], isTrue);
+      expect(result['exit_code'], 0);
+      expect(result['stdout'], 'later');
+      await tools.close();
+    },
+  );
+
+  test(
     'a failed initial SSH connection can be retried by a later tool call',
     () async {
       final home = await Directory.systemTemp.createTemp('remote-process-');

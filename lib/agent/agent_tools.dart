@@ -96,6 +96,7 @@ class RemoteAgentTools {
   var _hasEstablishedConnection = false;
   final Map<String, _ManagedProcess> _processes = {};
   final List<Future<SshCommandStream>> _startingProcesses = [];
+  var _startingProcessReservations = 0;
   Future<void>? _closeFuture;
   var _closing = false;
 
@@ -187,12 +188,14 @@ class RemoteAgentTools {
       definition: AiToolDefinition(
         name: 'terminal.exec',
         description: remoteTaskRecoveryEnabled
-            ? 'Run a short shell command on the selected server with a '
-                  'two-minute timeout. The command is recorded as a remote job '
-                  'so a broken SSH channel can be reopened without running it '
-                  'twice.'
-            : 'Run a short shell command on the selected server with a '
-                  'two-minute timeout on the current SSH connection. If the '
+            ? 'Run a shell command on the selected server. Wait up to the '
+                  'requested yield time (default 10000 ms, maximum 30000 ms); '
+                  'if it is still running, return process_id and continue with '
+                  'terminal.poll. The remote job can be reopened without '
+                  'running the command twice.'
+            : 'Run a shell command on the selected server for the requested '
+                  'yield time (default 10000 ms, maximum 30000 ms), then poll '
+                  'the in-memory process on this SSH connection. If the '
                   'connection breaks, do not replay the command.',
         parameters: {
           'type': 'object',
@@ -201,6 +204,14 @@ class RemoteAgentTools {
             'command': {'type': 'string'},
             'working_directory': {'type': 'string'},
             'input': {'type': 'string'},
+            'yield_time_ms': {
+              'type': 'integer',
+              'minimum': _minExecYieldMilliseconds,
+              'maximum': _maxPollWaitMilliseconds,
+              'description':
+                  'Wait before returning a running process. Defaults to '
+                  '10000 ms; effective range is 250-30000 ms.',
+            },
           },
         },
       ),
@@ -426,22 +437,35 @@ class RemoteAgentTools {
   ];
 
   Future<Object?> _exec(Map<String, Object?> arguments) async {
-    final connection = await ensureConnection();
     if (!remoteTaskRecoveryEnabled) {
-      final result = await connection.run(
-        _requiredString(arguments, 'command'),
-        workingDirectory:
-            _optionalString(arguments, 'working_directory') ?? workingDirectory,
-        input: _optionalString(arguments, 'input'),
-      );
-      return {
-        'exit_code': result.exitCode,
-        'stdout_truncated': result.stdoutTruncated,
-        'stderr_truncated': result.stderrTruncated,
-        'stdout': result.stdout,
-        'stderr': result.stderr,
-      };
+      final connection = await ensureConnection();
+      if (!arguments.containsKey('yield_time_ms')) {
+        final result = await connection.run(
+          _requiredString(arguments, 'command'),
+          workingDirectory:
+              _optionalString(arguments, 'working_directory') ??
+              workingDirectory,
+          input: _optionalString(arguments, 'input'),
+        );
+        return {
+          'exit_code': result.exitCode,
+          'stdout_truncated': result.stdoutTruncated,
+          'stderr_truncated': result.stderrTruncated,
+          'stdout': result.stdout,
+          'stderr': result.stderr,
+        };
+      }
+      final started = await _startInteractive(arguments, closeInput: true);
+      final processId = started['process_id'];
+      if (processId is! String || processId.isEmpty) {
+        throw StateError('远程命令没有返回进程 ID');
+      }
+      return _poll({
+        'process_id': processId,
+        'wait_ms': _execYieldMilliseconds(arguments),
+      });
     }
+    final connection = await ensureConnection();
     final processController = _processControllerFor(connection);
     final process = await processController.start(
       command: _requiredString(arguments, 'command'),
@@ -449,53 +473,14 @@ class RemoteAgentTools {
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
       initialInput: _optionalString(arguments, 'input') ?? '',
     );
-    final stdout = SshOutputBuffer();
-    final stderr = SshOutputBuffer();
-    var stdoutOffset = 0;
-    var stderrOffset = 0;
-    final deadline = DateTime.now().add(const Duration(minutes: 2));
-    RemoteProcessSnapshot? finalSnapshot;
-    while (true) {
-      final remaining = deadline.difference(DateTime.now()).inMilliseconds;
-      if (remaining <= 0) {
-        try {
-          await processController.stop(process.id);
-        } catch (_) {}
-        throw const SshCommandTimeout(Duration(minutes: 2));
-      }
-      final snapshot = await processController.poll(
-        process.id,
-        stdoutOffset: stdoutOffset,
-        stderrOffset: stderrOffset,
-        waitMs: remaining.clamp(
-          0,
-          RemoteProcessController.maxPollWaitMilliseconds,
-        ),
-      );
-      stdout.add(snapshot.stdout);
-      stderr.add(snapshot.stderr);
-      stdoutOffset = snapshot.stdoutOffset;
-      stderrOffset = snapshot.stderrOffset;
-      finalSnapshot = snapshot;
-      final outputComplete =
-          snapshot.stdoutTotalBytes == null ||
-          stdoutOffset >= snapshot.stdoutTotalBytes!;
-      final errorComplete =
-          snapshot.stderrTotalBytes == null ||
-          stderrOffset >= snapshot.stderrTotalBytes!;
-      if (snapshot.done && outputComplete && errorComplete) break;
-    }
-    final snapshot = finalSnapshot;
+    final snapshot = await processController.poll(
+      process.id,
+      waitMs: _execYieldMilliseconds(arguments),
+    );
     if (snapshot.failed && snapshot.exitCode == null) {
       throw StateError(snapshot.error ?? '远程命令状态未知');
     }
-    return {
-      'exit_code': snapshot.exitCode,
-      'stdout_truncated': stdout.truncated,
-      'stderr_truncated': stderr.truncated,
-      'stdout': stdout.value,
-      'stderr': stderr.value,
-    };
+    return _processSnapshotResult(process.id, snapshot, persistent: true);
   }
 
   Future<Object?> _start(Map<String, Object?> arguments) async {
@@ -511,37 +496,69 @@ class RemoteAgentTools {
     return {'process_id': process.id, 'persistent': true};
   }
 
-  Future<Object?> _startInteractive(Map<String, Object?> arguments) async {
+  Future<Map<String, Object?>> _startInteractive(
+    Map<String, Object?> arguments, {
+    bool closeInput = false,
+  }) async {
     _removeCompletedProcesses();
     if (_closing) throw StateError('远程工具正在关闭');
-    if (_processes.length + _startingProcesses.length >=
+    if (_processes.length +
+            _startingProcesses.length +
+            _startingProcessReservations >=
         RemoteProcessController.maxManagedProcesses) {
       throw StateError('托管进程数量已达到上限（$_maxManagedProcesses），请先停止不再使用的进程');
     }
     final processId = 'process-${DateTime.now().microsecondsSinceEpoch}';
     final pty = arguments['pty'] == true;
-    final connection = await ensureConnection();
-    final pending = connection.execute(
-      _requiredString(arguments, 'command'),
-      workingDirectory:
-          _optionalString(arguments, 'working_directory') ?? workingDirectory,
-      pty: pty,
-    );
-    _startingProcesses.add(pending);
+    _startingProcessReservations++;
+    Future<SshCommandStream>? pending;
     try {
-      final stream = await pending;
-      if (_closing) {
-        stream.close();
-        throw StateError('远程工具正在关闭');
+      final connection = await ensureConnection();
+      pending = connection.execute(
+        _requiredString(arguments, 'command'),
+        workingDirectory:
+            _optionalString(arguments, 'working_directory') ?? workingDirectory,
+        pty: pty,
+      );
+      _startingProcesses.add(pending);
+      try {
+        final stream = await _awaitInteractiveStream(pending);
+        if (_closing) {
+          stream.close();
+          throw StateError('远程工具正在关闭');
+        }
+        final input = arguments['input'];
+        if (input is String && input.isNotEmpty) {
+          stream.writeText(input);
+        }
+        if (closeInput) await stream.closeInput();
+        _processes[processId] = _ManagedProcess(stream);
+        return {
+          'process_id': processId,
+          'persistent': false,
+          if (pty) 'pty': true,
+        };
+      } finally {
+        _startingProcesses.remove(pending);
       }
-      _processes[processId] = _ManagedProcess(stream);
-      return {
-        'process_id': processId,
-        'persistent': false,
-        if (pty) 'pty': true,
-      };
     } finally {
-      _startingProcesses.remove(pending);
+      _startingProcessReservations--;
+    }
+  }
+
+  Future<SshCommandStream> _awaitInteractiveStream(
+    Future<SshCommandStream> pending,
+  ) async {
+    try {
+      return await pending.timeout(_remoteControlTimeout);
+    } on TimeoutException {
+      // The SSH library cannot cancel an in-flight channel-open operation.
+      // Close it if it eventually completes so a timed-out control request
+      // does not leave an untracked session behind.
+      unawaited(
+        pending.then<void>((stream) => stream.close(), onError: (_, _) {}),
+      );
+      rethrow;
     }
   }
 
@@ -583,6 +600,46 @@ class RemoteAgentTools {
     );
     return {
       'process_id': processId,
+      'stdout_offset': snapshot.stdoutOffset,
+      'stderr_offset': snapshot.stderrOffset,
+      if (snapshot.stdoutTotalBytes != null)
+        'stdout_total_bytes': snapshot.stdoutTotalBytes,
+      if (snapshot.stderrTotalBytes != null)
+        'stderr_total_bytes': snapshot.stderrTotalBytes,
+      'stdout_truncated': false,
+      'stderr_truncated': false,
+      'done': snapshot.done,
+      'failed': snapshot.failed,
+      if (snapshot.error != null) 'error': snapshot.error,
+      'exit_code': snapshot.exitCode,
+      'stdout': snapshot.stdout,
+      'stderr': snapshot.stderr,
+    };
+  }
+
+  static int _execYieldMilliseconds(Map<String, Object?> arguments) {
+    final requested = _optionalNonNegativeInt(arguments, 'yield_time_ms');
+    if (requested == null) return _defaultExecYieldMilliseconds;
+    return requested
+        .clamp(_minExecYieldMilliseconds, _maxPollWaitMilliseconds)
+        .toInt();
+  }
+
+  static Map<String, Object?> _processSnapshotResult(
+    String processId,
+    RemoteProcessSnapshot snapshot, {
+    required bool persistent,
+  }) {
+    final outputComplete =
+        snapshot.stdoutTotalBytes == null ||
+        snapshot.stdoutOffset >= snapshot.stdoutTotalBytes!;
+    final errorComplete =
+        snapshot.stderrTotalBytes == null ||
+        snapshot.stderrOffset >= snapshot.stderrTotalBytes!;
+    return {
+      if (!snapshot.done || !outputComplete || !errorComplete)
+        'process_id': processId,
+      'persistent': persistent,
       'stdout_offset': snapshot.stdoutOffset,
       'stderr_offset': snapshot.stderrOffset,
       if (snapshot.stdoutTotalBytes != null)
@@ -889,10 +946,33 @@ class RemoteAgentTools {
       for (final pending in starting) _closeStartingProcess(pending),
     ], eagerError: false);
     await Future.wait<void>([
-      for (final process in _processes.values) process.close(),
+      for (final process in _processes.values) _closeManagedProcess(process),
     ], eagerError: false);
     _processes.clear();
-    await _processController?.close();
+    final controller = _processController;
+    if (controller != null) {
+      try {
+        await controller.close().timeout(_remoteCloseTimeout);
+      } on TimeoutException {
+        // RemoteProcessController keeps the unresolved handles and its late
+        // stop operations continue in the background. Do not hold app
+        // shutdown on a server that no longer answers.
+      } catch (_) {
+        // Cleanup errors must not replace the task result.
+      }
+    }
+  }
+
+  Future<void> _closeManagedProcess(_ManagedProcess process) async {
+    try {
+      await process.close().timeout(_remoteCloseTimeout);
+    } on TimeoutException {
+      // The stream close is synchronous and also wakes the subscriptions;
+      // the managed process remains an unresolved remote operation.
+      process.stream.close();
+    } catch (_) {
+      process.stream.close();
+    }
   }
 
   Future<void> _closeStartingProcess(Future<SshCommandStream> pending) async {
@@ -912,6 +992,7 @@ class RemoteAgentTools {
   }
 
   bool get hasRunningProcesses =>
+      _startingProcessReservations > 0 ||
       _startingProcesses.isNotEmpty ||
       _processes.values.any((value) => !value.done) ||
       (_processController?.hasRunningProcesses ?? false);
@@ -2159,6 +2240,10 @@ class _ManagedProcess {
 }
 
 const _maxFileChunkBytes = 1024 * 1024;
+const _minExecYieldMilliseconds = 250;
+const _defaultExecYieldMilliseconds = 10 * 1000;
 const _maxPollWaitMilliseconds = 30 * 1000;
 const _maxManagedProcesses = 64;
 const _processStartCloseTimeout = Duration(seconds: 2);
+const _remoteControlTimeout = Duration(seconds: 15);
+const _remoteCloseTimeout = Duration(seconds: 5);

@@ -106,6 +106,74 @@ void main() {
     expect(events, contains('task.unknown'));
   });
 
+  test(
+    'default agent loop has no task-level step or tool-call budget',
+    () async {
+      var executions = 0;
+      final client = _LongToolChainClient(toolRounds: 129);
+      final result = await AgentLoop(
+        client: client,
+        tools: [
+          AgentTool(
+            definition: const AiToolDefinition(
+              name: 'test.tool',
+              description: 'test',
+              parameters: {'type': 'object'},
+            ),
+            requiresConfirmation: false,
+            call: (_) async {
+              executions++;
+              return const {'ok': true};
+            },
+          ),
+        ],
+      ).run(prompt: '执行', executionMode: 'auto');
+
+      expect(result.status, 'completed');
+      expect(client.calls, 130);
+      expect(executions, 129);
+    },
+  );
+
+  test('stops a polling loop that makes no progress', () async {
+    final events = <String>[];
+    final client = _StalledPollingClient();
+    final result =
+        await AgentLoop(
+          client: client,
+          tools: [
+            AgentTool(
+              definition: const AiToolDefinition(
+                name: 'terminal.poll',
+                description: 'poll',
+                parameters: {'type': 'object'},
+              ),
+              isRemote: true,
+              call: (arguments) async => const {
+                'process_id': 'process-1',
+                'stdout_offset': 0,
+                'stderr_offset': 0,
+                'done': false,
+                'failed': false,
+                'stdout': '',
+                'stderr': '',
+              },
+            ),
+          ],
+        ).run(
+          prompt: '等待进程',
+          executionMode: 'auto',
+          onEvent: (type, payload) {
+            events.add(type);
+            return Future.value();
+          },
+        );
+
+    expect(result.status, 'failed');
+    expect(events, contains('task.stalled'));
+    expect(client.calls, 10);
+  });
+
   test('failed tool calls leave a tool message for the next turn', () async {
     final client = _ToolThenTextClient();
     final events = <String>[];
@@ -990,6 +1058,62 @@ class _RepeatingClient implements AiChatClient {
         ),
       ],
     );
+  }
+}
+
+class _StalledPollingClient implements AiChatClient {
+  var calls = 0;
+
+  @override
+  Future<AiMessage> complete({
+    required List<AiMessage> messages,
+    required List<AiToolDefinition> tools,
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    final waitMs = ++calls * 1000;
+    return AiMessage(
+      role: 'assistant',
+      toolCalls: [
+        AiToolCall(
+          id: 'poll-$calls',
+          callId: 'poll-call-$calls',
+          name: 'terminal.poll',
+          arguments: '{"process_id":"process-1","wait_ms":$waitMs}',
+        ),
+      ],
+    );
+  }
+}
+
+class _LongToolChainClient implements AiChatClient {
+  _LongToolChainClient({required this.toolRounds});
+
+  final int toolRounds;
+  var calls = 0;
+
+  @override
+  Future<AiMessage> complete({
+    required List<AiMessage> messages,
+    required List<AiToolDefinition> tools,
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    final callNumber = calls++;
+    if (callNumber < toolRounds) {
+      return AiMessage(
+        role: 'assistant',
+        toolCalls: [
+          AiToolCall(
+            id: 'fc-$callNumber',
+            callId: 'call-$callNumber',
+            name: 'test.tool',
+            arguments: '{"step":$callNumber}',
+          ),
+        ],
+      );
+    }
+    return const AiMessage(role: 'assistant', content: 'done');
   }
 }
 
