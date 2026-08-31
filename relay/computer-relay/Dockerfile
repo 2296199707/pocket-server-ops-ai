@@ -1,9 +1,9 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY --chmod=644 package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
-COPY server.mjs ./
+COPY --chmod=644 server.mjs ./
 
 ENV RELAY_HOST=0.0.0.0
 ENV RELAY_PORT=8787

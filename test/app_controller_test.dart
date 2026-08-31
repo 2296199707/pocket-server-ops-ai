@@ -1761,8 +1761,27 @@ void main() {
       expect(transfer.prompt, contains(transfer.remotePath));
       expect(transfer.prompt, contains('不要输出 RELAY_API_TOKEN'));
       expect(transfer.prompt, contains(r'$(id -u)'));
+      expect(transfer.prompt, contains('chmod 644'));
+      expect(transfer.prompt, contains('chmod 755'));
       expect(connector.commands, isEmpty);
       expect(connector.uploadedFiles[transfer.remotePath], isNotNull);
+      expect(
+        controller.pendingComputerRelayPackage?.relayUrl,
+        transfer.relayUrl,
+      );
+
+      final restored = AppController(
+        database: database,
+        credentials: credentials,
+        sshConnector: connector,
+      );
+      await restored.load();
+      expect(
+        restored.pendingComputerRelayPackage?.serverId,
+        controller.servers.single.id,
+      );
+      expect(restored.pendingComputerRelayPackage?.relayUrl, transfer.relayUrl);
+      restored.dispose();
 
       final setup = await controller.readComputerRelaySetup(
         server: controller.servers.single,
@@ -1776,6 +1795,7 @@ void main() {
         controller.computerRelayUrl,
         'https://relay.example.com/computer-relay',
       );
+      expect(controller.pendingComputerRelayPackage, isNull);
       expect(
         await credentials.read('computer:relay-api'),
         'relay-token-from-env',

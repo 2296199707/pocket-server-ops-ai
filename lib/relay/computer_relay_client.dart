@@ -5,13 +5,36 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class ComputerRelayException implements Exception {
-  const ComputerRelayException(this.statusCode, this.message);
+  const ComputerRelayException(
+    this.statusCode,
+    this.message, {
+    this.transportFailure = false,
+    this.agentOffline = false,
+  });
 
   final int statusCode;
   final String message;
+  final bool transportFailure;
+  final bool agentOffline;
+
+  String get userMessage {
+    if (agentOffline) {
+      return '中转服务器连接成功，但 Windows Agent 未在线';
+    }
+    if (transportFailure) {
+      return '连接中转服务器失败：$message';
+    }
+    if (statusCode == 401 || statusCode == 403) {
+      return '中转服务器鉴权失败，请检查中转 API Token';
+    }
+    if (statusCode == 404 && message == 'device not registered') {
+      return '中转服务器连接成功，但电脑尚未完成配对登记';
+    }
+    return '中转服务器返回 HTTP $statusCode：$message';
+  }
 
   @override
-  String toString() => '电脑中转服务错误 $statusCode：$message';
+  String toString() => userMessage;
 }
 
 class _PendingComputerCall {
@@ -165,10 +188,31 @@ class ComputerRelayClient {
     if (apiToken.trim().isEmpty) {
       throw const ComputerRelayException(401, '未配置中转服务器 API Token');
     }
-    final socket = await WebSocket.connect(
-      _webSocketUrl(deviceId),
-      headers: {'Authorization': 'Bearer $apiToken'},
-    ).timeout(const Duration(seconds: 15));
+    late final WebSocket socket;
+    try {
+      socket = await WebSocket.connect(
+        _webSocketUrl(deviceId),
+        headers: {'Authorization': 'Bearer $apiToken'},
+      ).timeout(const Duration(seconds: 15));
+    } on TimeoutException {
+      throw const ComputerRelayException(
+        0,
+        '中转服务器连接超时',
+        transportFailure: true,
+      );
+    } on SocketException catch (error) {
+      throw ComputerRelayException(
+        0,
+        '无法建立网络连接：${error.message}',
+        transportFailure: true,
+      );
+    } on WebSocketException catch (error) {
+      throw ComputerRelayException(
+        0,
+        'WebSocket 连接失败：${error.message}',
+        transportFailure: true,
+      );
+    }
     if (_closing) {
       await socket.close();
       throw StateError('电脑中转客户端正在关闭');
@@ -255,8 +299,14 @@ class ComputerRelayClient {
         pending.completer.complete(<String, Object?>{'value': result});
       }
     } else {
+      final errorText = _errorText(message['error']);
+      final agentOffline = errorText.startsWith('Windows Agent 离线');
       pending.completer.completeError(
-        ComputerRelayException(502, _errorText(message['error'])),
+        ComputerRelayException(
+          agentOffline ? 503 : 502,
+          errorText,
+          agentOffline: agentOffline,
+        ),
       );
     }
   }
@@ -415,14 +465,39 @@ class ComputerRelayClient {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
     }
-    final response = await _client
-        .send(request)
-        .timeout(const Duration(seconds: 15));
-    final result = await http.Response.fromStream(response);
-    if (result.statusCode < 200 || result.statusCode >= 300) {
-      throw ComputerRelayException(result.statusCode, result.body);
+    try {
+      final response = await _client
+          .send(request)
+          .timeout(const Duration(seconds: 15));
+      final result = await http.Response.fromStream(response);
+      if (result.statusCode < 200 || result.statusCode >= 300) {
+        throw ComputerRelayException(
+          result.statusCode,
+          _responseErrorText(result.body),
+        );
+      }
+      return result;
+    } on ComputerRelayException {
+      rethrow;
+    } on TimeoutException {
+      throw const ComputerRelayException(
+        0,
+        '中转服务器连接超时',
+        transportFailure: true,
+      );
+    } on SocketException catch (error) {
+      throw ComputerRelayException(
+        0,
+        '无法建立网络连接：${error.message}',
+        transportFailure: true,
+      );
+    } on http.ClientException catch (error) {
+      throw ComputerRelayException(
+        0,
+        '网络请求失败：${error.message}',
+        transportFailure: true,
+      );
     }
-    return result;
   }
 
   static Map<String, Object?> _decodeObject(http.Response response) {
@@ -436,8 +511,19 @@ class ComputerRelayClient {
         ? value
         : value is Map && value['message'] is String
         ? value['message'] as String
+        : value is Map && value['error'] is String
+        ? value['error'] as String
         : '电脑请求失败';
     return text.replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ').trim();
+  }
+
+  static String _responseErrorText(String body) {
+    if (body.trim().isEmpty) return '中转服务器未返回错误信息';
+    try {
+      return _errorText(jsonDecode(body));
+    } on FormatException {
+      return _errorText(body);
+    }
   }
 
   String _webSocketUrl(String deviceId) {

@@ -16,6 +16,7 @@ import 'file_manager_page.dart';
 import 'mcp_page.dart';
 import 'profile_sheets.dart';
 import 'providers_page.dart';
+import '../relay/computer_relay_client.dart';
 import 'server_dashboard_page.dart';
 import 'terminal_page.dart';
 import 'updates_page.dart';
@@ -263,6 +264,8 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
           drawer: _buildDrawer(context),
+          drawerEdgeDragWidth: 72,
+          drawerEnableOpenDragGesture: true,
           body: widget.controller.loadError == null
               ? _buildPage()
               : _LoadError(
@@ -1629,11 +1632,14 @@ class ServersPage extends StatelessWidget {
     try {
       if (server.isWindowsComputer) {
         final status = await controller.testComputer(server);
+        final online = status['online'] == true || status['connected'] == true;
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Windows Agent 已连接：${status['name'] ?? server.name}',
+                online
+                    ? 'Windows Agent 已连接：${status['name'] ?? server.name}'
+                    : '中转服务器连接成功，但 Windows Agent 未在线',
               ),
             ),
           );
@@ -1650,10 +1656,21 @@ class ServersPage extends StatelessWidget {
       }
     } catch (error) {
       if (context.mounted) {
+        final message = server.isWindowsComputer
+            ? _computerConnectionErrorText(error)
+            : '连接失败：$error';
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('连接失败：$error')));
+            .showSnackBar(SnackBar(content: Text(message)));
       }
     }
+  }
+
+  String _computerConnectionErrorText(Object error) {
+    if (error is ComputerRelayException) return error.userMessage;
+    if (error is StateError || error is ArgumentError) {
+      return '电脑连接配置错误：${error.toString().replaceFirst(RegExp(r'^(Bad state: |Invalid argument: )'), '')}';
+    }
+    return '连接中转服务器失败：$error';
   }
 
   void _openTerminal(BuildContext context, ServerProfile server) {

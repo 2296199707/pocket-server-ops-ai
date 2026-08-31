@@ -231,6 +231,8 @@ class AppController extends ChangeNotifier {
   String? _imageProviderId;
   String? _computerRelayServerId;
   String? _computerRelayUrl;
+  String? _pendingComputerRelayServerId;
+  String? _pendingComputerRelayUrl;
   String? _lastDashboardServerId;
   String? _lastConversationTaskId;
   double _fontScale = 1.0;
@@ -255,6 +257,29 @@ class AppController extends ChangeNotifier {
   String? get computerRelayServerId => _computerRelayServerId;
   String? get computerRelayUrl => _computerRelayUrl;
   ServerProfile? get computerRelayServer => serverForId(_computerRelayServerId);
+  ComputerRelayPackageTransfer? get pendingComputerRelayPackage {
+    final serverId = _pendingComputerRelayServerId?.trim();
+    final relayUrl = _pendingComputerRelayUrl?.trim();
+    if (serverId == null ||
+        serverId.isEmpty ||
+        relayUrl == null ||
+        relayUrl.isEmpty) {
+      return null;
+    }
+    final server = serverForId(serverId);
+    if (server == null) return null;
+    return ComputerRelayPackageTransfer(
+      serverId: server.id,
+      serverName: server.name,
+      relayUrl: relayUrl,
+      remotePath: _computerRelayPackageRemotePath,
+      prompt: _computerRelayInstallPrompt(
+        publicUrl: relayUrl,
+        remotePath: _computerRelayPackageRemotePath,
+      ),
+    );
+  }
+
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
@@ -683,6 +708,28 @@ class AppController extends ChangeNotifier {
     _computerRelayUrl = savedComputerRelayUrl?.trim().isEmpty == true
         ? null
         : savedComputerRelayUrl?.trim();
+    final savedPendingComputerRelayPackage = await _database.readSetting(
+      _computerRelayPendingPackageSetting,
+    );
+    _pendingComputerRelayServerId = null;
+    _pendingComputerRelayUrl = null;
+    if (savedPendingComputerRelayPackage != null &&
+        savedPendingComputerRelayPackage.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(savedPendingComputerRelayPackage);
+        final serverId = decoded is Map ? decoded['server_id'] : null;
+        final relayUrl = decoded is Map ? decoded['relay_url'] : null;
+        if (serverId is String && relayUrl is String) {
+          final normalizedUrl = _normalizeComputerRelayUrl(relayUrl);
+          if (serverId.trim().isNotEmpty) {
+            _pendingComputerRelayServerId = serverId.trim();
+            _pendingComputerRelayUrl = normalizedUrl;
+          }
+        }
+      } on Object {
+        // A stale pending package marker is safe to ignore.
+      }
+    }
     _dashboardCache.clear();
     for (final server in _servers) {
       final value = await _database.readSetting(
@@ -4170,8 +4217,8 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Registers the Windows device token (when needed) and checks that the
-  /// paired Agent is online. Tokens stay in the secure credential store.
+  /// Registers the Windows device token (when needed) and reads the paired
+  /// Agent status. Tokens stay in the secure credential store.
   Future<Map<String, Object?>> testComputer(ServerProfile profile) async {
     if (previewMode) throw StateError('预览模式不会连接电脑');
     if (!profile.isWindowsComputer) {
@@ -4190,9 +4237,6 @@ class AppController extends ChangeNotifier {
         );
       }
       final status = await relay.deviceStatus(profile.deviceId!);
-      if (status['online'] != true && status['connected'] != true) {
-        throw StateError('Windows Agent 未在线');
-      }
       return status;
     } finally {
       await relay.close();
@@ -4253,6 +4297,13 @@ class AppController extends ChangeNotifier {
         // A temporary package is safe to leave for the OS cleanup job.
       }
     }
+    await _database.writeSetting(
+      _computerRelayPendingPackageSetting,
+      jsonEncode({'server_id': server.id, 'relay_url': normalizedUrl}),
+    );
+    _pendingComputerRelayServerId = server.id;
+    _pendingComputerRelayUrl = normalizedUrl;
+    _notify();
     return ComputerRelayPackageTransfer(
       serverId: server.id,
       serverName: server.name,
@@ -4298,9 +4349,12 @@ class AppController extends ChangeNotifier {
     await Future.wait([
       _database.writeSetting(_computerRelayServerSetting, server.id),
       _database.writeSetting(_computerRelayUrlSetting, normalizedUrl),
+      _database.writeSetting(_computerRelayPendingPackageSetting, ''),
     ]);
     _computerRelayServerId = server.id;
     _computerRelayUrl = normalizedUrl;
+    _pendingComputerRelayServerId = null;
+    _pendingComputerRelayUrl = null;
     _notify();
     return ComputerRelaySetup(
       serverId: server.id,
@@ -5903,6 +5957,11 @@ class AppController extends ChangeNotifier {
       ]);
       _computerRelayServerId = null;
       _computerRelayUrl = null;
+    }
+    if (_pendingComputerRelayServerId == profile.id) {
+      await _database.writeSetting(_computerRelayPendingPackageSetting, '');
+      _pendingComputerRelayServerId = null;
+      _pendingComputerRelayUrl = null;
     }
     _servers = [
       for (final item in _servers)
@@ -8238,6 +8297,7 @@ const _lastDashboardServerSetting = 'last_dashboard_server_id';
 const _lastConversationTaskSetting = 'last_conversation_task_id';
 const _computerRelayServerSetting = 'computer_relay_server_id';
 const _computerRelayUrlSetting = 'computer_relay_url';
+const _computerRelayPendingPackageSetting = 'computer_relay_pending_package';
 const _computerRelayTokenRef = 'computer:relay-api';
 const _computerRelayPackageAsset = 'assets/relay/computer-relay-package.tar.gz';
 const _computerRelayPackageRemotePath =
@@ -8285,6 +8345,8 @@ String _computerRelayInstallPrompt({
 3. 将安装包解压到 /tmp/pocket-server-ops-computer-relay，然后执行：
    mkdir -p /tmp/pocket-server-ops-computer-relay
    tar -xzf $remotePath -C /tmp/pocket-server-ops-computer-relay
+   chmod 644 /tmp/pocket-server-ops-computer-relay/Dockerfile /tmp/pocket-server-ops-computer-relay/package.json /tmp/pocket-server-ops-computer-relay/package-lock.json /tmp/pocket-server-ops-computer-relay/server.mjs /tmp/pocket-server-ops-computer-relay/compose.yaml
+   chmod 755 /tmp/pocket-server-ops-computer-relay/deploy.sh
    if [ "\$(id -u)" -eq 0 ]; then
      RELAY_INSTALL_DIR=/www/pocket-server-ops-computer-relay bash /tmp/pocket-server-ops-computer-relay/deploy.sh
    else

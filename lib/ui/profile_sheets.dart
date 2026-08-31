@@ -132,7 +132,9 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
   void initState() {
     super.initState();
     final servers = _relayServers;
-    final savedId = widget.controller.computerRelayServerId;
+    final pendingTransfer = widget.controller.pendingComputerRelayPackage;
+    final savedId =
+        pendingTransfer?.serverId ?? widget.controller.computerRelayServerId;
     _selectedServerId = servers.any((server) => server.id == savedId)
         ? savedId
         : servers.isEmpty
@@ -142,8 +144,12 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
     _lastSuggestedUrl = selected == null
         ? ''
         : _suggestedComputerRelayUrl(selected);
+    _packageTransfer = pendingTransfer;
     _publicUrl = TextEditingController(
-      text: widget.controller.computerRelayUrl ?? _lastSuggestedUrl,
+      text:
+          pendingTransfer?.relayUrl ??
+          widget.controller.computerRelayUrl ??
+          _lastSuggestedUrl,
     );
   }
 

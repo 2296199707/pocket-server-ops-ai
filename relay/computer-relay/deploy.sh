@@ -33,11 +33,14 @@ chmod 700 "$install_dir" "$install_dir/data"
 chown -R 1000:1000 "$install_dir/data"
 for file in Dockerfile package.json package-lock.json server.mjs compose.yaml; do
   cp "$script_dir/$file" "$install_dir/$file"
+  chmod 644 "$install_dir/$file"
 done
 if [ ! -f "$install_dir/.env" ]; then
-  umask 077
-  printf 'RELAY_API_TOKEN=%s\nRELAY_PORT=%s\nRELAY_BIND=%s\n' \
-    "$(openssl rand -hex 32)" "$relay_port" "$relay_bind" > "$install_dir/.env"
+  (
+    umask 077
+    printf 'RELAY_API_TOKEN=%s\nRELAY_PORT=%s\nRELAY_BIND=%s\n' \
+      "$(openssl rand -hex 32)" "$relay_port" "$relay_bind" > "$install_dir/.env"
+  )
 fi
 chmod 600 "$install_dir/.env"
 cd "$install_dir"

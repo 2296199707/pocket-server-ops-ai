@@ -109,6 +109,17 @@ Caddy/Nginx 的路径。App 会根据 SSH 主机名建议
 供应商可能限制中转服务。用户取消后不会建立上传连接；流程只操作当前选中的一台 SSH
 服务器，不会遍历其他已绑定服务器，也不会自动给其他服务器安装 relay。
 
+上传成功后的待安装状态会写入 App 本地设置，只保存目标服务器 ID 和公网地址；设置
+抽屉关闭、返回对话页或 App 重启后仍会显示“安装包已上传”和“我已让 AI 安装，读取
+配置”入口。提示词根据固定远程路径重新生成，不把 Token 或完整提示词重复写入设置。
+读取配置成功后，待安装标记会清除，后续直接使用已保存的中转配置。
+
+离线包中的 `Dockerfile`、`package.json`、`package-lock.json`、`server.mjs` 和
+`compose.yaml` 固定为可读权限，`deploy.sh` 为可执行权限。部署脚本复制到
+`/www/pocket-server-ops-computer-relay` 后会再次校正这些非敏感运行文件；`.env`
+仍明确保持 `600`，不会为了修复容器读取权限而放宽 Token 文件权限。Dockerfile 内部
+也使用 `COPY --chmod=644`，保证镜像以 `node` 用户运行时可以读取 `/app/server.mjs`。
+
 ## 协议决定（2026-08-31）
 
 已根据 `/srv/wfl-codex-desktop` 的 `windows-device-broker.mjs` 和
@@ -232,3 +243,7 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：修复 Windows Agent CI 在 SEA 注入阶段直接执行 `npx.cmd` 导致的 `spawnSync EINVAL`；构建脚本现在直接调用已安装的 `postject` JavaScript 入口，避免 Windows shell shim 问题。
 - 2026-08-31：中转安装改为手机上传内置离线包并复制 AI 安装提示词；手机不再直接执行安装脚本，安装完成后再通过 SSH 单独读取 `.env` 中的 Token。版本更新为 `1.0.5-beta.5+49`，控制器整套 59 项测试、静态分析和数据盘 APK 构建通过，APK 内已确认包含离线包资源。
 - 2026-08-31：创建并上传 GitHub Pre-release `v1.0.5-beta.5`，同步 `updates/releases.json`，使 App 的 GitHub Raw 和 jsDelivr 更新渠道可以发现该版本。
+- 2026-08-31：修复上传安装包后离开设置抽屉导致入口丢失的问题；待安装目标和公网地址持久化，重新打开抽屉可恢复提示词和安装后配置读取入口，并增加重启恢复测试。
+- 2026-08-31：修复 relay 运行文件因 `umask 077` 或压缩包权限过严导致 `node` 用户无法读取 `/app/server.mjs`；非敏感文件统一可读，`.env` 继续为 `600`，并重新生成离线包。
+- 2026-08-31：修复电脑“测试连接”的错误诊断；relay 返回设备在线状态时，离线设备显示“中转服务器连接成功，但 Windows Agent 未在线”，网络连接失败、HTTP 错误和未完成配对分别显示对应原因及状态码。
+- 2026-08-31：版本更新为 `1.0.5-beta.6+50`；主页面左侧 Drawer 的边缘滑动触发区域调整为 72px，并显式开启向右滑动打开侧栏。
