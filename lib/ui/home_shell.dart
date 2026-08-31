@@ -1518,65 +1518,41 @@ class ServersPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final servers = controller.servers;
+    final relayServer = controller.computerRelayServer;
     return Scaffold(
       body: controller.isLoading
           ? const Center(child: CircularProgressIndicator())
-          : controller.servers.isEmpty
-          ? const _EmptyState(icon: Icons.dns_outlined, label: '还没有目标服务器')
-          : ListView.separated(
+          : ListView(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: controller.servers.length,
-              separatorBuilder: (_, _) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final server = controller.servers[index];
-                return ListTile(
-                  leading: CircleAvatar(
-                    child: Icon(
-                      server.isWindowsComputer
-                          ? Icons.computer_outlined
-                          : Icons.dns_outlined,
-                    ),
-                  ),
-                  title: Text(server.name),
+              children: [
+                ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  leading: const CircleAvatar(child: Icon(Icons.hub_outlined)),
+                  title: const Text('中转服务器设置'),
                   subtitle: Text(
-                    server.isWindowsComputer
-                        ? '${server.relayUrl ?? server.host} · ${server.deviceId ?? '未配置设备 ID'}'
-                        : '${server.username}@${server.host}:${server.port}',
+                    relayServer == null
+                        ? '选择已绑定 SSH 服务器，一键安装并保存配置'
+                        : '${relayServer.name} · ${controller.computerRelayUrl ?? '已配置'}',
                   ),
-                  trailing: PopupMenuButton<String>(
-                    tooltip: '服务器操作',
-                    onSelected: (value) {
-                      switch (value) {
-                        case 'test':
-                          _testServer(context, server);
-                        case 'dashboard':
-                          _openDashboard(context, server);
-                        case 'files':
-                          _openFiles(context, server);
-                        case 'terminal':
-                          _openTerminal(context, server);
-                        case 'edit':
-                          showServerEditor(context, controller, server);
-                        case 'delete':
-                          _deleteServer(context, server);
-                      }
-                    },
-                    itemBuilder: (context) => [
-                      const PopupMenuItem(value: 'test', child: Text('测试连接')),
-                      const PopupMenuItem(
-                        value: 'dashboard',
-                        child: Text('服务器仪表盘'),
-                      ),
-                      if (!server.isWindowsComputer) ...const [
-                        PopupMenuItem(value: 'files', child: Text('文件管理')),
-                        PopupMenuItem(value: 'terminal', child: Text('打开终端')),
-                      ],
-                      const PopupMenuItem(value: 'edit', child: Text('编辑')),
-                      const PopupMenuItem(value: 'delete', child: Text('删除')),
-                    ],
-                  ),
-                );
-              },
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _openRelaySetup(context),
+                ),
+                const Divider(height: 1),
+                if (servers.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 24),
+                    child: _EmptyState(
+                      icon: Icons.dns_outlined,
+                      label: '还没有目标服务器',
+                    ),
+                  )
+                else
+                  for (var index = 0; index < servers.length; index++) ...[
+                    _serverListTile(context, servers[index]),
+                    if (index != servers.length - 1) const Divider(height: 1),
+                  ],
+              ],
             ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => showServerEditor(context, controller),
@@ -1584,6 +1560,69 @@ class ServersPage extends StatelessWidget {
         child: const Icon(Icons.add),
       ),
     );
+  }
+
+  Widget _serverListTile(BuildContext context, ServerProfile server) {
+    return ListTile(
+      leading: CircleAvatar(
+        child: Icon(
+          server.isWindowsComputer
+              ? Icons.computer_outlined
+              : Icons.dns_outlined,
+        ),
+      ),
+      title: Text(server.name),
+      subtitle: Text(
+        server.isWindowsComputer
+            ? '${server.relayUrl ?? server.host} · ${server.deviceId ?? '未配置设备 ID'}'
+            : '${server.username}@${server.host}:${server.port}',
+      ),
+      trailing: PopupMenuButton<String>(
+        tooltip: '服务器操作',
+        onSelected: (value) {
+          switch (value) {
+            case 'test':
+              _testServer(context, server);
+            case 'pairing':
+              unawaited(showComputerPairingDialog(context, controller, server));
+            case 'dashboard':
+              _openDashboard(context, server);
+            case 'files':
+              _openFiles(context, server);
+            case 'terminal':
+              _openTerminal(context, server);
+            case 'edit':
+              showServerEditor(context, controller, server);
+            case 'delete':
+              _deleteServer(context, server);
+          }
+        },
+        itemBuilder: (context) => [
+          const PopupMenuItem(value: 'test', child: Text('测试连接')),
+          if (server.isWindowsComputer)
+            const PopupMenuItem(value: 'pairing', child: Text('电脑配对信息')),
+          const PopupMenuItem(value: 'dashboard', child: Text('服务器仪表盘')),
+          if (!server.isWindowsComputer) ...const [
+            PopupMenuItem(value: 'files', child: Text('文件管理')),
+            PopupMenuItem(value: 'terminal', child: Text('打开终端')),
+          ],
+          const PopupMenuItem(value: 'edit', child: Text('编辑')),
+          const PopupMenuItem(value: 'delete', child: Text('删除')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openRelaySetup(BuildContext context) async {
+    if (!controller.servers.any((server) => !server.isWindowsComputer)) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先添加一个 SSH 服务器作为中转服务器')));
+      return;
+    }
+    final setup = await showComputerRelaySetupSheet(context, controller);
+    if (setup == null || !context.mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('中转配置已保存：${setup.serverName}')));
   }
 
   Future<void> _testServer(BuildContext context, ServerProfile server) async {

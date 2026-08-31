@@ -1,0 +1,43 @@
+name: Build Windows computer agent
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - beta
+    paths:
+      - relay/computer-agent/**
+      - .github/workflows/windows-computer-agent.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: relay/computer-agent
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: relay/computer-agent/package-lock.json
+      - name: Build standalone EXE
+        shell: pwsh
+        run: .\build-windows.ps1
+      - name: Package download
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist -Filter 'PocketServerOps-Computer-*.exe' | Select-Object -First 1
+          Compress-Archive -Path $exe.FullName, README.md -DestinationPath PocketServerOps-Computer-windows-x64.zip
+      - name: Upload Windows Agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-server-ops-computer-agent-windows-x64
+          path: relay/computer-agent/PocketServerOps-Computer-windows-x64.zip
+          retention-days: 30

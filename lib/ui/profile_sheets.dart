@@ -1,7 +1,409 @@
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_controller.dart';
 import '../domain/models.dart';
+import '../ssh/ssh_connection.dart';
+
+String _randomHex(int byteCount) {
+  final random = math.Random.secure();
+  return List.generate(
+    byteCount,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+}
+
+String _newWindowsDeviceId() => 'windows-${_randomHex(6)}';
+
+String _newWindowsAgentToken() => _randomHex(32);
+
+Future<void> showComputerPairingDialog(
+  BuildContext context,
+  AppController controller,
+  ServerProfile profile, {
+  String? registrationError,
+}) async {
+  try {
+    final pairing = await controller.computerPairingInfo(profile);
+    final compact = jsonEncode(pairing);
+    final formatted = const JsonEncoder.withIndent('  ').convert(pairing);
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('电脑配对信息'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 420),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  registrationError == null
+                      ? '设备已登记。Windows 端只需要下面这组信息，不需要中转 API Token。'
+                      : '配置已保存，但设备登记失败。启动 Windows Agent 后可在电脑菜单中重新测试连接。',
+                ),
+                const SizedBox(height: 12),
+                SelectableText(
+                  formatted,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: compact));
+              if (dialogContext.mounted) Navigator.pop(dialogContext);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(const SnackBar(content: Text('电脑配对信息已复制')));
+              }
+            },
+            icon: const Icon(Icons.copy_outlined),
+            label: const Text('复制配置'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  } catch (error) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('读取电脑配对信息失败：$error')));
+  }
+}
+
+Future<ComputerRelaySetup?> showComputerRelaySetupSheet(
+  BuildContext context,
+  AppController controller,
+) {
+  return showModalBottomSheet<ComputerRelaySetup>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (_) => _ComputerRelaySetupSheet(controller: controller),
+  );
+}
+
+class _ComputerRelaySetupSheet extends StatefulWidget {
+  const _ComputerRelaySetupSheet({required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<_ComputerRelaySetupSheet> createState() =>
+      _ComputerRelaySetupSheetState();
+}
+
+class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
+  late final TextEditingController _publicUrl;
+  String? _selectedServerId;
+  String _lastSuggestedUrl = '';
+  bool _working = false;
+  String? _error;
+
+  List<ServerProfile> get _relayServers => widget.controller.servers
+      .where((server) => !server.isWindowsComputer)
+      .toList(growable: false);
+
+  ServerProfile? get _selectedServer {
+    final id = _selectedServerId;
+    if (id == null) return null;
+    for (final server in _relayServers) {
+      if (server.id == id) return server;
+    }
+    return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final servers = _relayServers;
+    final savedId = widget.controller.computerRelayServerId;
+    _selectedServerId = servers.any((server) => server.id == savedId)
+        ? savedId
+        : servers.isEmpty
+        ? null
+        : servers.first.id;
+    final selected = _selectedServer;
+    _lastSuggestedUrl = selected == null
+        ? ''
+        : _suggestedComputerRelayUrl(selected);
+    _publicUrl = TextEditingController(
+      text: widget.controller.computerRelayUrl ?? _lastSuggestedUrl,
+    );
+  }
+
+  @override
+  void dispose() {
+    _publicUrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final servers = _relayServers;
+    final savedUrl = widget.controller.computerRelayUrl;
+    final savedServer = widget.controller.computerRelayServer;
+    return _SheetFrame(
+      child: ListView(
+        shrinkWrap: true,
+        children: [
+          Text('中转服务器设置', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 8),
+          const Text(
+            '请选择一台已绑定的 SSH 服务器作为唯一安装目标。手机只会对当前选中的服务器执行中转软件安装或更新，不会遍历其他服务器，也不会自动安装或修改 Caddy/Nginx。',
+          ),
+          if (savedUrl != null) ...[
+            const SizedBox(height: 12),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.check_circle_outline),
+              title: const Text('已保存的中转配置'),
+              subtitle: Text('${savedServer?.name ?? '服务器已删除'} · $savedUrl'),
+              trailing: TextButton(
+                onPressed: _working ? null : _useSaved,
+                child: const Text('直接使用'),
+              ),
+            ),
+            const Divider(height: 1),
+          ],
+          if (servers.isEmpty) ...[
+            const SizedBox(height: 20),
+            const Text('请先在服务器页面添加一个 SSH 服务器。'),
+          ] else ...[
+            const SizedBox(height: 14),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedServerId,
+              decoration: const InputDecoration(labelText: '已绑定的 SSH 服务器'),
+              items: [
+                for (final server in servers)
+                  DropdownMenuItem(
+                    value: server.id,
+                    child: Text(
+                      '${server.name} · ${server.host}:${server.port}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: _working
+                  ? null
+                  : (value) {
+                      if (value == null) return;
+                      final server = servers.firstWhere(
+                        (item) => item.id == value,
+                      );
+                      final suggested = _suggestedComputerRelayUrl(server);
+                      setState(() {
+                        _selectedServerId = value;
+                        if (_publicUrl.text.trim().isEmpty ||
+                            _publicUrl.text.trim() == _lastSuggestedUrl) {
+                          _publicUrl.text = suggested;
+                        }
+                        _lastSuggestedUrl = suggested;
+                      });
+                    },
+            ),
+            TextFormField(
+              controller: _publicUrl,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: '公网中转地址',
+                hintText: 'https://relay.example.com/computer-relay',
+                helperText: '自动按服务器地址填入建议值；必须与现有 HTTPS/WSS 反向代理一致。',
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '安装使用独立目录和 Compose 项目，不会停止其他 Compose 项目，也不会自动修改现有网站配置。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: _working ? null : _install,
+              icon: _working
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.install_desktop_outlined),
+              label: Text(_working ? '正在安装并读取配置…' : '安装到已选服务器并保存'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _useSaved() async {
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      final setup = await widget.controller.configuredComputerRelay();
+      if (setup == null) throw StateError('已保存的中转配置不可用，请重新安装并读取');
+      if (mounted) Navigator.pop(context, setup);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _working = false;
+          _error = '$error';
+        });
+      }
+    }
+  }
+
+  Future<void> _install() async {
+    final server = _selectedServer;
+    if (server == null) {
+      setState(() => _error = '请选择已绑定的 SSH 服务器');
+      return;
+    }
+    if (_publicUrl.text.trim().isEmpty) {
+      setState(() => _error = '请输入公网中转地址');
+      return;
+    }
+    final confirmed = await _confirmRelayInstall(
+      context,
+      server: server,
+      publicUrl: _publicUrl.text.trim(),
+    );
+    if (!confirmed || !mounted) return;
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      final setup = await widget.controller.setupComputerRelay(
+        server: server,
+        publicUrl: _publicUrl.text,
+        onFirstHostKey: (key) => _confirmRelayHostKey(context, key),
+      );
+      if (mounted) Navigator.pop(context, setup);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _working = false;
+          _error = '$error';
+        });
+      }
+    }
+  }
+}
+
+String _suggestedComputerRelayUrl(ServerProfile server) {
+  final rawHost = server.host.trim();
+  final parsed = Uri.tryParse(
+    rawHost.contains('://') ? rawHost : 'https://$rawHost',
+  );
+  if (parsed == null || parsed.host.isEmpty) return '';
+  return parsed
+      .replace(
+        scheme: 'https',
+        path: '/computer-relay',
+        query: '',
+        fragment: '',
+      )
+      .toString();
+}
+
+Future<bool> _confirmRelayHostKey(BuildContext context, SshHostKey key) async {
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('确认中转服务器指纹'),
+          content: SelectableText('${key.type}\n${key.fingerprint}'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('拒绝'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('信任并保存'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
+
+Future<bool> _confirmRelayInstall(
+  BuildContext context, {
+  required ServerProfile server,
+  required String publicUrl,
+}) async {
+  return await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('确认安装中转软件'),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('即将通过 SSH 在以下服务器安装或更新中转软件：'),
+                const SizedBox(height: 12),
+                Text(
+                  server.name,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 4),
+                SelectableText(
+                  '${server.username}@${server.host}:${server.port}',
+                ),
+                const SizedBox(height: 12),
+                const Text('公网中转地址'),
+                const SizedBox(height: 4),
+                SelectableText(publicUrl),
+                const SizedBox(height: 16),
+                const Text(
+                  '本次只操作这一台已选服务器，不会给其他服务器安装。脚本使用独立目录，不会自动修改现有 Caddy/Nginx 或网站配置。',
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '请确认该服务器供应商允许运行中转服务。部分供应商可能限制此类服务。',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('确认安装'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
 
 Future<void> showServerEditor(
   BuildContext context,
@@ -65,6 +467,9 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _authType = profile?.isWindowsComputer == true
         ? 'password'
         : profile?.authType ?? 'password';
+    if (profile == null && _targetType == serverTargetTypeWindows) {
+      _ensureWindowsPairingFields();
+    }
   }
 
   @override
@@ -81,6 +486,22 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _relayApiToken.dispose();
     _deviceToken.dispose();
     super.dispose();
+  }
+
+  void _ensureWindowsPairingFields() {
+    if (_deviceId.text.trim().isEmpty) {
+      _deviceId.text = _newWindowsDeviceId();
+    }
+    if (_deviceToken.text.trim().isEmpty) {
+      _deviceToken.text = _newWindowsAgentToken();
+    }
+    if (_directory.text.trim().isEmpty) {
+      _directory.text = r'C:\Users\Public\PocketServerOps';
+    }
+    if (_relayUrl.text.trim().isEmpty &&
+        widget.controller.computerRelayUrl != null) {
+      _relayUrl.text = widget.controller.computerRelayUrl!;
+    }
   }
 
   @override
@@ -122,6 +543,10 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                     _secret.clear();
                     _passphrase.clear();
                     _clearPassphrase = false;
+                    if (widget.existing == null ||
+                        widget.existing?.isWindowsComputer != true) {
+                      _ensureWindowsPairingFields();
+                    }
                   }
                 });
               },
@@ -131,16 +556,29 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 controller: _relayUrl,
                 keyboardType: TextInputType.url,
                 decoration: const InputDecoration(
-                  labelText: '中转服务器地址',
-                  hintText: 'https://relay.example.com:8787',
+                  labelText: '中转服务器地址（手机）',
+                  hintText: 'https://relay.example.com',
                 ),
                 validator: (value) => _targetType == serverTargetTypeWindows
                     ? _required(value)
                     : null,
               ),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _chooseComputerRelay,
+                icon: const Icon(Icons.hub_outlined),
+                label: const Text('选择已绑定服务器一键设置中转'),
+              ),
               TextFormField(
                 controller: _deviceId,
-                decoration: const InputDecoration(labelText: 'Windows 设备 ID'),
+                decoration: InputDecoration(
+                  labelText: 'Windows 设备 ID',
+                  suffixIcon: IconButton(
+                    tooltip: '重新生成设备 ID',
+                    onPressed: () =>
+                        setState(() => _deviceId.text = _newWindowsDeviceId()),
+                    icon: const Icon(Icons.refresh_outlined),
+                  ),
+                ),
                 validator: (value) => _targetType == serverTargetTypeWindows
                     ? _required(value)
                     : null,
@@ -149,7 +587,7 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 controller: _relayApiToken,
                 obscureText: true,
                 decoration: InputDecoration(
-                  labelText: '中转 API Token',
+                  labelText: '中转 API Token（仅手机）',
                   hintText: widget.existing == null ? null : '留空则保留已有 Token',
                 ),
                 validator: (value) {
@@ -167,6 +605,13 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 decoration: InputDecoration(
                   labelText: 'Windows Agent Token',
                   hintText: widget.existing == null ? null : '留空则保留已有 Token',
+                  suffixIcon: IconButton(
+                    tooltip: '重新生成 Agent Token',
+                    onPressed: () => setState(
+                      () => _deviceToken.text = _newWindowsAgentToken(),
+                    ),
+                    icon: const Icon(Icons.refresh_outlined),
+                  ),
                 ),
                 validator: (value) {
                   if (_targetType == serverTargetTypeWindows &&
@@ -178,7 +623,7 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 },
               ),
               Text(
-                'Windows 端 Agent 使用设备 Token 主动连接中转服务器；手机只保存 Token，不会交给 AI。',
+                '设备 ID 和 Agent Token 会自动生成。保存后可复制电脑配对信息；中转 API Token 只保存在手机，不会交给电脑或 AI。',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ] else ...[
@@ -283,13 +728,22 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
   }
 
   Future<void> _save() async {
+    if (widget.existing == null &&
+        _targetType == serverTargetTypeWindows &&
+        _relayApiToken.text.trim().isEmpty) {
+      final configured = await widget.controller.configuredComputerRelay();
+      if (configured != null) {
+        _relayUrl.text = configured.relayUrl;
+        _relayApiToken.text = configured.apiToken;
+      }
+    }
     if (!_formKey.currentState!.validate()) return;
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      await widget.controller.saveServer(
+      final savedProfile = await widget.controller.saveServer(
         existing: widget.existing,
         name: _name.text.trim(),
         host: _host.text.trim(),
@@ -306,6 +760,21 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
         relayApiToken: _relayApiToken.text,
         deviceToken: _deviceToken.text,
       );
+      if (savedProfile.isWindowsComputer && mounted) {
+        String? registrationError;
+        try {
+          await widget.controller.registerComputer(savedProfile);
+        } catch (error) {
+          registrationError = '$error';
+        }
+        if (!mounted) return;
+        await showComputerPairingDialog(
+          context,
+          widget.controller,
+          savedProfile,
+          registrationError: registrationError,
+        );
+      }
       if (mounted) Navigator.pop(context);
     } catch (error) {
       if (mounted) {
@@ -315,6 +784,15 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
         });
       }
     }
+  }
+
+  Future<void> _chooseComputerRelay() async {
+    final setup = await showComputerRelaySetupSheet(context, widget.controller);
+    if (!mounted || setup == null) return;
+    setState(() {
+      _relayUrl.text = setup.relayUrl;
+      _relayApiToken.text = setup.apiToken;
+    });
   }
 }
 

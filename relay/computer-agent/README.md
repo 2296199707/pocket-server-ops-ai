@@ -4,18 +4,53 @@
 自带的全局 `WebSocket`，由 Windows 主动连接中转服务器，不需要在中转服务器
 上反向连接 Windows。
 
+推荐使用独立 EXE。电脑首次运行 EXE 时会进入配对向导，粘贴手机 App 的“电脑
+配对信息”即可；EXE 自带 Node.js 运行时，不需要另外安装 Node.js。当前仓库的
+GitHub Actions 会在 beta 分支更新后构建 Windows x64 压缩包，构建完成后可从
+Actions 的 artifact 下载。
+
 ## 要求
 
 - Windows 10/11；
-- Node.js 22；
+- 独立 EXE 不需要安装 Node.js；
+- 源码运行或使用旧安装脚本时需要 Node.js 22；
 - 中转服务器提供 `wss://.../device/ws`；
 - 设备已经在 PocketServerOps 中完成配对，并取得 `device_id` 和
   `device_token`。
 
-Agent 不引入 npm 依赖。`device_token` 保存在当前用户安装目录的
+Agent 运行时不引入 npm 依赖。构建工具只用于生成独立 EXE。`device_token` 保存在当前用户安装目录的
 `config.json` 中，安装脚本会移除继承权限并只授予当前用户访问。
 
-## 安装
+## 独立 EXE 首次配置
+
+从 beta 构建 artifact 下载并解压 `PocketServerOps-Computer-windows-x64.zip`，
+在 PowerShell 中运行 EXE：
+
+```powershell
+.\PocketServerOps-Computer-v1.0.0-beta.2-win-x64.exe
+```
+
+当前构建未使用商业代码签名证书，Windows 首次运行可能显示 SmartScreen 提示；
+确认文件来自本项目后再允许运行即可。
+
+在手机 App 的 Windows 电脑目标中保存配置后，打开“电脑配对信息”，点击“复制
+配置”，把得到的一行 JSON 粘贴到 EXE。程序会保存配置并注册当前用户登录时自动
+启动的任务。Windows Agent 只接收 `relay_url`、`device_id`、`device_token` 和
+`working_directory`，不会接收中转 API Token。
+
+以后需要重新配置时运行：
+
+```powershell
+.\PocketServerOps-Computer-v1.0.0-beta.2-win-x64.exe --setup
+```
+
+卸载登录启动任务：
+
+```powershell
+.\PocketServerOps-Computer-v1.0.0-beta.2-win-x64.exe --uninstall
+```
+
+## 源码运行或旧脚本安装
 
 在本目录打开 PowerShell，使用当前用户安装：
 

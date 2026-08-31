@@ -52,6 +52,23 @@ class ServerTerminalSession {
   }
 }
 
+/// The relay API token is only held in memory long enough for the phone to
+/// copy it into a Windows target or construct a relay client. It is never
+/// serialized into task data or sent to an AI provider.
+class ComputerRelaySetup {
+  const ComputerRelaySetup({
+    required this.serverId,
+    required this.serverName,
+    required this.relayUrl,
+    required this.apiToken,
+  });
+
+  final String serverId;
+  final String serverName;
+  final String relayUrl;
+  final String apiToken;
+}
+
 class _ServerDirectoryProbe {
   const _ServerDirectoryProbe({
     required this.fingerprint,
@@ -192,6 +209,8 @@ class AppController extends ChangeNotifier {
   bool _remoteTaskRecoveryEnabled = true;
   SubagentSettings _subagentSettings = const SubagentSettings();
   String? _imageProviderId;
+  String? _computerRelayServerId;
+  String? _computerRelayUrl;
   String? _lastDashboardServerId;
   String? _lastConversationTaskId;
   double _fontScale = 1.0;
@@ -213,6 +232,9 @@ class AppController extends ChangeNotifier {
   bool get documentModuleEnabled => _documentModuleEnabled;
   bool get remoteTaskRecoveryEnabled => _remoteTaskRecoveryEnabled;
   SubagentSettings get subagentSettings => _subagentSettings;
+  String? get computerRelayServerId => _computerRelayServerId;
+  String? get computerRelayUrl => _computerRelayUrl;
+  ServerProfile? get computerRelayServer => serverForId(_computerRelayServerId);
   String? get lastDashboardServerId => _lastDashboardServerId;
   String? get lastConversationTaskId => _lastConversationTaskId;
   double get fontScale => _fontScale;
@@ -629,6 +651,18 @@ class AppController extends ChangeNotifier {
     _loadError = null;
     _notify();
     _servers = await _database.loadServers();
+    final savedComputerRelayServerId = await _database.readSetting(
+      _computerRelayServerSetting,
+    );
+    _computerRelayServerId = savedComputerRelayServerId?.trim().isEmpty == true
+        ? null
+        : savedComputerRelayServerId?.trim();
+    final savedComputerRelayUrl = await _database.readSetting(
+      _computerRelayUrlSetting,
+    );
+    _computerRelayUrl = savedComputerRelayUrl?.trim().isEmpty == true
+        ? null
+        : savedComputerRelayUrl?.trim();
     _dashboardCache.clear();
     for (final server in _servers) {
       final value = await _database.readSetting(
@@ -4145,6 +4179,135 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Registers a Windows device without requiring the Agent to be online yet.
+  /// This lets a freshly installed EXE authenticate immediately after setup.
+  Future<void> registerComputer(ServerProfile profile) async {
+    if (previewMode) return;
+    if (!profile.isWindowsComputer) {
+      throw ArgumentError('目标不是 Windows 电脑');
+    }
+    final relay = await _computerRelayFor(profile);
+    try {
+      final deviceToken = await _readCredential(
+        profile.deviceTokenRef,
+        'Windows 电脑设备 Token 不可用',
+      );
+      await relay.registerDevice(
+        deviceId: profile.deviceId!,
+        name: profile.name,
+        deviceToken: deviceToken,
+      );
+    } finally {
+      await relay.close();
+    }
+  }
+
+  /// Installs or updates the relay on an already configured SSH server and
+  /// stores the generated API token in the phone credential store.
+  Future<ComputerRelaySetup> setupComputerRelay({
+    required ServerProfile server,
+    required String publicUrl,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    if (previewMode) throw StateError('预览模式不会部署中转服务器');
+    if (server.isWindowsComputer) {
+      throw ArgumentError('中转服务器必须是 SSH 服务器');
+    }
+    final normalizedUrl = _normalizeComputerRelayUrl(publicUrl);
+    final result = await _withServerConnection(
+      server,
+      (connection) => connection.run(
+        _computerRelaySetupCommand,
+        timeout: const Duration(minutes: 8),
+      ),
+      onFirstHostKey: onFirstHostKey,
+    );
+    if (result.exitCode != 0) {
+      final detail = result.stderr.trim().isNotEmpty
+          ? result.stderr.trim()
+          : result.stdout.trim();
+      throw StateError(detail.isEmpty ? '中转服务器安装失败' : '中转服务器安装失败：$detail');
+    }
+    final token = _relayTokenFromSetupOutput(result.stdout);
+    if (token == null) {
+      throw StateError('中转服务已执行，但没有读取到 API Token');
+    }
+    await _credentials.write(_computerRelayTokenRef, token);
+    await Future.wait([
+      _database.writeSetting(_computerRelayServerSetting, server.id),
+      _database.writeSetting(_computerRelayUrlSetting, normalizedUrl),
+    ]);
+    _computerRelayServerId = server.id;
+    _computerRelayUrl = normalizedUrl;
+    _notify();
+    return ComputerRelaySetup(
+      serverId: server.id,
+      serverName: server.name,
+      relayUrl: normalizedUrl,
+      apiToken: token,
+    );
+  }
+
+  /// Reads the saved relay setup for use by a new Windows target. The token is
+  /// returned only to the phone UI and is never persisted in ordinary fields.
+  Future<ComputerRelaySetup?> configuredComputerRelay() async {
+    final serverId = _computerRelayServerId?.trim();
+    final relayUrl = _computerRelayUrl?.trim();
+    if (serverId == null ||
+        serverId.isEmpty ||
+        relayUrl == null ||
+        relayUrl.isEmpty) {
+      return null;
+    }
+    final token = await _credentials.read(_computerRelayTokenRef);
+    final server = serverForId(serverId);
+    if (server == null || token == null || token.trim().isEmpty) return null;
+    return ComputerRelaySetup(
+      serverId: server.id,
+      serverName: server.name,
+      relayUrl: relayUrl,
+      apiToken: token,
+    );
+  }
+
+  /// Returns the only credentials that the Windows Agent needs. The relay API
+  /// token stays in the phone credential store and is intentionally omitted.
+  Future<Map<String, String>> computerPairingInfo(ServerProfile profile) async {
+    if (!profile.isWindowsComputer) {
+      throw ArgumentError('目标不是 Windows 电脑');
+    }
+    final relayUrl = profile.relayUrl?.trim();
+    final deviceId = profile.deviceId?.trim();
+    if (relayUrl == null || relayUrl.isEmpty) {
+      throw StateError('Windows 电脑未配置中转服务器地址');
+    }
+    if (deviceId == null || deviceId.isEmpty) {
+      throw StateError('Windows 电脑未配置设备 ID');
+    }
+    final deviceToken = await _readCredential(
+      profile.deviceTokenRef,
+      'Windows 电脑设备 Token 不可用',
+    );
+    final parsed = Uri.parse(relayUrl);
+    final basePath = parsed.path.replaceFirst(RegExp(r'/+$'), '');
+    final agentPath = '$basePath/device/ws'.replaceFirst(RegExp(r'^/+'), '/');
+    final agentUrl = parsed
+        .replace(
+          scheme: parsed.scheme == 'https' ? 'wss' : 'ws',
+          path: agentPath,
+        )
+        .toString();
+    return {
+      'relay_url': agentUrl,
+      'device_id': deviceId,
+      'device_token': deviceToken,
+      'working_directory':
+          profile.defaultWorkingDirectory?.trim().isNotEmpty == true
+          ? profile.defaultWorkingDirectory!.trim()
+          : r'C:\Users\Public\PocketServerOps',
+    };
+  }
+
   Future<SshCommandResult> runServerCommand(
     ServerProfile profile,
     String command, {
@@ -5436,7 +5599,7 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  Future<void> saveServer({
+  Future<ServerProfile> saveServer({
     ServerProfile? existing,
     required String name,
     required String host,
@@ -5628,6 +5791,7 @@ class AppController extends ChangeNotifier {
       );
     }
     _notify();
+    return profile;
   }
 
   Future<void> deleteServer(ServerProfile profile) async {
@@ -5653,6 +5817,15 @@ class AppController extends ChangeNotifier {
     }
     if (profile.deviceTokenRef != null) {
       await _credentials.delete(profile.deviceTokenRef!);
+    }
+    if (_computerRelayServerId == profile.id) {
+      await _credentials.delete(_computerRelayTokenRef);
+      await Future.wait([
+        _database.writeSetting(_computerRelayServerSetting, ''),
+        _database.writeSetting(_computerRelayUrlSetting, ''),
+      ]);
+      _computerRelayServerId = null;
+      _computerRelayUrl = null;
     }
     _servers = [
       for (final item in _servers)
@@ -7986,6 +8159,78 @@ const _imageProviderSetting = 'image_provider_id';
 const _imageModelSettingPrefix = 'image_model:';
 const _lastDashboardServerSetting = 'last_dashboard_server_id';
 const _lastConversationTaskSetting = 'last_conversation_task_id';
+const _computerRelayServerSetting = 'computer_relay_server_id';
+const _computerRelayUrlSetting = 'computer_relay_url';
+const _computerRelayTokenRef = 'computer:relay-api';
+
+const _computerRelaySetupCommand = r'''
+set -eu
+install_dir=/www/pocket-server-ops-computer-relay
+has_file() {
+  if [ "$(id -u)" -eq 0 ]; then
+    test -f "$1"
+  else
+    sudo -n test -f "$1"
+  fi
+}
+for candidate in /opt/pocket-server-ops-computer-relay /www/pocket-server-ops-computer-relay; do
+  if has_file "$candidate/.env"; then
+    install_dir="$candidate"
+    break
+  fi
+done
+tmp_file="$(mktemp)"
+trap 'rm -f "$tmp_file"' EXIT
+curl -fsSL --retry 3 --retry-delay 1 \
+  https://raw.githubusercontent.com/2296199707/pocket-server-ops-ai/beta/relay/computer-relay/install.sh \
+  -o "$tmp_file"
+if [ "$(id -u)" -eq 0 ]; then
+  RELAY_INSTALL_DIR="$install_dir" bash "$tmp_file"
+else
+  sudo -n env RELAY_INSTALL_DIR="$install_dir" bash "$tmp_file"
+fi
+for env_file in "$install_dir/.env" /opt/pocket-server-ops-computer-relay/.env /www/pocket-server-ops-computer-relay/.env; do
+  if has_file "$env_file"; then
+    if [ "$(id -u)" -eq 0 ]; then
+      token="$(sed -n 's/^RELAY_API_TOKEN=//p' "$env_file" | head -n 1 | tr -d '\r')"
+    else
+      token="$(sudo -n sed -n 's/^RELAY_API_TOKEN=//p' "$env_file" | head -n 1 | tr -d '\r')"
+    fi
+    if [ -n "$token" ]; then
+      printf 'POCKET_SERVER_OPS_RELAY_TOKEN=%s\n' "$token"
+      exit 0
+    fi
+  fi
+done
+printf '%s\n' 'RELAY_API_TOKEN was not found after installation' >&2
+exit 1
+''';
+
+String _normalizeComputerRelayUrl(String value) {
+  final trimmed = value.trim();
+  final parsed = Uri.tryParse(trimmed);
+  if (parsed == null ||
+      parsed.host.isEmpty ||
+      (parsed.scheme != 'http' && parsed.scheme != 'https') ||
+      parsed.userInfo.isNotEmpty ||
+      parsed.query.isNotEmpty ||
+      parsed.fragment.isNotEmpty) {
+    throw ArgumentError('请输入有效的中转服务器公网 http(s) 地址');
+  }
+  var relayPath = parsed.path.replaceFirst(RegExp(r'/+$'), '');
+  if (relayPath.isEmpty) relayPath = '/computer-relay';
+  return parsed.replace(path: relayPath).toString();
+}
+
+String? _relayTokenFromSetupOutput(String output) {
+  for (final line in output.split('\n')) {
+    const prefix = 'POCKET_SERVER_OPS_RELAY_TOKEN=';
+    if (!line.startsWith(prefix)) continue;
+    final token = line.substring(prefix.length).trim();
+    if (token.isNotEmpty) return token;
+  }
+  return null;
+}
 
 List<McpServerProfile> _readMcpServers(String? value) {
   if (value == null || value.trim().isEmpty) return const [];

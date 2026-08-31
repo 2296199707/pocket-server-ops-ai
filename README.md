@@ -6,6 +6,7 @@ PocketServerOps AI 是一款面向服务器运维的 Android 手机应用。它�
 
 - AI 普通对话与服务器运维 Agent
 - 通过 SSH 执行命令、运行长任务和交互输入
+- 通过中转服务器连接 Windows 电脑，执行 PowerShell、文件操作和后台任务
 - 远程文件浏览、读取、编辑、保存和新建文件
 - 服务器仪表盘：CPU、内存、磁盘、负载、运行时间和系统信息
 - AI 供应商、模型和连接测试设置
@@ -21,7 +22,8 @@ PocketServerOps AI 是一款面向服务器运维的 Android 手机应用。它�
 ```text
 手机 App ── AI API
     │
-    └──── SSH ──── 目标服务器
+    ├──── SSH ──── 目标服务器
+    └──── HTTPS/WSS ──── 中转服务器 ──── Windows Agent
 ```
 
 Agent、AI 请求、工具调用、任务历史和 SSH 连接均运行在手机端。目标服务器不需要安装 PocketServerOps AI，也不会保存手机端的 AI API Key。
@@ -74,6 +76,7 @@ python3 -m http.server 4173 -d build/web
 - [第三方许可索引](THIRD_PARTY_NOTICES.md)
 - [架构与复用调查](docs/wfl-reuse-audit-and-mobile-agent-v1.zh-CN.md)
 - [手机本地 MCP 客户端](docs/mcp-local-client.zh-CN.md)
+- [Windows 电脑中转与独立 Agent](docs/windows-computer-relay-progress.zh-CN.md)
 
 ## 许可证
 

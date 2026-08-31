@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline/promises';
+import { spawn, spawnSync } from 'node:child_process';
 
-const AGENT_VERSION = '1.0.0-beta.1';
+const AGENT_VERSION = '1.0.0-beta.2';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
+const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
+const STARTUP_TASK_NAME = 'PocketServerOps-ComputerAgent';
+const PAIRING_PREFIX = 'POCKET_SERVER_OPS_PAIRING_V1:';
 
 const MAX_COMMAND_BYTES = 1024 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -1104,11 +1107,22 @@ async function loadConfig(configPath) {
 }
 
 function parseArgs(argv) {
-  const args = { config: path.join(path.dirname(fileURLToPath(import.meta.url)), DEFAULT_CONFIG_NAME) };
+  const args = {
+    config: defaultConfigPath(),
+    setup: false,
+    run: false,
+    uninstall: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === '--config') {
       args.config = argv[++index];
+    } else if (value === '--setup') {
+      args.setup = true;
+    } else if (value === '--run') {
+      args.run = true;
+    } else if (value === '--uninstall') {
+      args.uninstall = true;
     } else if (value === '--version') {
       args.version = true;
     } else if (value === '--help' || value === '-h') {
@@ -1122,8 +1136,177 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log('PocketServerOps Windows Agent');
-  console.log('用法: node agent.mjs [--config <config.json>]');
+  console.log('用法: PocketServerOps-Computer.exe [--setup|--run|--uninstall]');
+  console.log('首次运行会要求粘贴手机 App 显示的电脑配对信息。');
   console.log('配置字段: relay_url, device_id, device_token, working_directory');
+}
+
+function runtimeModulePath() {
+  if (typeof __filename === 'string' && __filename.length > 0) return __filename;
+  if (typeof process.argv[1] === 'string' && process.argv[1].length > 0) {
+    return path.resolve(process.argv[1]);
+  }
+  return process.cwd();
+}
+
+function isStandaloneExecutable() {
+  return process.platform === 'win32' &&
+    path.basename(process.execPath).toLowerCase() !== 'node.exe';
+}
+
+function defaultConfigPath() {
+  if (isStandaloneExecutable() && process.env.LOCALAPPDATA) {
+    return path.join(
+      process.env.LOCALAPPDATA,
+      'PocketServerOps',
+      'computer-agent',
+      DEFAULT_CONFIG_NAME,
+    );
+  }
+  return path.join(path.dirname(runtimeModulePath()), DEFAULT_CONFIG_NAME);
+}
+
+async function fileExists(filePath) {
+  try {
+    await fsp.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePairingUrl(value) {
+  const url = new URL(String(value ?? '').trim());
+  if (url.protocol === 'https:') url.protocol = 'wss:';
+  if (url.protocol !== 'wss:') {
+    throw new AgentError('invalid_pairing', '配对信息中的中转地址必须使用 https:// 或 wss://');
+  }
+  return url.toString();
+}
+
+function normalizePairingValue(value, name) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new AgentError('invalid_pairing', `配对信息缺少 ${name}`);
+  }
+  return value.trim();
+}
+
+function parsePairingText(text) {
+  const source = text.trim().replace(new RegExp(`^${PAIRING_PREFIX}`), '');
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    throw new AgentError('invalid_pairing', '配对信息不是有效 JSON，请使用手机的“复制配置”按钮');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new AgentError('invalid_pairing', '配对信息格式不正确');
+  }
+  const relayUrl = normalizePairingUrl(parsed.relay_url);
+  const deviceId = normalizePairingValue(parsed.device_id, 'device_id');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+    throw new AgentError('invalid_pairing', '设备 ID 只能包含字母、数字、点、下划线、冒号和短横线');
+  }
+  const deviceToken = normalizePairingValue(parsed.device_token, 'device_token');
+  if (deviceToken.length < 16) {
+    throw new AgentError('invalid_pairing', '设备 Token 至少需要 16 个字符');
+  }
+  return {
+    relay_url: relayUrl,
+    device_id: deviceId,
+    device_token: deviceToken,
+    working_directory:
+      typeof parsed.working_directory === 'string' && parsed.working_directory.trim()
+        ? parsed.working_directory.trim()
+        : DEFAULT_WINDOWS_WORKING_DIRECTORY,
+  };
+}
+
+async function runSetupWizard(configPath) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new AgentError('setup_terminal', '首次配置请在 PowerShell 或命令提示符中运行 EXE');
+  }
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log('PocketServerOps Windows Agent 首次配置');
+    console.log('请在手机 App 的“电脑配对信息”中点击“复制配置”，然后粘贴到这里。');
+    const pasted = await prompt.question('配对配置 JSON（直接回车可逐项填写）: ');
+    let config;
+    if (pasted.trim()) {
+      config = parsePairingText(pasted);
+    } else {
+      config = parsePairingText(JSON.stringify({
+        relay_url: await prompt.question('中转地址（wss:// 或 https://）: '),
+        device_id: await prompt.question('Windows 设备 ID: '),
+        device_token: await prompt.question('Windows Agent Token: '),
+        working_directory: await prompt.question(
+          `默认工作目录（回车使用 ${DEFAULT_WINDOWS_WORKING_DIRECTORY}）: `,
+        ),
+      }));
+    }
+    await fsp.mkdir(path.dirname(configPath), { recursive: true });
+    await fsp.writeFile(
+      configPath,
+      `${JSON.stringify({ ...config, agent_version: AGENT_VERSION, protocol_version: PROTOCOL_VERSION }, null, 2)}\n`,
+      'utf8',
+    );
+    await secureConfigFile(configPath);
+    if (isStandaloneExecutable()) await installStartupTask();
+    console.log(`配置已保存: ${configPath}`);
+    console.log('Agent 将保持运行并主动连接中转服务器。');
+  } finally {
+    prompt.close();
+  }
+}
+
+async function secureConfigFile(configPath) {
+  if (process.platform !== 'win32' || !process.env.USERNAME) return;
+  const account = `${process.env.USERDOMAIN || '.'}\\${process.env.USERNAME}`;
+  const result = spawnSync(
+    'icacls.exe',
+    [configPath, '/inheritance:r', '/grant:r', `${account}:(F)`],
+    { windowsHide: true, encoding: 'utf8' },
+  );
+  if (result.status !== 0) {
+    log('warn', `无法收紧配置文件权限: ${(result.stderr || '').trim()}`);
+  }
+}
+
+async function installStartupTask() {
+  if (process.platform !== 'win32' || !isStandaloneExecutable()) return;
+  const command = `"${process.execPath.replaceAll('"', '\\"')}" --run`;
+  const result = spawnSync(
+    'schtasks.exe',
+    [
+      '/Create',
+      '/F',
+      '/SC',
+      'ONLOGON',
+      '/TN',
+      STARTUP_TASK_NAME,
+      '/TR',
+      command,
+      '/RL',
+      'LIMITED',
+    ],
+    { windowsHide: true, encoding: 'utf8' },
+  );
+  if (result.status !== 0) {
+    throw new AgentError(
+      'startup_task_failed',
+      `无法注册 Windows 登录启动任务: ${(result.stderr || result.stdout || '').trim()}`,
+    );
+  }
+}
+
+function uninstallStartupTask() {
+  if (process.platform !== 'win32') return;
+  spawnSync(
+    'schtasks.exe',
+    ['/Delete', '/TN', STARTUP_TASK_NAME, '/F'],
+    { windowsHide: true, encoding: 'utf8' },
+  );
+  console.log('已移除 Windows 登录启动任务');
 }
 
 function requiredString(value, name, allowEmpty = false) {
@@ -1228,7 +1411,15 @@ async function main() {
     console.log(AGENT_VERSION);
     return;
   }
-  const config = await loadConfig(path.resolve(args.config));
+  if (args.uninstall) {
+    uninstallStartupTask();
+    return;
+  }
+  const configPath = path.resolve(args.config);
+  if (args.setup || (!args.run && isStandaloneExecutable() && !(await fileExists(configPath)))) {
+    await runSetupWizard(configPath);
+  }
+  const config = await loadConfig(configPath);
   const agent = new ComputerAgent(config);
   const stop = () => {
     void agent.stop();
@@ -1238,7 +1429,10 @@ async function main() {
   await agent.start();
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  isStandaloneExecutable() ||
+  (process.argv[1] && path.resolve(process.argv[1]) === runtimeModulePath())
+) {
   main().catch((error) => {
     log('error', error.message ?? String(error), error);
     process.exitCode = 1;

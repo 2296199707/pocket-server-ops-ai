@@ -1676,6 +1676,94 @@ void main() {
     },
   );
 
+  test('computer pairing info excludes the relay API token', () async {
+    final database = MemoryAppDatabase();
+    final credentials = MemoryCredentialStore();
+    final controller = AppController(
+      database: database,
+      credentials: credentials,
+    );
+
+    await controller.load();
+    await controller.saveServer(
+      name: '办公电脑',
+      host: '',
+      port: 0,
+      username: '',
+      secret: '',
+      workingDirectory: r'C:\workspace',
+      targetType: serverTargetTypeWindows,
+      relayUrl: 'https://relay.example.com/computer-relay',
+      deviceId: 'computer-1',
+      relayApiToken: 'relay-api-secret',
+      deviceToken: 'device-secret-123456',
+    );
+
+    final pairing = await controller.computerPairingInfo(
+      controller.servers.single,
+    );
+
+    expect(
+      pairing['relay_url'],
+      'wss://relay.example.com/computer-relay/device/ws',
+    );
+    expect(pairing['device_id'], 'computer-1');
+    expect(pairing['device_token'], 'device-secret-123456');
+    expect(pairing['working_directory'], r'C:\workspace');
+    expect(pairing.containsKey('relay_api_token'), isFalse);
+    controller.dispose();
+  });
+
+  test(
+    'one-click relay setup uses the bound SSH server and stores its token',
+    () async {
+      final database = MemoryAppDatabase();
+      final credentials = MemoryCredentialStore();
+      final connector = _FakeConnector()..relayToken = 'relay-token-from-env';
+      await database.saveServer(
+        const ServerProfile(
+          id: 'relay-server',
+          name: '中转服务器',
+          host: 'relay.example.com',
+          port: 22,
+          username: 'root',
+          authType: 'password',
+          credentialRef: 'relay-server:ssh',
+          credentialPassphraseRef: null,
+          hostKey: null,
+          hostKeyFingerprint: null,
+          defaultWorkingDirectory: '/www',
+        ),
+      );
+      await credentials.write('relay-server:ssh', 'password');
+      final controller = AppController(
+        database: database,
+        credentials: credentials,
+        sshConnector: connector,
+      );
+      await controller.load();
+
+      final setup = await controller.setupComputerRelay(
+        server: controller.servers.single,
+        publicUrl: 'https://relay.example.com/',
+      );
+
+      expect(setup.relayUrl, 'https://relay.example.com/computer-relay');
+      expect(setup.apiToken, 'relay-token-from-env');
+      expect(controller.computerRelayServerId, 'relay-server');
+      expect(
+        controller.computerRelayUrl,
+        'https://relay.example.com/computer-relay',
+      );
+      expect(
+        await credentials.read('computer:relay-api'),
+        'relay-token-from-env',
+      );
+      expect(connector.commands.single, contains('computer-relay/install.sh'));
+      controller.dispose();
+    },
+  );
+
   test('changing authentication type requires a new credential', () async {
     final controller = AppController(
       database: MemoryAppDatabase(),
@@ -3372,6 +3460,7 @@ class _FakeConnector implements SshConnector {
   final writes = <({String path, Uint8List contents})>[];
   final fileOperations = <String>[];
   String? directoryProbeOutput;
+  String? relayToken;
 
   @override
   Future<SshConnection> connect(SshConnectionConfig config) async {
@@ -3381,6 +3470,7 @@ class _FakeConnector implements SshConnector {
       writes: writes,
       fileOperations: fileOperations,
       directoryProbeOutput: directoryProbeOutput,
+      relayToken: relayToken,
     );
   }
 }
@@ -3392,6 +3482,7 @@ class _FakeConnection implements SshConnection {
     required this.writes,
     required this.fileOperations,
     this.directoryProbeOutput,
+    this.relayToken,
   });
 
   final List<String> commands;
@@ -3399,6 +3490,7 @@ class _FakeConnection implements SshConnection {
   final List<({String path, Uint8List contents})> writes;
   final List<String> fileOperations;
   final String? directoryProbeOutput;
+  final String? relayToken;
   bool closed = false;
 
   @override
@@ -3435,6 +3527,14 @@ class _FakeConnection implements SshConnection {
     Duration timeout = const Duration(minutes: 2),
   }) async {
     commands.add(command);
+    if (relayToken != null &&
+        command.contains('POCKET_SERVER_OPS_RELAY_TOKEN')) {
+      return SshCommandResult(
+        stdout: 'POCKET_SERVER_OPS_RELAY_TOKEN=$relayToken\n',
+        stderr: '',
+        exitCode: 0,
+      );
+    }
     if (command.contains('mobile-agent-status directory') &&
         directoryProbeOutput != null) {
       return SshCommandResult(
