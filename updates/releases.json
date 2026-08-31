@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5-beta.3",
+      "title": "PocketServerOps AI v1.0.5-beta.3",
+      "notes": "新增 Windows 电脑中转能力：手机可通过中转服务器连接 Windows Agent，支持 PowerShell 命令、文件读写、后台进程和状态查询；加入设备认证、心跳、断线续接、请求去重及 PowerShell 安装脚本。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.3",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5-beta.3/pocket-server-ops-ai-v1.0.5-beta.3-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-31T07:22:17Z"
+    },
+    {
       "version": "1.0.5-beta.2",
       "title": "PocketServerOps AI v1.0.5-beta.2",
       "notes": "优化版本更新页面：测试版显示为安装测试版，不再误标为回退；真正较旧的正式版继续保留回退提示。",

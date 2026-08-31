@@ -38,11 +38,11 @@ Windows Agent ──主动 WSS/HTTPS──┘
 | G0 | 现有 App、旧 relay、Windows 运行方式和数据盘路径盘点 | 已完成 |
 | G1 | 增加目标类型和持久化字段，保持旧 SSH 数据可迁移 | 已完成 |
 | G2 | 实现轻量 relay 协议和一键部署材料 | 已完成 |
-| G3 | 实现 Windows Agent 安装包/脚本、配对和重连 | 已完成（Windows 真机未验证） |
+| G3 | 实现 Windows Agent 安装脚本、配对和重连 | 已完成（Windows 真机未验证） |
 | G4 | App 内置电脑连接客户端和 AI 工具路由 | 已完成 |
 | G5 | “服务器添加”增加电脑入口、测试连接和设备状态 | 已完成 |
 | G6 | 命令、文件、后台进程、状态关键路径验证 | 已完成（自动化及本地闭环） |
-| G7 | 数据盘构建、文档和 beta 交付检查 | 进行中 |
+| G7 | 数据盘构建、文档和 beta 交付检查 | 已完成（Windows 真机未验证） |
 
 ## 协议决定（2026-08-31）
 
@@ -145,6 +145,10 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - `flutter build apk --debug`：成功。APK 位于
   `/www/mobile-agent-build/app/outputs/flutter-apk/app-debug.apk`，大小
   `176833032` 字节；`build` 符号链接目标为 `/www/mobile-agent-build`。
+- `flutter build apk --release`：成功。APK 位于
+  `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.3-release.apk`，
+  大小 `80062635` 字节；`versionName=1.0.5-beta.3`、`versionCode=47`；SHA-256 为
+  `fd1141154182bf81fea77e192a02e5a533494e99b15e4a2ba31bbed0b53bd0aa`。
 
 上下文压缩后先读取本文件，不重复调查已确认的架构和旧项目边界。
 
@@ -154,3 +158,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：完成协议统一决定；删除 HTTP 长轮询设备通道设计，采用手机/设备双 WebSocket 通道，保留 HTTP 管理接口。
 - 2026-08-31：完成 G1-G6 实现；App 数据库升级到 18，加入 Windows 目标、relay 客户端、AI 工具路由、状态仪表盘和服务器添加入口；完成 Node.js 语法检查、Agent CLI 检查、relay 本地 WebSocket 闭环及 75 个 Flutter 关键测试。
 - 2026-08-31：修复协议收尾问题：WebSocket 帧上限统一为 16 MiB 以覆盖 8 MiB 文件写入；手机断线在调用期限内用原 request ID 续接；校验手机 URL 设备 ID 与 hello 一致；恢复 Windows 独立仪表盘入口。
+- 2026-08-31：版本更新为 `1.0.5-beta.3+47`，release APK 使用数据盘构建并通过 manifest 与 SHA-256 校验；GitHub Pre-release 已创建并上传 APK，更新清单已同步。
