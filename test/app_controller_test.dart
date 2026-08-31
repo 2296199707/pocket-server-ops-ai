@@ -1633,6 +1633,49 @@ void main() {
     },
   );
 
+  test(
+    'Windows server credentials are stored separately from the profile',
+    () async {
+      final database = MemoryAppDatabase();
+      final credentials = MemoryCredentialStore();
+      final controller = AppController(
+        database: database,
+        credentials: credentials,
+      );
+
+      await controller.load();
+      await controller.saveServer(
+        name: '办公电脑',
+        host: '',
+        port: 0,
+        username: '',
+        secret: '',
+        workingDirectory: r'C:\workspace',
+        targetType: serverTargetTypeWindows,
+        relayUrl: 'https://relay.example.com',
+        deviceId: 'computer-1',
+        relayApiToken: 'relay-api-secret',
+        deviceToken: 'device-secret-123456',
+      );
+
+      final profile = controller.servers.single;
+      expect(profile.isWindowsComputer, isTrue);
+      expect(profile.host, 'https://relay.example.com');
+      expect(profile.credentialRef, isNull);
+      expect(
+        await credentials.read(profile.relayTokenRef!),
+        'relay-api-secret',
+      );
+      expect(
+        await credentials.read(profile.deviceTokenRef!),
+        'device-secret-123456',
+      );
+      expect(profile.toMap().containsKey('relayApiToken'), isFalse);
+      expect(profile.toMap().containsKey('deviceToken'), isFalse);
+      controller.dispose();
+    },
+  );
+
   test('changing authentication type requires a new credential', () async {
     final controller = AppController(
       database: MemoryAppDatabase(),

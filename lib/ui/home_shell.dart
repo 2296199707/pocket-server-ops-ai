@@ -708,10 +708,16 @@ class _HomeShellState extends State<HomeShell> {
                   ),
                   for (final server in servers)
                     ListTile(
-                      leading: const Icon(Icons.dns_outlined),
+                      leading: Icon(
+                        server.isWindowsComputer
+                            ? Icons.computer_outlined
+                            : Icons.dns_outlined,
+                      ),
                       title: Text(server.name),
                       subtitle: Text(
-                        '${server.username}@${server.host}:${server.port}',
+                        server.isWindowsComputer
+                            ? '${server.relayUrl ?? server.host} · ${server.deviceId ?? '未配置设备 ID'}'
+                            : '${server.username}@${server.host}:${server.port}',
                       ),
                       onTap: () => Navigator.pop(context, server),
                     ),
@@ -1524,10 +1530,18 @@ class ServersPage extends StatelessWidget {
               itemBuilder: (context, index) {
                 final server = controller.servers[index];
                 return ListTile(
-                  leading: const CircleAvatar(child: Icon(Icons.dns_outlined)),
+                  leading: CircleAvatar(
+                    child: Icon(
+                      server.isWindowsComputer
+                          ? Icons.computer_outlined
+                          : Icons.dns_outlined,
+                    ),
+                  ),
                   title: Text(server.name),
                   subtitle: Text(
-                    '${server.username}@${server.host}:${server.port}',
+                    server.isWindowsComputer
+                        ? '${server.relayUrl ?? server.host} · ${server.deviceId ?? '未配置设备 ID'}'
+                        : '${server.username}@${server.host}:${server.port}',
                   ),
                   trailing: PopupMenuButton<String>(
                     tooltip: '服务器操作',
@@ -1547,13 +1561,18 @@ class ServersPage extends StatelessWidget {
                           _deleteServer(context, server);
                       }
                     },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(value: 'test', child: Text('测试连接')),
-                      PopupMenuItem(value: 'dashboard', child: Text('服务器仪表盘')),
-                      PopupMenuItem(value: 'files', child: Text('文件管理')),
-                      PopupMenuItem(value: 'terminal', child: Text('打开终端')),
-                      PopupMenuItem(value: 'edit', child: Text('编辑')),
-                      PopupMenuItem(value: 'delete', child: Text('删除')),
+                    itemBuilder: (context) => [
+                      const PopupMenuItem(value: 'test', child: Text('测试连接')),
+                      const PopupMenuItem(
+                        value: 'dashboard',
+                        child: Text('服务器仪表盘'),
+                      ),
+                      if (!server.isWindowsComputer) ...const [
+                        PopupMenuItem(value: 'files', child: Text('文件管理')),
+                        PopupMenuItem(value: 'terminal', child: Text('打开终端')),
+                      ],
+                      const PopupMenuItem(value: 'edit', child: Text('编辑')),
+                      const PopupMenuItem(value: 'delete', child: Text('删除')),
                     ],
                   ),
                 );
@@ -1569,6 +1588,19 @@ class ServersPage extends StatelessWidget {
 
   Future<void> _testServer(BuildContext context, ServerProfile server) async {
     try {
+      if (server.isWindowsComputer) {
+        final status = await controller.testComputer(server);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Windows Agent 已连接：${status['name'] ?? server.name}',
+              ),
+            ),
+          );
+        }
+        return;
+      }
       final key = await controller.testServer(
         server,
         onFirstHostKey: (value) => _confirmHostKey(context, value),
@@ -1593,6 +1625,12 @@ class ServersPage extends StatelessWidget {
     BuildContext context,
     ServerProfile server,
   ) async {
+    if (server.isWindowsComputer) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Windows 电脑请在对话中使用 PowerShell Agent 工具')),
+      );
+      return;
+    }
     try {
       await controller.setServerForFeature(
         feature: 'terminal',
@@ -1638,6 +1676,12 @@ class ServersPage extends StatelessWidget {
     BuildContext context,
     ServerProfile server,
   ) async {
+    if (server.isWindowsComputer) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Windows 电脑文件操作请在对话中使用文件工具')),
+      );
+      return;
+    }
     try {
       await controller.setServerForFeature(
         feature: 'files',

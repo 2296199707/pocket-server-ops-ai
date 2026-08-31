@@ -26,6 +26,17 @@ const DEFAULT_EXEC_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_EXEC_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+const AGENT_OPERATIONS = [
+  'exec',
+  'process.start',
+  'process.poll',
+  'process.write',
+  'process.stop',
+  'file.read',
+  'file.write',
+  'file.replace',
+  'status',
+];
 
 class AgentError extends Error {
   constructor(code, message, details) {
@@ -285,6 +296,15 @@ class ComputerAgent {
           this.authenticated = true;
           if (handshakeTimer) clearTimeout(handshakeTimer);
           this.startHeartbeat(socket);
+          this.sendFrameIfOpen(socket, {
+            type: 'capabilities',
+            device_id: this.deviceId,
+            capabilities: {
+              operations: AGENT_OPERATIONS,
+              platform: process.platform,
+              agent_version: this.agentVersion,
+            },
+          });
           log('info', `设备 ${this.deviceId} 已认证`);
         }).catch((error) => {
           log('warn', `处理 relay 帧失败: ${error.message}`);

@@ -108,16 +108,18 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
                 ),
             ],
           ),
-          IconButton(
-            tooltip: '终端',
-            onPressed: () => _openTerminal(context),
-            icon: const Icon(Icons.terminal_outlined),
-          ),
-          IconButton(
-            tooltip: '文件管理',
-            onPressed: () => _openFiles(context),
-            icon: const Icon(Icons.folder_outlined),
-          ),
+          if (!_server.isWindowsComputer)
+            IconButton(
+              tooltip: '终端',
+              onPressed: () => _openTerminal(context),
+              icon: const Icon(Icons.terminal_outlined),
+            ),
+          if (!_server.isWindowsComputer)
+            IconButton(
+              tooltip: '文件管理',
+              onPressed: () => _openFiles(context),
+              icon: const Icon(Icons.folder_outlined),
+            ),
           IconButton(
             tooltip: '刷新状态',
             onPressed: _loading ? null : _load,
@@ -158,11 +160,12 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
               const SizedBox(height: 12),
               _NetworkCard(dashboard: dashboard),
               const SizedBox(height: 12),
-              _StatusScriptPanel(
-                installed: dashboard.statusScriptInstalled,
-                installing: _installing,
-                onInstall: _install,
-              ),
+              if (!_server.isWindowsComputer)
+                _StatusScriptPanel(
+                  installed: dashboard.statusScriptInstalled,
+                  installing: _installing,
+                  onInstall: _install,
+                ),
             ] else if (_error == null)
               const Padding(
                 padding: EdgeInsets.only(top: 80),
@@ -245,6 +248,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   }
 
   void _openTerminal(BuildContext context) {
+    if (_server.isWindowsComputer) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => TerminalPage(
@@ -257,6 +261,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   }
 
   void _openFiles(BuildContext context) {
+    if (_server.isWindowsComputer) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => FileManagerPage(
@@ -306,7 +311,11 @@ class _ServerHeader extends StatelessWidget {
             children: [
               CircleAvatar(
                 backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                child: const Icon(Icons.dns_outlined),
+                child: Icon(
+                  server.isWindowsComputer
+                      ? Icons.computer_outlined
+                      : Icons.dns_outlined,
+                ),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -319,7 +328,9 @@ class _ServerHeader extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '${server.username}@${server.host}:${server.port}',
+                      server.isWindowsComputer
+                          ? '${server.relayUrl ?? server.host} · ${server.deviceId ?? '未配置设备 ID'}'
+                          : '${server.username}@${server.host}:${server.port}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall,

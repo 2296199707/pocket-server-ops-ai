@@ -41,6 +41,40 @@ void main() {
     expect(task.toMap().containsKey('relayId'), isFalse);
   });
 
+  test(
+    'Windows computer profile round-trips relay metadata without secrets',
+    () {
+      const server = ServerProfile(
+        id: 'computer-1',
+        name: '开发电脑',
+        host: 'https://relay.example.com',
+        port: 0,
+        username: 'windows-agent',
+        authType: 'relay',
+        credentialRef: null,
+        credentialPassphraseRef: null,
+        hostKey: null,
+        hostKeyFingerprint: null,
+        defaultWorkingDirectory: r'C:\work',
+        targetType: serverTargetTypeWindows,
+        relayUrl: 'https://relay.example.com',
+        deviceId: 'device-1',
+        relayTokenRef: 'server:computer-1:relay-api',
+        deviceTokenRef: 'server:computer-1:device-token',
+      );
+
+      final restored = ServerProfile.fromMap(server.toMap());
+
+      expect(restored.isWindowsComputer, isTrue);
+      expect(restored.relayUrl, server.relayUrl);
+      expect(restored.deviceId, server.deviceId);
+      expect(restored.relayTokenRef, server.relayTokenRef);
+      expect(restored.deviceTokenRef, server.deviceTokenRef);
+      expect(server.toMap().containsKey('relayApiToken'), isFalse);
+      expect(server.toMap().containsKey('deviceToken'), isFalse);
+    },
+  );
+
   test('work modes are explicit and legacy tasks are inferred', () {
     expect(
       resolveWorkMode(

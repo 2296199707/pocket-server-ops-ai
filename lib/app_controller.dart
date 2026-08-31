@@ -13,6 +13,7 @@ import 'agent/agent_tools.dart';
 import 'agent/ai_client_factory.dart';
 import 'agent/context_usage.dart';
 import 'agent/ai_protocol.dart';
+import 'agent/computer_tools.dart';
 import 'agent/auto_review.dart';
 import 'agent/mcp_client.dart';
 import 'agent/openai_compatible_client.dart';
@@ -31,6 +32,7 @@ import 'platform/app_update_installer.dart';
 import 'providers/provider_connection_tester.dart';
 import 'providers/image_generation_client.dart';
 import 'providers/provider_usage_client.dart';
+import 'relay/computer_relay_client.dart';
 import 'server_status_script.dart';
 import 'ssh/resumable_file_download.dart';
 import 'ssh/resumable_file_upload.dart';
@@ -137,6 +139,8 @@ class AppController extends ChangeNotifier {
   final Map<String, LocalFileAccessStore> _localAccess = {};
   final Map<String, RemoteAgentTools> _phoneTools = {};
   final Map<String, RemoteAgentToolsGroup> _phoneToolGroups = {};
+  final Map<String, ComputerAgentTools> _computerTools = {};
+  final Map<String, ComputerAgentToolsGroup> _computerToolGroups = {};
   final Map<String, McpClient> _mcpClients = {};
   final Map<String, List<SshDirectoryEntry>> _directoryCache = {};
   final Map<String, ServerDirectoryCacheRecord> _directoryCacheRecords = {};
@@ -2527,6 +2531,8 @@ class AppController extends ChangeNotifier {
     SshConnection? connection;
     RemoteAgentTools? remoteTools;
     RemoteAgentToolsGroup? remoteToolGroup;
+    ComputerAgentTools? computerTools;
+    ComputerAgentToolsGroup? computerToolGroup;
     final acquiredTaskConnectionKeys = <String>{};
     final establishedTaskConnectionKeys = <String>{};
     ProjectAgentTools? projectTools;
@@ -2756,7 +2762,79 @@ class AppController extends ChangeNotifier {
         if (useServerTools && boundServerIds.isEmpty) {
           throw StateError('服务器工作模式没有目标服务器');
         }
-        if (useServerTools && boundServerIds.length > 1) {
+        final boundServers = [
+          for (final id in boundServerIds)
+            _servers.firstWhere((value) => value.id == id),
+        ];
+        final hasWindowsServers = boundServers.any(
+          (server) => server.isWindowsComputer,
+        );
+        final hasSshServers = boundServers.any(
+          (server) => !server.isWindowsComputer,
+        );
+        if (useServerTools && hasWindowsServers && hasSshServers) {
+          throw StateError('当前对话暂不支持 SSH 服务器与 Windows 电脑混合绑定');
+        }
+        if (useServerTools && hasWindowsServers) {
+          if (boundServers.length > 1) {
+            var group = _computerToolGroups[task.id];
+            if (group != null && group.isClosed) {
+              _computerToolGroups.remove(task.id);
+              await group.close();
+              group = null;
+            }
+            group ??= ComputerAgentToolsGroup();
+            for (final server in boundServers) {
+              var runtime = group.runtimes[server.id];
+              if (runtime == null || runtime.isClosed) {
+                await runtime?.close();
+                runtime = ComputerAgentTools(
+                  relay: await _computerRelayFor(server),
+                  deviceId: server.deviceId!,
+                  workingDirectory:
+                      task.workingDirectory ?? server.defaultWorkingDirectory,
+                  cancellation: cancellation.whenCancelled,
+                );
+              } else {
+                runtime.updateCancellation(cancellation.whenCancelled);
+              }
+              group.setRuntime(server.id, runtime);
+            }
+            computerToolGroup = group;
+            _computerToolGroups[task.id] = group;
+            tools.addAll(
+              _serializeRemoteWrites(
+                group.tools,
+                _remoteWriteLeaseKey(task, 'windows-multi', workingDirectory),
+                cancellation: cancellation,
+              ),
+            );
+          } else {
+            final server = boundServers.single;
+            workingDirectory =
+                task.workingDirectory ?? server.defaultWorkingDirectory;
+            computerTools = _computerTools[task.id];
+            if (computerTools == null || computerTools.isClosed) {
+              await computerTools?.close();
+              computerTools = ComputerAgentTools(
+                relay: await _computerRelayFor(server),
+                deviceId: server.deviceId!,
+                workingDirectory: workingDirectory,
+                cancellation: cancellation.whenCancelled,
+              );
+              _computerTools[task.id] = computerTools;
+            } else {
+              computerTools.updateCancellation(cancellation.whenCancelled);
+            }
+            tools.addAll(
+              _serializeRemoteWrites(
+                computerTools.tools,
+                _remoteWriteLeaseKey(task, server.id, workingDirectory),
+                cancellation: cancellation,
+              ),
+            );
+          }
+        } else if (useServerTools && boundServerIds.length > 1) {
           // A task may have been kept alive by an older app version with a
           // single-server runtime. Drop that legacy cache before installing
           // the multi-server group.
@@ -3211,7 +3289,9 @@ class AppController extends ChangeNotifier {
       if (task.mode == 'agent') {
         final keepRemoteTools =
             (remoteToolGroup?.hasRunningProcesses ?? false) ||
-            (remoteTools?.hasRunningProcesses ?? false);
+            (remoteTools?.hasRunningProcesses ?? false) ||
+            (computerToolGroup?.hasRunningProcesses ?? false) ||
+            (computerTools?.hasRunningProcesses ?? false);
         if (cancellation.isCancelled) {
           for (final key in acquiredTaskConnectionKeys.difference(
             establishedTaskConnectionKeys,
@@ -4033,6 +4113,35 @@ class AppController extends ChangeNotifier {
       return connection.hostKey;
     } finally {
       await connection.close();
+    }
+  }
+
+  /// Registers the Windows device token (when needed) and checks that the
+  /// paired Agent is online. Tokens stay in the secure credential store.
+  Future<Map<String, Object?>> testComputer(ServerProfile profile) async {
+    if (previewMode) throw StateError('预览模式不会连接电脑');
+    if (!profile.isWindowsComputer) {
+      throw ArgumentError('目标不是 Windows 电脑');
+    }
+    final relay = await _computerRelayFor(profile);
+    try {
+      final deviceToken = profile.deviceTokenRef == null
+          ? null
+          : await _credentials.read(profile.deviceTokenRef!);
+      if (deviceToken != null && deviceToken.isNotEmpty) {
+        await relay.registerDevice(
+          deviceId: profile.deviceId!,
+          name: profile.name,
+          deviceToken: deviceToken,
+        );
+      }
+      final status = await relay.deviceStatus(profile.deviceId!);
+      if (status['online'] != true && status['connected'] != true) {
+        throw StateError('Windows Agent 未在线');
+      }
+      return status;
+    } finally {
+      await relay.close();
     }
   }
 
@@ -5272,6 +5381,28 @@ class AppController extends ChangeNotifier {
       );
       return dashboard;
     }
+    if (profile.isWindowsComputer) {
+      final relay = await _computerRelayFor(profile);
+      try {
+        final result = await relay.call(
+          deviceId: profile.deviceId!,
+          operation: 'status',
+        );
+        final dashboard = _parseComputerDashboard(result);
+        _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
+        unawaited(
+          _database
+              .writeSetting(
+                _dashboardCacheSettingKey(profile),
+                dashboard.toJson(),
+              )
+              .catchError((_) {}),
+        );
+        return dashboard;
+      } finally {
+        await relay.close();
+      }
+    }
     final dashboard = await _withServerConnection(profile, (connection) async {
       final result = await connection.run(statusProbeCommand);
       if (result.exitCode != 0) {
@@ -5316,35 +5447,92 @@ class AppController extends ChangeNotifier {
     String authType = 'password',
     String passphrase = '',
     bool clearPassphrase = false,
+    String targetType = serverTargetTypeSsh,
+    String? relayUrl,
+    String? deviceId,
+    String relayApiToken = '',
+    String deviceToken = '',
   }) async {
     final id = existing?.id ?? _newId('server');
-    if (authType != 'password' && authType != 'privateKey') {
+    if (targetType != serverTargetTypeSsh &&
+        targetType != serverTargetTypeWindows) {
+      throw ArgumentError('不支持的目标类型');
+    }
+    final isWindows = targetType == serverTargetTypeWindows;
+    final normalizedRelayUrl = relayUrl?.trim() ?? '';
+    final normalizedDeviceId = deviceId?.trim() ?? '';
+    if (!isWindows && authType != 'password' && authType != 'privateKey') {
       throw ArgumentError('不支持的服务器认证方式');
     }
-    final authTypeChanged = existing != null && existing.authType != authType;
-    final endpointChanged =
-        existing != null && (existing.host != host || existing.port != port);
+    if (isWindows) {
+      final relayUri = Uri.tryParse(normalizedRelayUrl);
+      if (relayUri == null ||
+          relayUri.host.isEmpty ||
+          (relayUri.scheme != 'http' && relayUri.scheme != 'https')) {
+        throw ArgumentError('请输入有效的中转服务器 http(s) 地址');
+      }
+      if (normalizedDeviceId.isEmpty) throw ArgumentError('设备 ID 不能为空');
+    }
+    final targetChanged = existing != null && existing.targetType != targetType;
+    final authTypeChanged =
+        existing != null &&
+        existing.authType != (isWindows ? 'relay' : authType);
+    final endpointChanged = isWindows
+        ? existing != null &&
+              (existing.relayUrl != normalizedRelayUrl ||
+                  existing.deviceId != normalizedDeviceId)
+        : existing != null && (existing.host != host || existing.port != port);
     final dashboardIdentityChanged =
-        existing != null && (endpointChanged || existing.username != username);
+        existing != null &&
+        (targetChanged ||
+            endpointChanged ||
+            (!isWindows && existing.username != username));
     final defaultWorkingDirectory = workingDirectory.isEmpty
         ? null
         : workingDirectory;
     final connectionSettingsChanged =
         existing != null &&
-        (endpointChanged ||
-            existing.username != username ||
+        (targetChanged ||
+            endpointChanged ||
+            (!isWindows && existing.username != username) ||
             authTypeChanged ||
-            secret.isNotEmpty ||
-            (authType == 'privateKey' &&
+            (!isWindows && secret.isNotEmpty) ||
+            (!isWindows &&
+                authType == 'privateKey' &&
                 (passphrase.isNotEmpty || clearPassphrase)) ||
-            (authType != 'privateKey' &&
+            (!isWindows &&
+                authType != 'privateKey' &&
                 existing.credentialPassphraseRef != null) ||
             existing.defaultWorkingDirectory != defaultWorkingDirectory);
-    final credentialRef = existing?.credentialRef ?? 'server:$id:ssh';
-    final passphraseRef = authType == 'privateKey'
+    final credentialRef = isWindows
+        ? null
+        : (existing?.credentialRef ?? 'server:$id:ssh');
+    final passphraseRef = !isWindows && authType == 'privateKey'
         ? (existing?.credentialPassphraseRef ?? 'server:$id:passphrase')
         : null;
-    if (secret.isEmpty && (existing == null || authTypeChanged)) {
+    final relayTokenRef = isWindows
+        ? (existing?.relayTokenRef ?? 'server:$id:relay-api')
+        : null;
+    final deviceTokenRef = isWindows
+        ? (existing?.deviceTokenRef ?? 'server:$id:device-token')
+        : null;
+    if (isWindows) {
+      final needsRelayToken =
+          existing == null ||
+          !existing.isWindowsComputer ||
+          existing.relayTokenRef == null;
+      final needsDeviceToken =
+          existing == null ||
+          !existing.isWindowsComputer ||
+          existing.deviceTokenRef == null;
+      if (needsRelayToken && relayApiToken.trim().isEmpty) {
+        throw ArgumentError('首次保存 Windows 电脑时必须填写中转 API Token');
+      }
+      if (needsDeviceToken && deviceToken.trim().isEmpty) {
+        throw ArgumentError('首次保存 Windows 电脑时必须填写设备 Token');
+      }
+    } else if (secret.isEmpty &&
+        (existing == null || authTypeChanged || targetChanged)) {
       throw ArgumentError('首次保存服务器时必须填写密码或私钥');
     }
     if (connectionSettingsChanged) {
@@ -5361,58 +5549,74 @@ class AppController extends ChangeNotifier {
             _releasePhoneTask(task.id),
       ]);
     }
-    if (secret.isNotEmpty) {
-      await _credentials.write(credentialRef, secret);
+    if (!isWindows && secret.isNotEmpty) {
+      await _credentials.write(credentialRef!, secret);
     }
-    await _database.saveServer(
-      ServerProfile(
-        id: id,
-        name: name,
-        host: host,
-        port: port,
-        username: username,
-        authType: authType,
-        credentialRef: credentialRef,
-        credentialPassphraseRef: passphraseRef,
-        hostKey: endpointChanged ? null : existing?.hostKey,
-        hostKeyFingerprint: endpointChanged
-            ? null
-            : existing?.hostKeyFingerprint,
-        defaultWorkingDirectory: defaultWorkingDirectory,
-      ),
+    if (isWindows && relayApiToken.trim().isNotEmpty) {
+      await _credentials.write(relayTokenRef!, relayApiToken.trim());
+    }
+    if (isWindows && deviceToken.trim().isNotEmpty) {
+      await _credentials.write(deviceTokenRef!, deviceToken.trim());
+    }
+    final profile = ServerProfile(
+      id: id,
+      name: name,
+      host: isWindows ? normalizedRelayUrl : host,
+      port: isWindows ? 0 : port,
+      username: isWindows ? 'windows-agent' : username,
+      authType: isWindows ? 'relay' : authType,
+      credentialRef: credentialRef,
+      credentialPassphraseRef: passphraseRef,
+      hostKey: isWindows || endpointChanged ? null : existing?.hostKey,
+      hostKeyFingerprint: isWindows || endpointChanged
+          ? null
+          : existing?.hostKeyFingerprint,
+      defaultWorkingDirectory: defaultWorkingDirectory,
+      targetType: targetType,
+      relayUrl: isWindows ? normalizedRelayUrl : null,
+      deviceId: isWindows ? normalizedDeviceId : null,
+      relayTokenRef: relayTokenRef,
+      deviceTokenRef: deviceTokenRef,
     );
-    if (authType == 'privateKey' && passphrase.isNotEmpty) {
+    await _database.saveServer(profile);
+    if (!isWindows && authType == 'privateKey' && passphrase.isNotEmpty) {
       await _credentials.write(passphraseRef!, passphrase);
-    } else if (authType == 'privateKey' &&
+    } else if (!isWindows &&
+        authType == 'privateKey' &&
         clearPassphrase &&
         existing?.credentialPassphraseRef != null) {
       await _credentials.delete(existing!.credentialPassphraseRef!);
-    } else if (authType != 'privateKey' &&
+    } else if (!isWindows &&
+        authType != 'privateKey' &&
         existing?.credentialPassphraseRef != null) {
       await _credentials.delete(existing!.credentialPassphraseRef!);
+    }
+    if (existing != null && !existing.isWindowsComputer && isWindows) {
+      if (existing.credentialRef != null) {
+        await _credentials.delete(existing.credentialRef!);
+      }
+      if (existing.credentialPassphraseRef != null) {
+        await _credentials.delete(existing.credentialPassphraseRef!);
+      }
+    } else if (existing != null && existing.isWindowsComputer && !isWindows) {
+      if (existing.relayTokenRef != null) {
+        await _credentials.delete(existing.relayTokenRef!);
+      }
+      if (existing.deviceTokenRef != null) {
+        await _credentials.delete(existing.deviceTokenRef!);
+      }
     }
     _servers = [
       for (final profile in _servers)
         if (profile.id != id) profile,
-      ServerProfile(
-        id: id,
-        name: name,
-        host: host,
-        port: port,
-        username: username,
-        authType: authType,
-        credentialRef: credentialRef,
-        credentialPassphraseRef: passphraseRef,
-        hostKey: endpointChanged ? null : existing?.hostKey,
-        hostKeyFingerprint: endpointChanged
-            ? null
-            : existing?.hostKeyFingerprint,
-        defaultWorkingDirectory: defaultWorkingDirectory,
-      ),
+      profile,
     ]..sort((left, right) => left.name.compareTo(right.name));
     final previousProfile = existing;
     final directoryIdentityChanged =
-        existing != null && (endpointChanged || existing.username != username);
+        existing != null &&
+        (targetChanged ||
+            endpointChanged ||
+            (!isWindows && existing.username != username));
     if (directoryIdentityChanged) {
       _invalidateServerDirectoryCacheById(id);
     }
@@ -5443,6 +5647,12 @@ class AppController extends ChangeNotifier {
     }
     if (profile.credentialPassphraseRef != null) {
       await _credentials.delete(profile.credentialPassphraseRef!);
+    }
+    if (profile.relayTokenRef != null) {
+      await _credentials.delete(profile.relayTokenRef!);
+    }
+    if (profile.deviceTokenRef != null) {
+      await _credentials.delete(profile.deviceTokenRef!);
     }
     _servers = [
       for (final item in _servers)
@@ -6109,6 +6319,16 @@ class AppController extends ChangeNotifier {
         'file.read, project.write, or local.write to '
         'copy a binary file.',
       );
+      if (serversForTask(task).any((server) => server.isWindowsComputer)) {
+        scopes.add(
+          'The selected remote target is a Windows computer reached through a '
+          'paired outbound Agent. Remote terminal commands use PowerShell, not '
+          'POSIX shell syntax. Use terminal.exec or the terminal process tools '
+          'for commands and file.read, file.write, or file.replace for UTF-8 '
+          'text files. Windows computer targets do not provide the SSH-only '
+          'server transfer tools in this first version.',
+        );
+      }
     }
     if (task.isSubagent) {
       final role = task.agentRole?.trim().isNotEmpty == true
@@ -7154,6 +7374,8 @@ class AppController extends ChangeNotifier {
   Future<void> _releasePhoneTask(String taskId) async {
     final tools = _phoneTools.remove(taskId);
     final toolGroup = _phoneToolGroups.remove(taskId);
+    final computerTools = _computerTools.remove(taskId);
+    final computerToolGroup = _computerToolGroups.remove(taskId);
     final connectionKeys = <String>{taskId};
     connectionKeys.addAll(toolGroup?.connectionKeys.values ?? const []);
     final task = taskForId(taskId);
@@ -7165,6 +7387,8 @@ class AppController extends ChangeNotifier {
     await Future.wait<void>([
       if (tools != null) _awaitCleanup(tools.close()),
       if (toolGroup != null) _awaitCleanup(toolGroup.close()),
+      if (computerTools != null) _awaitCleanup(computerTools.close()),
+      if (computerToolGroup != null) _awaitCleanup(computerToolGroup.close()),
     ], eagerError: false);
     await Future.wait<void>([
       for (final key in connectionKeys) _awaitCleanup(_sshPool.release(key)),
@@ -7172,7 +7396,12 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _closePhoneTasks() async {
-    final taskIds = <String>{..._phoneTools.keys, ..._phoneToolGroups.keys};
+    final taskIds = <String>{
+      ..._phoneTools.keys,
+      ..._phoneToolGroups.keys,
+      ..._computerTools.keys,
+      ..._computerToolGroups.keys,
+    };
     await Future.wait<void>([
       for (final taskId in taskIds) _releasePhoneTask(taskId),
     ], eagerError: false);
@@ -7320,11 +7549,33 @@ class AppController extends ChangeNotifier {
     return value;
   }
 
+  Future<ComputerRelayClient> _computerRelayFor(ServerProfile profile) async {
+    if (!profile.isWindowsComputer) {
+      throw ArgumentError('目标不是 Windows 电脑');
+    }
+    final relayUrl = profile.relayUrl?.trim();
+    final deviceId = profile.deviceId?.trim();
+    if (relayUrl == null || relayUrl.isEmpty) {
+      throw StateError('Windows 电脑未配置中转服务器地址');
+    }
+    if (deviceId == null || deviceId.isEmpty) {
+      throw StateError('Windows 电脑未配置设备 ID');
+    }
+    final relayToken = await _readCredential(
+      profile.relayTokenRef,
+      'Windows 电脑中转 API Token 不可用',
+    );
+    return ComputerRelayClient(baseUrl: relayUrl, apiToken: relayToken);
+  }
+
   Future<SshConnection> _connectServer(
     ServerProfile profile, {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
     SshUserInfoHandler? onUserInfoRequest,
   }) async {
+    if (profile.isWindowsComputer) {
+      throw StateError('Windows 电脑不使用 SSH，请在对话中使用 Windows Agent 工具');
+    }
     final current = _servers.firstWhere(
       (value) => value.id == profile.id,
       orElse: () => throw StateError('服务器配置已删除'),
@@ -7479,6 +7730,124 @@ class AppController extends ChangeNotifier {
       disks: _parseDisks(values['disk_details']),
       network: _parseNetwork(values['network']),
       processCount: int.tryParse(values['processes'] ?? ''),
+    );
+  }
+
+  static ServerDashboard _parseComputerDashboard(Map<String, Object?> value) {
+    String text(Object? item, [String fallback = 'unknown']) =>
+        item is String && item.trim().isNotEmpty ? item.trim() : fallback;
+    int? integer(Object? item) =>
+        item is num ? item.toInt() : int.tryParse('$item');
+    String sizeText(Object? item) {
+      if (item is String && item.trim().isNotEmpty) return item.trim();
+      if (item is! num || item < 0) return 'unknown';
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      var value = item.toDouble();
+      var unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+      }
+      final rendered = value >= 100 || value == value.roundToDouble()
+          ? value.toStringAsFixed(0)
+          : value.toStringAsFixed(1);
+      return '$rendered ${units[unit]}';
+    }
+
+    final memory = value['memory'] is Map
+        ? Map<String, Object?>.from(value['memory'] as Map)
+        : const <String, Object?>{};
+    final disks = <ServerDisk>[];
+    final rawDisks = value['disks'];
+    if (rawDisks is List) {
+      for (final raw in rawDisks) {
+        if (raw is! Map) continue;
+        final disk = Map<String, Object?>.from(raw);
+        disks.add(
+          ServerDisk(
+            mount: text(disk['mount'] ?? disk['drive'], 'unknown'),
+            total: sizeText(disk['total'] ?? disk['total_bytes']),
+            used: sizeText(disk['used'] ?? disk['used_bytes']),
+            available: sizeText(disk['available'] ?? disk['free_bytes']),
+            usedPercent: integer(
+              disk['used_percent'] ??
+                  disk['usedPercent'] ??
+                  disk['usage_percent'],
+            ),
+          ),
+        );
+      }
+    }
+    final cores = <ServerCpuCore>[];
+    final rawCpu = value['cpu'];
+    final cpu = rawCpu is Map
+        ? Map<String, Object?>.from(rawCpu)
+        : const <String, Object?>{};
+    final rawCores = value['cpu_cores'] ?? value['cpuCores'] ?? cpu['cores'];
+    if (rawCores is List) {
+      for (final raw in rawCores) {
+        if (raw is Map) {
+          final core = Map<String, Object?>.from(raw);
+          cores.add(
+            ServerCpuCore(
+              name: text(core['name'], 'cpu${cores.length}'),
+              usage: integer(core['usage'] ?? core['percent']) ?? 0,
+            ),
+          );
+        }
+      }
+    }
+    final rawNetwork = value['network'];
+    ServerNetwork? network;
+    if (rawNetwork is Map) {
+      final item = Map<String, Object?>.from(rawNetwork);
+      network = ServerNetwork(
+        interfaceName: text(item['interface'] ?? item['interface_name']),
+        receivedBytes:
+            integer(item['received_bytes'] ?? item['receivedBytes']) ?? 0,
+        transmittedBytes:
+            integer(item['transmitted_bytes'] ?? item['transmittedBytes']) ?? 0,
+      );
+    }
+    final cpuUsage = integer(
+      value['cpu_usage'] ??
+          value['cpuUsage'] ??
+          value['cpu_percent'] ??
+          cpu['usage_percent'],
+    );
+    final memoryPercent = integer(
+      memory['percent'] ?? memory['usage_percent'] ?? value['memory_percent'],
+    );
+    final memoryText =
+        memory.containsKey('used') ||
+            memory.containsKey('total') ||
+            memory.containsKey('used_bytes')
+        ? '${memoryPercent ?? 0}% (${sizeText(memory['used'] ?? memory['used_bytes'])} / ${sizeText(memory['total'] ?? memory['total_bytes'])})'
+        : text(value['memory_text']);
+    final primaryDisk = disks.isEmpty ? null : disks.first;
+    return ServerDashboard(
+      hostname: text(value['hostname']),
+      os: text(value['os'], 'Windows'),
+      kernel: text(value['version'] ?? value['kernel'] ?? value['os_release']),
+      uptime: text(value['uptime']),
+      load: text(value['load']),
+      cpu:
+          '${cores.isEmpty ? integer(value['cpu_count']) ?? (cpu['cores'] is List ? (cpu['cores'] as List).length : 0) : cores.length} cores',
+      cpuUsage: cpuUsage,
+      cpuCores: cores,
+      memory: memoryText,
+      disk: primaryDisk == null
+          ? text(value['disk'])
+          : '${primaryDisk.used} / ${primaryDisk.total} (${primaryDisk.usedPercent ?? 0}%)',
+      statusScriptInstalled: true,
+      disks: disks,
+      network: network,
+      processCount: integer(
+        value['process_count'] ??
+            (value['processes'] is Map
+                ? (value['processes'] as Map)['active']
+                : value['processes']),
+      ),
     );
   }
 

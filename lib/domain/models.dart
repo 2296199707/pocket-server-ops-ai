@@ -267,6 +267,9 @@ String resolveWorkMode({
   return 'local';
 }
 
+const serverTargetTypeSsh = 'ssh';
+const serverTargetTypeWindows = 'windows';
+
 class ServerProfile {
   final String id;
   final String name;
@@ -280,6 +283,14 @@ class ServerProfile {
   final String? hostKeyFingerprint;
   final String? defaultWorkingDirectory;
 
+  /// `ssh` keeps the original direct-server behavior. `windows` represents a
+  /// computer reached through the relay client and does not use SSH fields.
+  final String targetType;
+  final String? relayUrl;
+  final String? deviceId;
+  final String? relayTokenRef;
+  final String? deviceTokenRef;
+
   const ServerProfile({
     required this.id,
     required this.name,
@@ -292,7 +303,14 @@ class ServerProfile {
     required this.hostKey,
     required this.hostKeyFingerprint,
     required this.defaultWorkingDirectory,
+    this.targetType = serverTargetTypeSsh,
+    this.relayUrl,
+    this.deviceId,
+    this.relayTokenRef,
+    this.deviceTokenRef,
   });
+
+  bool get isWindowsComputer => targetType == serverTargetTypeWindows;
 
   factory ServerProfile.fromMap(Map<String, Object?> map) {
     return ServerProfile(
@@ -307,6 +325,11 @@ class ServerProfile {
       hostKey: map['hostKey'] as String?,
       hostKeyFingerprint: map['hostKeyFingerprint'] as String?,
       defaultWorkingDirectory: map['defaultWorkingDirectory'] as String?,
+      targetType: map['targetType'] as String? ?? serverTargetTypeSsh,
+      relayUrl: map['relayUrl'] as String?,
+      deviceId: map['deviceId'] as String?,
+      relayTokenRef: map['relayTokenRef'] as String?,
+      deviceTokenRef: map['deviceTokenRef'] as String?,
     );
   }
 
@@ -322,6 +345,11 @@ class ServerProfile {
     'hostKey': hostKey,
     'hostKeyFingerprint': hostKeyFingerprint,
     'defaultWorkingDirectory': defaultWorkingDirectory,
+    'targetType': targetType,
+    'relayUrl': relayUrl,
+    'deviceId': deviceId,
+    'relayTokenRef': relayTokenRef,
+    'deviceTokenRef': deviceTokenRef,
   };
 
   ServerProfile copyWith({
@@ -335,6 +363,11 @@ class ServerProfile {
     String? hostKey,
     String? hostKeyFingerprint,
     String? defaultWorkingDirectory,
+    String? targetType,
+    String? relayUrl,
+    String? deviceId,
+    String? relayTokenRef,
+    String? deviceTokenRef,
   }) {
     return ServerProfile(
       id: id,
@@ -350,6 +383,11 @@ class ServerProfile {
       hostKeyFingerprint: hostKeyFingerprint ?? this.hostKeyFingerprint,
       defaultWorkingDirectory:
           defaultWorkingDirectory ?? this.defaultWorkingDirectory,
+      targetType: targetType ?? this.targetType,
+      relayUrl: relayUrl ?? this.relayUrl,
+      deviceId: deviceId ?? this.deviceId,
+      relayTokenRef: relayTokenRef ?? this.relayTokenRef,
+      deviceTokenRef: deviceTokenRef ?? this.deviceTokenRef,
     );
   }
 }

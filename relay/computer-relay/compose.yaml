@@ -1,0 +1,19 @@
+services:
+  computer-relay:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 8787
+      RELAY_DATA_DIR: /data
+    ports:
+      - "${RELAY_BIND:-0.0.0.0}:${RELAY_PORT:-8787}:8787"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5

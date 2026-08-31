@@ -36,6 +36,11 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
   late final TextEditingController _secret;
   late final TextEditingController _passphrase;
   late final TextEditingController _directory;
+  late final TextEditingController _relayUrl;
+  late final TextEditingController _deviceId;
+  late final TextEditingController _relayApiToken;
+  late final TextEditingController _deviceToken;
+  String _targetType = serverTargetTypeSsh;
   String _authType = 'password';
   bool _clearPassphrase = false;
   bool _saving = false;
@@ -52,7 +57,14 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _secret = TextEditingController();
     _passphrase = TextEditingController();
     _directory = TextEditingController(text: profile?.defaultWorkingDirectory);
-    _authType = profile?.authType ?? 'password';
+    _relayUrl = TextEditingController(text: profile?.relayUrl);
+    _deviceId = TextEditingController(text: profile?.deviceId);
+    _relayApiToken = TextEditingController();
+    _deviceToken = TextEditingController();
+    _targetType = profile?.targetType ?? serverTargetTypeSsh;
+    _authType = profile?.isWindowsComputer == true
+        ? 'password'
+        : profile?.authType ?? 'password';
   }
 
   @override
@@ -64,6 +76,10 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _secret.dispose();
     _passphrase.dispose();
     _directory.dispose();
+    _relayUrl.dispose();
+    _deviceId.dispose();
+    _relayApiToken.dispose();
+    _deviceToken.dispose();
     super.dispose();
   }
 
@@ -85,81 +101,162 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
               decoration: const InputDecoration(labelText: '名称'),
               validator: _required,
             ),
-            TextFormField(
-              controller: _host,
-              decoration: const InputDecoration(labelText: '主机地址'),
-              validator: _required,
-            ),
-            TextFormField(
-              controller: _port,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'SSH 端口'),
-              validator: _portValidator,
-            ),
-            TextFormField(
-              controller: _username,
-              decoration: const InputDecoration(labelText: '用户名'),
-              validator: _required,
-            ),
             DropdownButtonFormField<String>(
-              initialValue: _authType,
-              decoration: const InputDecoration(labelText: '认证方式'),
+              initialValue: _targetType,
+              decoration: const InputDecoration(labelText: '目标类型'),
               items: const [
-                DropdownMenuItem(value: 'password', child: Text('密码')),
-                DropdownMenuItem(value: 'privateKey', child: Text('私钥 PEM')),
+                DropdownMenuItem(
+                  value: serverTargetTypeSsh,
+                  child: Text('SSH 服务器'),
+                ),
+                DropdownMenuItem(
+                  value: serverTargetTypeWindows,
+                  child: Text('Windows 电脑（中转）'),
+                ),
               ],
               onChanged: (value) {
-                if (value != null) {
-                  setState(() {
-                    if (value != _authType) {
-                      _secret.clear();
-                      if (value != 'privateKey') _passphrase.clear();
-                    }
-                    _authType = value;
-                    if (value != 'privateKey') _clearPassphrase = false;
-                  });
-                }
+                if (value == null) return;
+                setState(() {
+                  _targetType = value;
+                  if (value == serverTargetTypeWindows) {
+                    _secret.clear();
+                    _passphrase.clear();
+                    _clearPassphrase = false;
+                  }
+                });
               },
             ),
-            TextFormField(
-              controller: _secret,
-              obscureText: _authType == 'password',
-              maxLines: _authType == 'privateKey' ? 4 : 1,
-              decoration: InputDecoration(
-                labelText: _authType == 'password' ? 'SSH 密码' : '私钥 PEM',
-                hintText: widget.existing == null ? null : '留空则保留已有凭据',
-              ),
-              validator: (value) {
-                if (widget.existing == null && (value?.isEmpty ?? true)) {
-                  return '请输入密码或私钥';
-                }
-                return null;
-              },
-            ),
-            if (_authType == 'privateKey') ...[
+            if (_targetType == serverTargetTypeWindows) ...[
               TextFormField(
-                controller: _passphrase,
-                enabled: !_clearPassphrase,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: '私钥口令（可选）'),
-              ),
-              if (widget.existing?.credentialPassphraseRef != null)
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('清除已有私钥口令'),
-                  value: _clearPassphrase,
-                  onChanged: (value) =>
-                      setState(() => _clearPassphrase = value ?? false),
+                controller: _relayUrl,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: '中转服务器地址',
+                  hintText: 'https://relay.example.com:8787',
                 ),
+                validator: (value) => _targetType == serverTargetTypeWindows
+                    ? _required(value)
+                    : null,
+              ),
+              TextFormField(
+                controller: _deviceId,
+                decoration: const InputDecoration(labelText: 'Windows 设备 ID'),
+                validator: (value) => _targetType == serverTargetTypeWindows
+                    ? _required(value)
+                    : null,
+              ),
+              TextFormField(
+                controller: _relayApiToken,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: '中转 API Token',
+                  hintText: widget.existing == null ? null : '留空则保留已有 Token',
+                ),
+                validator: (value) {
+                  if (_targetType == serverTargetTypeWindows &&
+                      widget.existing == null &&
+                      (value?.trim().isEmpty ?? true)) {
+                    return '请输入中转 API Token';
+                  }
+                  return null;
+                },
+              ),
+              TextFormField(
+                controller: _deviceToken,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: 'Windows Agent Token',
+                  hintText: widget.existing == null ? null : '留空则保留已有 Token',
+                ),
+                validator: (value) {
+                  if (_targetType == serverTargetTypeWindows &&
+                      widget.existing == null &&
+                      (value?.trim().isEmpty ?? true)) {
+                    return '请输入 Windows Agent Token';
+                  }
+                  return null;
+                },
+              ),
+              Text(
+                'Windows 端 Agent 使用设备 Token 主动连接中转服务器；手机只保存 Token，不会交给 AI。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ] else ...[
+              TextFormField(
+                controller: _host,
+                decoration: const InputDecoration(labelText: '主机地址'),
+                validator: _required,
+              ),
+              TextFormField(
+                controller: _port,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'SSH 端口'),
+                validator: _portValidator,
+              ),
+              TextFormField(
+                controller: _username,
+                decoration: const InputDecoration(labelText: '用户名'),
+                validator: _required,
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: _authType,
+                decoration: const InputDecoration(labelText: '认证方式'),
+                items: const [
+                  DropdownMenuItem(value: 'password', child: Text('密码')),
+                  DropdownMenuItem(value: 'privateKey', child: Text('私钥 PEM')),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() {
+                      if (value != _authType) {
+                        _secret.clear();
+                        if (value != 'privateKey') _passphrase.clear();
+                      }
+                      _authType = value;
+                      if (value != 'privateKey') _clearPassphrase = false;
+                    });
+                  }
+                },
+              ),
+              TextFormField(
+                controller: _secret,
+                obscureText: _authType == 'password',
+                maxLines: _authType == 'privateKey' ? 4 : 1,
+                decoration: InputDecoration(
+                  labelText: _authType == 'password' ? 'SSH 密码' : '私钥 PEM',
+                  hintText: widget.existing == null ? null : '留空则保留已有凭据',
+                ),
+                validator: (value) {
+                  if (widget.existing == null && (value?.isEmpty ?? true)) {
+                    return '请输入密码或私钥';
+                  }
+                  return null;
+                },
+              ),
+              if (_authType == 'privateKey') ...[
+                TextFormField(
+                  controller: _passphrase,
+                  enabled: !_clearPassphrase,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: '私钥口令（可选）'),
+                ),
+                if (widget.existing?.credentialPassphraseRef != null)
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('清除已有私钥口令'),
+                    value: _clearPassphrase,
+                    onChanged: (value) =>
+                        setState(() => _clearPassphrase = value ?? false),
+                  ),
+              ],
+              Text(
+                '密码和私钥只保存在手机安全存储，不会发送给 AI。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ],
             TextFormField(
               controller: _directory,
               decoration: const InputDecoration(labelText: '默认工作目录'),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '密码和私钥只保存在手机安全存储，不会发送给 AI。',
-              style: Theme.of(context).textTheme.bodySmall,
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
@@ -203,6 +300,11 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
         authType: _authType,
         passphrase: _passphrase.text,
         clearPassphrase: _clearPassphrase,
+        targetType: _targetType,
+        relayUrl: _relayUrl.text,
+        deviceId: _deviceId.text,
+        relayApiToken: _relayApiToken.text,
+        deviceToken: _deviceToken.text,
       );
       if (mounted) Navigator.pop(context);
     } catch (error) {

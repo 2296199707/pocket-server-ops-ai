@@ -109,7 +109,7 @@ class AppDatabase {
     final databasesPath = await getDatabasesPath();
     return openDatabase(
       path.join(databasesPath, 'mobile_agent_v1.db'),
-      version: 17,
+      version: 18,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE servers (
@@ -123,7 +123,12 @@ class AppDatabase {
             credentialPassphraseRef TEXT,
             hostKey TEXT,
             hostKeyFingerprint TEXT,
-            defaultWorkingDirectory TEXT
+            defaultWorkingDirectory TEXT,
+            targetType TEXT NOT NULL DEFAULT 'ssh',
+            relayUrl TEXT,
+            deviceId TEXT,
+            relayTokenRef TEXT,
+            deviceTokenRef TEXT
           )
         ''');
         await db.execute('''
@@ -365,6 +370,15 @@ class AppDatabase {
           await db.execute(
             "ALTER TABLE tasks ADD COLUMN pendingInputs TEXT NOT NULL DEFAULT '[]'",
           );
+        }
+        if (oldVersion < 18) {
+          await db.execute(
+            "ALTER TABLE servers ADD COLUMN targetType TEXT NOT NULL DEFAULT 'ssh'",
+          );
+          await db.execute('ALTER TABLE servers ADD COLUMN relayUrl TEXT');
+          await db.execute('ALTER TABLE servers ADD COLUMN deviceId TEXT');
+          await db.execute('ALTER TABLE servers ADD COLUMN relayTokenRef TEXT');
+          await db.execute('ALTER TABLE servers ADD COLUMN deviceTokenRef TEXT');
         }
       },
     );
