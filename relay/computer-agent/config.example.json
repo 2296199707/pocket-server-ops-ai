@@ -1,0 +1,8 @@
+{
+  "relay_url": "wss://relay.example.com",
+  "device_id": "windows-device-001",
+  "device_token": "replace-with-device-token",
+  "agent_version": "1.0.0-beta.1",
+  "protocol_version": "1",
+  "working_directory": "C:\\Users\\Public\\PocketServerOps"
+}
