@@ -34,10 +34,15 @@ await writeFile(
 run(process.execPath, ['--experimental-sea-config', seaConfigPath]);
 await copyFile(process.execPath, outputPath);
 
-const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-run(npx, [
-  '--no-install',
+const postjectCli = path.join(
+  agentDir,
+  'node_modules',
   'postject',
+  'dist',
+  'cli.js',
+);
+run(process.execPath, [
+  postjectCli,
   outputPath,
   'NODE_SEA_BLOB',
   blobPath,

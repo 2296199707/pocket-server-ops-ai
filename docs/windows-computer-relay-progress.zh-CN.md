@@ -218,3 +218,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：简化 Windows 配对流程；手机自动生成设备 ID/Agent Token，提供不含中转 API Token 的电脑配对 JSON；Windows Agent 增加首次向导、登录启动任务和 Node 22 SEA 单文件构建脚本，保留旧 PowerShell 安装方式。
 - 2026-08-31：补齐手机端中转服务器设置；服务器页面可选择已绑定 SSH 服务器一键安装/更新 relay 并自动读取 Token，复用已有 `/opt` 或 `/www` 部署目录，Windows 配置可直接使用已保存中转配置。
 - 2026-08-31：中转安装增加安装前确认；确认框显示唯一目标服务器、公网地址并提醒供应商限制，取消后不建立安装 SSH 操作。版本更新为 `1.0.5-beta.4+48`，release APK 使用数据盘构建并核对 manifest；产物位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.4-release.apk`，大小 `80226547` 字节，SHA-256 为 `1c33408bb4439b7613bc4ae142d134bed83efd88c9795167264ae86ae32745ef`。
+- 2026-08-31：修复 Windows Agent CI 在 SEA 注入阶段直接执行 `npx.cmd` 导致的 `spawnSync EINVAL`；构建脚本现在直接调用已安装的 `postject` JavaScript 入口，避免 Windows shell shim 问题。
