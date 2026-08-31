@@ -159,3 +159,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：完成 G1-G6 实现；App 数据库升级到 18，加入 Windows 目标、relay 客户端、AI 工具路由、状态仪表盘和服务器添加入口；完成 Node.js 语法检查、Agent CLI 检查、relay 本地 WebSocket 闭环及 75 个 Flutter 关键测试。
 - 2026-08-31：修复协议收尾问题：WebSocket 帧上限统一为 16 MiB 以覆盖 8 MiB 文件写入；手机断线在调用期限内用原 request ID 续接；校验手机 URL 设备 ID 与 hello 一致；恢复 Windows 独立仪表盘入口。
 - 2026-08-31：版本更新为 `1.0.5-beta.3+47`，release APK 使用数据盘构建并通过 manifest 与 SHA-256 校验；GitHub Pre-release 已创建并上传 APK，更新清单已同步。
+- 2026-08-31：补齐 relay 一键安装入口；部署脚本复制 `package-lock.json`，默认仅监听 `127.0.0.1:8787`，使用独立 Compose 项目且不执行 `--remove-orphans`，不会主动修改现有网站或其他 Compose 项目。真实服务器部署尚未在本轮执行。
