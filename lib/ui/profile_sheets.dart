@@ -111,7 +111,9 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
   String? _selectedServerId;
   String _lastSuggestedUrl = '';
   bool _working = false;
+  String _workingLabel = '';
   String? _error;
+  ComputerRelayPackageTransfer? _packageTransfer;
 
   List<ServerProfile> get _relayServers => widget.controller.servers
       .where((server) => !server.isWindowsComputer)
@@ -207,6 +209,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
                       final suggested = _suggestedComputerRelayUrl(server);
                       setState(() {
                         _selectedServerId = value;
+                        _packageTransfer = null;
                         if (_publicUrl.text.trim().isEmpty ||
                             _publicUrl.text.trim() == _lastSuggestedUrl) {
                           _publicUrl.text = suggested;
@@ -223,12 +226,62 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
                 hintText: 'https://relay.example.com/computer-relay',
                 helperText: '自动按服务器地址填入建议值；必须与现有 HTTPS/WSS 反向代理一致。',
               ),
+              onChanged: (_) {
+                if (_packageTransfer != null) {
+                  setState(() => _packageTransfer = null);
+                }
+              },
             ),
             const SizedBox(height: 12),
             Text(
-              '安装使用独立目录和 Compose 项目，不会停止其他 Compose 项目，也不会自动修改现有网站配置。',
+              '手机只上传离线安装包，不直接执行安装。安装包使用独立目录和 Compose 项目，不会自动修改现有网站配置。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (_packageTransfer != null) ...[
+              const SizedBox(height: 16),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '安装包已上传',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(_packageTransfer!.remotePath),
+                      ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        childrenPadding: EdgeInsets.zero,
+                        title: const Text('查看安装提示词'),
+                        children: [
+                          SelectableText(_packageTransfer!.prompt),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: _working ? null : _copyInstallPrompt,
+                              icon: const Icon(Icons.copy_outlined),
+                              label: const Text('复制提示词'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _working ? null : _readInstalledSetup,
+                icon: const Icon(Icons.sync_outlined),
+                label: const Text('我已让 AI 安装，读取配置'),
+              ),
+            ],
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(
@@ -238,14 +291,20 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
             ],
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: _working ? null : _install,
+              onPressed: _working ? null : _uploadPackage,
               icon: _working
                   ? const SizedBox.square(
                       dimension: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.install_desktop_outlined),
-              label: Text(_working ? '正在安装并读取配置…' : '安装到已选服务器并保存'),
+              label: Text(
+                _working
+                    ? _workingLabel
+                    : _packageTransfer == null
+                    ? '上传安装包并复制提示词'
+                    : '重新上传安装包并复制提示词',
+              ),
             ),
           ],
         ],
@@ -272,7 +331,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
     }
   }
 
-  Future<void> _install() async {
+  Future<void> _uploadPackage() async {
     final server = _selectedServer;
     if (server == null) {
       setState(() => _error = '请选择已绑定的 SSH 服务器');
@@ -282,20 +341,68 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
       setState(() => _error = '请输入公网中转地址');
       return;
     }
-    final confirmed = await _confirmRelayInstall(
+    final confirmed = await _confirmRelayPackageUpload(
       context,
       server: server,
       publicUrl: _publicUrl.text.trim(),
+      remotePath: '/tmp/pocket-server-ops-computer-relay.tar.gz',
     );
     if (!confirmed || !mounted) return;
     setState(() {
       _working = true;
+      _workingLabel = '正在上传安装包…';
       _error = null;
     });
     try {
-      final setup = await widget.controller.setupComputerRelay(
+      final transfer = await widget.controller.uploadComputerRelayPackage(
         server: server,
         publicUrl: _publicUrl.text,
+        onFirstHostKey: (key) => _confirmRelayHostKey(context, key),
+      );
+      if (!mounted) return;
+      setState(() {
+        _packageTransfer = transfer;
+        _working = false;
+        _workingLabel = '';
+      });
+      await _copyInstallPrompt(showMessage: true);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _working = false;
+          _workingLabel = '';
+          _error = '$error';
+        });
+      }
+    }
+  }
+
+  Future<void> _copyInstallPrompt({bool showMessage = false}) async {
+    final transfer = _packageTransfer;
+    if (transfer == null) return;
+    await Clipboard.setData(ClipboardData(text: transfer.prompt));
+    if (showMessage && mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('安装包已上传，安装提示词已复制')));
+    }
+  }
+
+  Future<void> _readInstalledSetup() async {
+    final server = _selectedServer;
+    final transfer = _packageTransfer;
+    if (server == null || transfer == null || transfer.serverId != server.id) {
+      setState(() => _error = '请先上传当前服务器的安装包');
+      return;
+    }
+    setState(() {
+      _working = true;
+      _workingLabel = '正在读取中转配置…';
+      _error = null;
+    });
+    try {
+      final setup = await widget.controller.readComputerRelaySetup(
+        server: server,
+        publicUrl: transfer.relayUrl,
         onFirstHostKey: (key) => _confirmRelayHostKey(context, key),
       );
       if (mounted) Navigator.pop(context, setup);
@@ -303,6 +410,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
       if (mounted) {
         setState(() {
           _working = false;
+          _workingLabel = '';
           _error = '$error';
         });
       }
@@ -347,21 +455,22 @@ Future<bool> _confirmRelayHostKey(BuildContext context, SshHostKey key) async {
       false;
 }
 
-Future<bool> _confirmRelayInstall(
+Future<bool> _confirmRelayPackageUpload(
   BuildContext context, {
   required ServerProfile server,
   required String publicUrl,
+  required String remotePath,
 }) async {
   return await showDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
-          title: const Text('确认安装中转软件'),
+          title: const Text('确认上传中转安装包'),
           content: SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('即将通过 SSH 在以下服务器安装或更新中转软件：'),
+                const Text('即将通过 SSH 向以下服务器上传离线中转安装包：'),
                 const SizedBox(height: 12),
                 Text(
                   server.name,
@@ -377,8 +486,10 @@ Future<bool> _confirmRelayInstall(
                 SelectableText(publicUrl),
                 const SizedBox(height: 16),
                 const Text(
-                  '本次只操作这一台已选服务器，不会给其他服务器安装。脚本使用独立目录，不会自动修改现有 Caddy/Nginx 或网站配置。',
+                  '安装包只会写入当前服务器的临时目录。上传后由你指定的 AI 执行安装，本次不会自动安装，也不会自动修改 Caddy/Nginx 或网站配置。',
                 ),
+                const SizedBox(height: 8),
+                SelectableText('上传路径：$remotePath'),
                 const SizedBox(height: 8),
                 Text(
                   '请确认该服务器供应商允许运行中转服务。部分供应商可能限制此类服务。',
@@ -397,7 +508,7 @@ Future<bool> _confirmRelayInstall(
             ),
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('确认安装'),
+              child: const Text('确认上传'),
             ),
           ],
         ),

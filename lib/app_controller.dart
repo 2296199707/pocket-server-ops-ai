@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path_util;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
@@ -69,6 +70,22 @@ class ComputerRelaySetup {
   final String apiToken;
 }
 
+class ComputerRelayPackageTransfer {
+  const ComputerRelayPackageTransfer({
+    required this.serverId,
+    required this.serverName,
+    required this.relayUrl,
+    required this.remotePath,
+    required this.prompt,
+  });
+
+  final String serverId;
+  final String serverName;
+  final String relayUrl;
+  final String remotePath;
+  final String prompt;
+}
+
 class _ServerDirectoryProbe {
   const _ServerDirectoryProbe({
     required this.fingerprint,
@@ -120,6 +137,7 @@ class AppController extends ChangeNotifier {
     SshConnector? sshConnector,
     AndroidTaskService? taskService,
     AttachmentStore? attachmentStore,
+    AssetBundle? relayPackageBundle,
     this.previewMode = false,
   }) : _database = database ?? AppDatabase(),
        // Keep the public parameter name; a private named initializing formal
@@ -130,7 +148,8 @@ class AppController extends ChangeNotifier {
        _providerUsageClient = providerUsageClient ?? ProviderUsageClient(),
        _sshConnector = sshConnector ?? DartSshConnector(),
        _taskService = taskService ?? const AndroidTaskService(),
-       _attachmentStore = attachmentStore ?? AttachmentStore();
+       _attachmentStore = attachmentStore ?? AttachmentStore(),
+       _relayPackageBundle = relayPackageBundle ?? rootBundle;
 
   final AppDatabase _database;
   final CredentialStore _credentials;
@@ -140,6 +159,7 @@ class AppController extends ChangeNotifier {
   final AndroidTaskService _taskService;
   final AppUpdateInstaller _updateInstaller = const AppUpdateInstaller();
   final AttachmentStore _attachmentStore;
+  final AssetBundle _relayPackageBundle;
   final bool previewMode;
   final ProjectFileStore _projectFiles = const ProjectFileStore();
   final RemoteProjectInstructions _remoteInstructions =
@@ -4202,14 +4222,56 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Installs or updates the relay on an already configured SSH server and
-  /// stores the generated API token in the phone credential store.
-  Future<ComputerRelaySetup> setupComputerRelay({
+  /// Uploads the offline relay package to one selected SSH server. The phone
+  /// does not execute the installer; the user can give the returned prompt to
+  /// an AI connected to that server.
+  Future<ComputerRelayPackageTransfer> uploadComputerRelayPackage({
+    required ServerProfile server,
+    required String publicUrl,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+    FileUploadProgress? onProgress,
+  }) async {
+    if (previewMode) throw StateError('预览模式不会部署中转服务器');
+    if (server.isWindowsComputer) {
+      throw ArgumentError('中转服务器必须是 SSH 服务器');
+    }
+    final normalizedUrl = _normalizeComputerRelayUrl(publicUrl);
+    const remotePath = _computerRelayPackageRemotePath;
+    final package = await _materializeComputerRelayPackage();
+    try {
+      await uploadFileToServer(
+        server,
+        package,
+        remotePath,
+        onFirstHostKey: onFirstHostKey,
+        onProgress: onProgress,
+      );
+    } finally {
+      try {
+        await package.delete();
+      } catch (_) {
+        // A temporary package is safe to leave for the OS cleanup job.
+      }
+    }
+    return ComputerRelayPackageTransfer(
+      serverId: server.id,
+      serverName: server.name,
+      relayUrl: normalizedUrl,
+      remotePath: remotePath,
+      prompt: _computerRelayInstallPrompt(
+        publicUrl: normalizedUrl,
+        remotePath: remotePath,
+      ),
+    );
+  }
+
+  /// Reads the token after the user or AI has completed the uploaded install.
+  Future<ComputerRelaySetup> readComputerRelaySetup({
     required ServerProfile server,
     required String publicUrl,
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
   }) async {
-    if (previewMode) throw StateError('预览模式不会部署中转服务器');
+    if (previewMode) throw StateError('预览模式不会读取真实中转配置');
     if (server.isWindowsComputer) {
       throw ArgumentError('中转服务器必须是 SSH 服务器');
     }
@@ -4217,8 +4279,8 @@ class AppController extends ChangeNotifier {
     final result = await _withServerConnection(
       server,
       (connection) => connection.run(
-        _computerRelaySetupCommand,
-        timeout: const Duration(minutes: 8),
+        _computerRelayReadSetupCommand,
+        timeout: const Duration(seconds: 30),
       ),
       onFirstHostKey: onFirstHostKey,
     );
@@ -4226,11 +4288,11 @@ class AppController extends ChangeNotifier {
       final detail = result.stderr.trim().isNotEmpty
           ? result.stderr.trim()
           : result.stdout.trim();
-      throw StateError(detail.isEmpty ? '中转服务器安装失败' : '中转服务器安装失败：$detail');
+      throw StateError(detail.isEmpty ? '读取中转配置失败' : '读取中转配置失败：$detail');
     }
     final token = _relayTokenFromSetupOutput(result.stdout);
     if (token == null) {
-      throw StateError('中转服务已执行，但没有读取到 API Token');
+      throw StateError('中转服务已安装，但没有读取到 API Token');
     }
     await _credentials.write(_computerRelayTokenRef, token);
     await Future.wait([
@@ -4246,6 +4308,21 @@ class AppController extends ChangeNotifier {
       relayUrl: normalizedUrl,
       apiToken: token,
     );
+  }
+
+  Future<File> _materializeComputerRelayPackage() async {
+    final bytes = await _relayPackageBundle.load(_computerRelayPackageAsset);
+    final file = File(
+      path_util.join(
+        Directory.systemTemp.path,
+        'pocket-server-ops-computer-relay-${_newId('package')}.tar.gz',
+      ),
+    );
+    await file.writeAsBytes(
+      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+      flush: true,
+    );
+    return file;
   }
 
   /// Reads the saved relay setup for use by a new Windows target. The token is
@@ -8162,10 +8239,12 @@ const _lastConversationTaskSetting = 'last_conversation_task_id';
 const _computerRelayServerSetting = 'computer_relay_server_id';
 const _computerRelayUrlSetting = 'computer_relay_url';
 const _computerRelayTokenRef = 'computer:relay-api';
+const _computerRelayPackageAsset = 'assets/relay/computer-relay-package.tar.gz';
+const _computerRelayPackageRemotePath =
+    '/tmp/pocket-server-ops-computer-relay.tar.gz';
 
-const _computerRelaySetupCommand = r'''
+const _computerRelayReadSetupCommand = r'''
 set -eu
-install_dir=/www/pocket-server-ops-computer-relay
 has_file() {
   if [ "$(id -u)" -eq 0 ]; then
     test -f "$1"
@@ -8175,22 +8254,7 @@ has_file() {
 }
 for candidate in /opt/pocket-server-ops-computer-relay /www/pocket-server-ops-computer-relay; do
   if has_file "$candidate/.env"; then
-    install_dir="$candidate"
-    break
-  fi
-done
-tmp_file="$(mktemp)"
-trap 'rm -f "$tmp_file"' EXIT
-curl -fsSL --retry 3 --retry-delay 1 \
-  https://raw.githubusercontent.com/2296199707/pocket-server-ops-ai/beta/relay/computer-relay/install.sh \
-  -o "$tmp_file"
-if [ "$(id -u)" -eq 0 ]; then
-  RELAY_INSTALL_DIR="$install_dir" bash "$tmp_file"
-else
-  sudo -n env RELAY_INSTALL_DIR="$install_dir" bash "$tmp_file"
-fi
-for env_file in "$install_dir/.env" /opt/pocket-server-ops-computer-relay/.env /www/pocket-server-ops-computer-relay/.env; do
-  if has_file "$env_file"; then
+    env_file="$candidate/.env"
     if [ "$(id -u)" -eq 0 ]; then
       token="$(sed -n 's/^RELAY_API_TOKEN=//p' "$env_file" | head -n 1 | tr -d '\r')"
     else
@@ -8202,9 +8266,35 @@ for env_file in "$install_dir/.env" /opt/pocket-server-ops-computer-relay/.env /
     fi
   fi
 done
-printf '%s\n' 'RELAY_API_TOKEN was not found after installation' >&2
+printf '%s\n' 'RELAY_API_TOKEN was not found in the relay installation' >&2
 exit 1
 ''';
+
+String _computerRelayInstallPrompt({
+  required String publicUrl,
+  required String remotePath,
+}) =>
+    '''请在当前 SSH 服务器上完成 PocketServerOps Computer Relay 的安装。
+
+手机已经把离线安装包上传到：$remotePath
+用户填写的公网中转地址是：$publicUrl
+
+请严格按以下要求操作：
+1. 只操作当前这台服务器，不连接、不修改其他服务器。
+2. 先检查安装包和当前 Docker 环境，不要删除其他项目或执行 docker compose --remove-orphans。
+3. 将安装包解压到 /tmp/pocket-server-ops-computer-relay，然后执行：
+   mkdir -p /tmp/pocket-server-ops-computer-relay
+   tar -xzf $remotePath -C /tmp/pocket-server-ops-computer-relay
+   if [ "\$(id -u)" -eq 0 ]; then
+     RELAY_INSTALL_DIR=/www/pocket-server-ops-computer-relay bash /tmp/pocket-server-ops-computer-relay/deploy.sh
+   else
+     sudo -n env RELAY_INSTALL_DIR=/www/pocket-server-ops-computer-relay bash /tmp/pocket-server-ops-computer-relay/deploy.sh
+   fi
+4. 检查 relay 容器状态和 http://127.0.0.1:8787/v1/health 是否正常。
+5. 不要修改 Caddy、Nginx 或现有网站配置；反向代理需要用户单独确认后再处理。
+6. 不要输出 RELAY_API_TOKEN、密码、私钥或 .env 内容，只返回安装是否成功、容器状态和失败原因。
+
+安装完成后，请保留 /www/pocket-server-ops-computer-relay/.env，手机会通过 SSH 单独读取 Token。''';
 
 String _normalizeComputerRelayUrl(String value) {
   final trimmed = value.trim();

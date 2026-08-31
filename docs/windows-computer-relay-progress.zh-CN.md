@@ -44,7 +44,7 @@ Windows Agent ──主动 WSS/HTTPS──┘
 | G6 | 命令、文件、后台进程、状态关键路径验证 | 已完成（自动化及本地闭环） |
 | G7 | 数据盘构建、文档和 beta 交付检查 | 已完成（Windows 真机未验证） |
 | G8 | 手机生成配对资料、Windows 独立 EXE 首次配置和登录启动 | 已完成（Windows 构建与真机未验证） |
-| G9 | 手机选择已绑定 SSH 服务器一键部署中转并保存配置 | 已完成（真实 Windows 端未验证） |
+| G9 | 手机选择已绑定 SSH 服务器上传离线包、复制 AI 提示词并保存配置 | 已完成（真实 Windows 端未验证） |
 
 ## 简化配对决定（2026-08-31）
 
@@ -75,28 +75,39 @@ GitHub Actions 文件为 `.github/workflows/windows-computer-agent.yml`，beta
 所以 EXE 启动向导、任务注册、PowerShell 执行和真实 WSS 连接仍需在 Windows
 环境做一次验收。
 
-## 中转服务器一键设置（2026-08-31）
+## 中转服务器安装流程（2026-08-31）
 
-之前的流程要求用户先手动 SSH 到中转服务器，再从 `.env` 读取
-`RELAY_API_TOKEN` 填回 App。现在服务器页面增加“中转服务器设置”：选择已经
-绑定的 SSH 服务器后，App 使用该服务器已保存的 SSH 凭据执行 beta 分支的一键
-安装/更新脚本，并从现有 `/opt/pocket-server-ops-computer-relay` 或
-`/www/pocket-server-ops-computer-relay` 配置中读取 Token。读取结果只写入手机
-安全凭据存储，同时保存中转服务器 ID 和公网地址；不会写入任务、对话或 AI 请求。
+手机端不再通过 SSH 直接执行 relay 安装脚本。用户在“中转服务器设置”中选择一台
+已经绑定的 SSH 服务器并确认后，App 只上传内置的二进制离线包：
 
-如果目标服务器已有中转目录，会复用该目录，避免因为重复点击产生第二套服务；
-没有目录时使用默认的 `/www/pocket-server-ops-computer-relay`。部署仍使用独立
-Compose 项目，不执行 `--remove-orphans`，也不会自动修改现有网站或反向代理。
-公网地址必须由用户确认，因为服务器上的 `.env` 只知道监听端口，不知道域名和
-现有 Caddy/Nginx 的路径。App 会根据 SSH 主机名建议
-`https://主机名/computer-relay`，用户可直接修改。Windows 电脑配置页可以直接
-使用这份已保存的中转配置，不再需要手动登录服务器读取 Token；原来的手动字段
-仍保留用于已有旧部署或特殊反向代理场景。
+```text
+/tmp/pocket-server-ops-computer-relay.tar.gz
+```
 
-安装或更新按钮不会直接执行 SSH 命令。App 会先弹出确认框，显示服务器名称、
-`username@host:port`、公网中转地址，并明确提示供应商可能限制中转服务；用户取消
-后不会建立安装用 SSH 操作。安装流程只接收当前选中的一台 SSH 服务器，不会遍历
-其他已绑定服务器，也不会自动给其他服务器安装 relay。
+上传完成后，App 自动复制一段不包含密码、私钥或 `RELAY_API_TOKEN` 的安装提示词。
+用户把提示词交给连接着这台服务器的 AI，由 AI 在当前服务器检查环境、解压安装包、
+执行 `deploy.sh` 并返回健康检查结果。提示词明确要求 AI 不连接其他服务器、不执行
+`docker compose --remove-orphans`，不修改现有 Caddy/Nginx 或网站配置；反向代理仍
+由用户单独决定和配置。
+
+AI 完成安装后，用户点击“我已让 AI 安装，读取配置”。App 再通过已绑定 SSH 连接
+只读取 `/opt/pocket-server-ops-computer-relay/.env` 或
+`/www/pocket-server-ops-computer-relay/.env` 中的 `RELAY_API_TOKEN`，并将 Token
+写入手机安全凭据存储，同时保存中转服务器 ID 和公网地址。Token 不写入任务、对话、
+普通设置或 AI 请求，也不会通过提示词显示给 AI。
+
+如果目标服务器已有中转目录，安装脚本会复用该目录；没有目录时默认使用
+`/www/pocket-server-ops-computer-relay`。部署仍使用独立 Compose 项目，默认监听
+`127.0.0.1:8787`，不会停止其他 Compose 项目或自动修改现有网站。
+
+公网地址必须由用户确认，因为服务器上的 `.env` 只知道监听端口，不知道域名和现有
+Caddy/Nginx 的路径。App 会根据 SSH 主机名建议
+`https://主机名/computer-relay`，用户可直接修改。Windows 电脑配置页可以直接使用
+读取并保存后的中转配置；已有旧部署仍可手动填写中转地址和 Token。
+
+上传确认框显示唯一目标服务器、`username@host:port`、公网地址和远程包路径，并提醒
+供应商可能限制中转服务。用户取消后不会建立上传连接；流程只操作当前选中的一台 SSH
+服务器，不会遍历其他已绑定服务器，也不会自动给其他服务器安装 relay。
 
 ## 协议决定（2026-08-31）
 
@@ -219,3 +230,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：补齐手机端中转服务器设置；服务器页面可选择已绑定 SSH 服务器一键安装/更新 relay 并自动读取 Token，复用已有 `/opt` 或 `/www` 部署目录，Windows 配置可直接使用已保存中转配置。
 - 2026-08-31：中转安装增加安装前确认；确认框显示唯一目标服务器、公网地址并提醒供应商限制，取消后不建立安装 SSH 操作。版本更新为 `1.0.5-beta.4+48`，release APK 使用数据盘构建并核对 manifest；产物位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.4-release.apk`，大小 `80226547` 字节，SHA-256 为 `1c33408bb4439b7613bc4ae142d134bed83efd88c9795167264ae86ae32745ef`。
 - 2026-08-31：修复 Windows Agent CI 在 SEA 注入阶段直接执行 `npx.cmd` 导致的 `spawnSync EINVAL`；构建脚本现在直接调用已安装的 `postject` JavaScript 入口，避免 Windows shell shim 问题。
+- 2026-08-31：中转安装改为手机上传内置离线包并复制 AI 安装提示词；手机不再直接执行安装脚本，安装完成后再通过 SSH 单独读取 `.env` 中的 Token。版本更新为 `1.0.5-beta.5+49`，控制器整套 59 项测试、静态分析和数据盘 APK 构建通过，APK 内已确认包含离线包资源。

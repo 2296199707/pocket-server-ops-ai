@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path_util;
 import 'package:mobile_agent/agent/ai_protocol.dart';
 import 'package:mobile_agent/app_controller.dart';
@@ -1715,7 +1715,7 @@ void main() {
   });
 
   test(
-    'one-click relay setup uses the bound SSH server and stores its token',
+    'relay package upload and post-install read use the bound SSH server',
     () async {
       final database = MemoryAppDatabase();
       final credentials = MemoryCredentialStore();
@@ -1740,12 +1740,33 @@ void main() {
         database: database,
         credentials: credentials,
         sshConnector: connector,
+        relayPackageBundle: _MemoryAssetBundle({
+          'assets/relay/computer-relay-package.tar.gz': Uint8List.fromList(
+            <int>[0, 1, 2, 3, 4, 5],
+          ),
+        }),
       );
       await controller.load();
 
-      final setup = await controller.setupComputerRelay(
+      final transfer = await controller.uploadComputerRelayPackage(
         server: controller.servers.single,
         publicUrl: 'https://relay.example.com/',
+      );
+
+      expect(transfer.relayUrl, 'https://relay.example.com/computer-relay');
+      expect(
+        transfer.remotePath,
+        '/tmp/pocket-server-ops-computer-relay.tar.gz',
+      );
+      expect(transfer.prompt, contains(transfer.remotePath));
+      expect(transfer.prompt, contains('不要输出 RELAY_API_TOKEN'));
+      expect(transfer.prompt, contains(r'$(id -u)'));
+      expect(connector.commands, isEmpty);
+      expect(connector.uploadedFiles[transfer.remotePath], isNotNull);
+
+      final setup = await controller.readComputerRelaySetup(
+        server: controller.servers.single,
+        publicUrl: transfer.relayUrl,
       );
 
       expect(setup.relayUrl, 'https://relay.example.com/computer-relay');
@@ -1759,7 +1780,10 @@ void main() {
         await credentials.read('computer:relay-api'),
         'relay-token-from-env',
       );
-      expect(connector.commands.single, contains('computer-relay/install.sh'));
+      expect(
+        connector.commands.single,
+        contains('pocket-server-ops-computer-relay'),
+      );
       controller.dispose();
     },
   );
@@ -3454,10 +3478,26 @@ class _BlockingModelHistoryDatabase extends MemoryAppDatabase {
   }
 }
 
+class _MemoryAssetBundle extends AssetBundle {
+  _MemoryAssetBundle(this._assets);
+
+  final Map<String, Uint8List> _assets;
+
+  @override
+  Future<ByteData> load(String key) async {
+    final bytes = _assets[key];
+    if (bytes == null) {
+      throw StateError('Asset not found: $key');
+    }
+    return ByteData.sublistView(bytes);
+  }
+}
+
 class _FakeConnector implements SshConnector {
   final commands = <String>[];
   final directoryCalls = <String>[];
   final writes = <({String path, Uint8List contents})>[];
+  final uploadedFiles = <String, Uint8List>{};
   final fileOperations = <String>[];
   String? directoryProbeOutput;
   String? relayToken;
@@ -3468,6 +3508,7 @@ class _FakeConnector implements SshConnector {
       commands: commands,
       directoryCalls: directoryCalls,
       writes: writes,
+      uploadedFiles: uploadedFiles,
       fileOperations: fileOperations,
       directoryProbeOutput: directoryProbeOutput,
       relayToken: relayToken,
@@ -3480,6 +3521,7 @@ class _FakeConnection implements SshConnection {
     required this.commands,
     required this.directoryCalls,
     required this.writes,
+    required this.uploadedFiles,
     required this.fileOperations,
     this.directoryProbeOutput,
     this.relayToken,
@@ -3488,6 +3530,7 @@ class _FakeConnection implements SshConnection {
   final List<String> commands;
   final List<String> directoryCalls;
   final List<({String path, Uint8List contents})> writes;
+  final Map<String, Uint8List> uploadedFiles;
   final List<String> fileOperations;
   final String? directoryProbeOutput;
   final String? relayToken;
@@ -3670,18 +3713,42 @@ class _FakeConnection implements SshConnection {
     required String sourceKey,
     required int totalBytes,
     bool overwrite = true,
-  }) => throw UnimplementedError();
+  }) async {
+    final temporaryPath = '$remotePath.mobile-agent.part';
+    uploadedFiles[temporaryPath] = Uint8List(0);
+    return SshFileUploadSession(
+      targetPath: remotePath,
+      temporaryPath: temporaryPath,
+      metadataPath: '$temporaryPath.json',
+      offset: 0,
+      totalBytes: totalBytes,
+    );
+  }
 
   @override
   Future<void> writeFileBytesChunk(
     String remotePath,
     Uint8List contents, {
     required int offset,
-  }) => throw UnimplementedError();
+  }) async {
+    final current = uploadedFiles[remotePath] ?? Uint8List(0);
+    final requiredLength = offset + contents.length;
+    final next = Uint8List(
+      requiredLength > current.length ? requiredLength : current.length,
+    );
+    next.setRange(0, current.length, current);
+    next.setRange(offset, offset + contents.length, contents);
+    uploadedFiles[remotePath] = next;
+  }
 
   @override
-  Future<void> completeFileUpload(SshFileUploadSession session) =>
-      throw UnimplementedError();
+  Future<void> completeFileUpload(SshFileUploadSession session) async {
+    final contents = uploadedFiles.remove(session.temporaryPath);
+    if (contents == null || contents.length != session.totalBytes) {
+      throw StateError('文件上传未完成');
+    }
+    uploadedFiles[session.targetPath] = contents;
+  }
 
   @override
   Future<void> writeFile(String remotePath, Uint8List contents) async {
