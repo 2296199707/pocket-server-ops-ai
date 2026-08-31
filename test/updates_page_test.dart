@@ -54,6 +54,29 @@ void main() {
     );
   });
 
+  test('beta releases are installable test versions, not rollbacks', () {
+    final beta = AppRelease(
+      version: '1.0.5-beta.1',
+      title: 'Beta',
+      notes: '',
+      releaseUrl: Uri.parse('https://github.com/example/beta'),
+      isPrerelease: true,
+    );
+    final oldStable = AppRelease(
+      version: '1.0.4',
+      title: 'Old',
+      notes: '',
+      releaseUrl: Uri.parse('https://github.com/example/old'),
+      isPrerelease: false,
+    );
+
+    expect(UpdateService.classifyRelease(beta, '1.0.5'), ReleaseAction.beta);
+    expect(
+      UpdateService.classifyRelease(oldStable, '1.0.5'),
+      ReleaseAction.rollback,
+    );
+  });
+
   test(
     'static update channels read the manifest from their own hosts',
     () async {

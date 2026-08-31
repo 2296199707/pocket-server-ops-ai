@@ -49,6 +49,8 @@ class AppRelease {
   final DateTime? publishedAt;
 }
 
+enum ReleaseAction { current, update, beta, rollback }
+
 class UpdateService {
   UpdateService({http.Client? client}) : _client = client ?? http.Client();
 
@@ -65,6 +67,16 @@ class UpdateService {
       includePrereleases: includePrereleases,
       source: source,
     );
+  }
+
+  static ReleaseAction classifyRelease(
+    AppRelease release,
+    String currentVersion,
+  ) {
+    final comparison = compareVersions(release.version, currentVersion);
+    if (comparison == 0) return ReleaseAction.current;
+    if (release.isPrerelease) return ReleaseAction.beta;
+    return comparison > 0 ? ReleaseAction.update : ReleaseAction.rollback;
   }
 
   Future<List<AppRelease>> _fetchApiReleases({
@@ -482,20 +494,18 @@ class _UpdatesPageState extends State<UpdatesPage> {
   }
 
   Widget _buildReleaseTile(AppRelease release) {
-    final comparison = UpdateService.compareVersions(
-      release.version,
-      _currentVersion,
-    );
-    final isCurrent = comparison == 0;
-    final isNewer = comparison > 0;
+    final action = UpdateService.classifyRelease(release, _currentVersion);
+    final isCurrent = action == ReleaseAction.current;
+    final isNewer = action == ReleaseAction.update;
     final isDownloading = _downloading && _downloadVersion == release.version;
     final isDownloaded =
         _downloadVersion == release.version && _downloadedApk != null;
-    final actionLabel = isCurrent
-        ? '当前'
-        : isNewer
-        ? '更新'
-        : '回退';
+    final actionLabel = switch (action) {
+      ReleaseAction.current => '当前',
+      ReleaseAction.update => '更新',
+      ReleaseAction.beta => '安装测试版',
+      ReleaseAction.rollback => '回退',
+    };
     final date = release.publishedAt;
     final subtitle = [
       if (release.title.isNotEmpty) release.title,
@@ -510,6 +520,8 @@ class _UpdatesPageState extends State<UpdatesPage> {
             leading: Icon(
               isCurrent
                   ? Icons.check_circle_outline
+                  : action == ReleaseAction.beta
+                  ? Icons.science_outlined
                   : isNewer
                   ? Icons.system_update_outlined
                   : Icons.history,
@@ -525,7 +537,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
                     onPressed:
                         release.apkUrl == null || _downloading || _installing
                         ? null
-                        : () => _downloadOrInstall(release, isNewer: isNewer),
+                        : () => _downloadOrInstall(release, action: action),
                     icon: Icon(
                       isDownloaded
                           ? Icons.install_mobile_outlined
@@ -639,12 +651,12 @@ class _UpdatesPageState extends State<UpdatesPage> {
 
   Future<void> _downloadOrInstall(
     AppRelease release, {
-    required bool isNewer,
+    required ReleaseAction action,
   }) async {
     if (_downloadOperationActive) return;
     _downloadOperationActive = true;
     try {
-      await _downloadOrInstallOnce(release, isNewer: isNewer);
+      await _downloadOrInstallOnce(release, action: action);
     } finally {
       _downloadOperationActive = false;
     }
@@ -652,7 +664,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
 
   Future<void> _downloadOrInstallOnce(
     AppRelease release, {
-    required bool isNewer,
+    required ReleaseAction action,
   }) async {
     if (_downloadVersion == release.version && _downloadedApk != null) {
       if (await _downloadedApk!.exists()) {
@@ -662,7 +674,7 @@ class _UpdatesPageState extends State<UpdatesPage> {
       }
     }
     if (!mounted) return;
-    if (!isNewer) {
+    if (action == ReleaseAction.rollback) {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(

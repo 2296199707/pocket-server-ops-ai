@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5-beta.2",
+      "title": "PocketServerOps AI v1.0.5-beta.2",
+      "notes": "优化版本更新页面：测试版显示为安装测试版，不再误标为回退；真正较旧的正式版继续保留回退提示。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.2",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5-beta.2/pocket-server-ops-ai-v1.0.5-beta.2-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-31T00:00:00Z"
+    },
+    {
       "version": "1.0.5-beta.1",
       "title": "PocketServerOps AI v1.0.5-beta.1",
       "notes": "稳定性修复：移除普通长任务的无依据硬性时长、步骤和工具调用限制；增加持久化追加任务队列；完善子代理取消、超时、未知状态和等待唤醒；改善 SSH/SFTP 长任务与资源清理；修复 terminal.start 并发登记竞态。",

@@ -2128,3 +2128,15 @@ Responses 判断 Sub2API 的实际出站协议。
 - 已通过：本轮聚焦测试命令共 122 项全部通过；`git diff --check` 通过。
 - `flutter analyze --no-pub` 仅剩已有的 `test/mcp_client_test.dart:176:39` 风格提示
   `use_null_aware_elements`，本轮改动没有新增分析错误；未构建 APK，未提交或推送。
+
+### 2026-08-31：版本页测试版动作修正 Beta 1.0.5-beta.2 发布记录
+
+- 修复版本历史按 SemVer 将 `1.0.5-beta.1` 错标为“回退”的问题。测试版现在显示“安装测试版”，
+  不弹出旧正式版覆盖警告；真正较旧的正式版仍显示“回退”。
+- 版本：`1.0.5-beta.2+46`；Android `versionName=1.0.5-beta.2`，`versionCode=46`。
+- 发布前验证：`test/updates_page_test.dart` 7 项全部通过；`git diff --check` 通过；
+  `flutter analyze --no-pub` 仅保留已有的
+  `test/mcp_client_test.dart:176:39` 风格提示；release APK 构建通过。
+- APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.2-release.apk`。
+- 发布结果：已推送远端 `beta` 分支并创建 GitHub Pre-release `v1.0.5-beta.2`；Release 地址：
+  `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.2`。
