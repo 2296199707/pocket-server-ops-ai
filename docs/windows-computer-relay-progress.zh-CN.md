@@ -231,3 +231,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：中转安装增加安装前确认；确认框显示唯一目标服务器、公网地址并提醒供应商限制，取消后不建立安装 SSH 操作。版本更新为 `1.0.5-beta.4+48`，release APK 使用数据盘构建并核对 manifest；产物位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.4-release.apk`，大小 `80226547` 字节，SHA-256 为 `1c33408bb4439b7613bc4ae142d134bed83efd88c9795167264ae86ae32745ef`。
 - 2026-08-31：修复 Windows Agent CI 在 SEA 注入阶段直接执行 `npx.cmd` 导致的 `spawnSync EINVAL`；构建脚本现在直接调用已安装的 `postject` JavaScript 入口，避免 Windows shell shim 问题。
 - 2026-08-31：中转安装改为手机上传内置离线包并复制 AI 安装提示词；手机不再直接执行安装脚本，安装完成后再通过 SSH 单独读取 `.env` 中的 Token。版本更新为 `1.0.5-beta.5+49`，控制器整套 59 项测试、静态分析和数据盘 APK 构建通过，APK 内已确认包含离线包资源。
+- 2026-08-31：创建并上传 GitHub Pre-release `v1.0.5-beta.5`，同步 `updates/releases.json`，使 App 的 GitHub Raw 和 jsDelivr 更新渠道可以发现该版本。
