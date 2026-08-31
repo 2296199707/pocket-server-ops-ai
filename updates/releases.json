@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5-beta.7",
+      "title": "PocketServerOps AI v1.0.5-beta.7",
+      "notes": "中转设置增加跳过上传入口：换手机后可选择已绑定 SSH 服务器，直接读取已安装 relay 的配置；原有上传安装包流程保持不变。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.7",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5-beta.7/pocket-server-ops-ai-v1.0.5-beta.7-release.apk",
+      "prerelease": true,
+      "published_at": "2026-08-31T17:29:11Z"
+    },
+    {
       "version": "1.0.5-beta.6",
       "title": "PocketServerOps AI v1.0.5-beta.6",
       "notes": "修复 Windows 电脑测试连接诊断：区分中转服务器连接失败、电脑未完成配对和 Windows Agent 未在线；扩大左侧边缘滑动打开侧栏的触发区域；修复中转运行文件权限问题。",

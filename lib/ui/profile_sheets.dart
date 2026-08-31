@@ -240,7 +240,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
             ),
             const SizedBox(height: 12),
             Text(
-              '手机只上传离线安装包，不直接执行安装。安装包使用独立目录和 Compose 项目，不会自动修改现有网站配置。',
+              '手机可以上传离线安装包；如果中转已安装，也可以直接读取配置，不会重复上传。安装包使用独立目录和 Compose 项目，不会自动修改现有网站配置。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             if (_packageTransfer != null) ...[
@@ -281,13 +281,15 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
                   ),
                 ),
               ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: _working ? null : _readInstalledSetup,
-                icon: const Icon(Icons.sync_outlined),
-                label: const Text('我已让 AI 安装，读取配置'),
-              ),
             ],
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _working ? null : _readInstalledSetup,
+              icon: const Icon(Icons.sync_outlined),
+              label: Text(
+                _packageTransfer == null ? '中转已安装，跳过上传并读取配置' : '我已让 AI 安装，读取配置',
+              ),
+            ),
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(
@@ -395,9 +397,13 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
 
   Future<void> _readInstalledSetup() async {
     final server = _selectedServer;
-    final transfer = _packageTransfer;
-    if (server == null || transfer == null || transfer.serverId != server.id) {
-      setState(() => _error = '请先上传当前服务器的安装包');
+    final publicUrl = _publicUrl.text.trim();
+    if (server == null) {
+      setState(() => _error = '请选择已绑定的 SSH 服务器');
+      return;
+    }
+    if (publicUrl.isEmpty) {
+      setState(() => _error = '请输入公网中转地址');
       return;
     }
     setState(() {
@@ -408,7 +414,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
     try {
       final setup = await widget.controller.readComputerRelaySetup(
         server: server,
-        publicUrl: transfer.relayUrl,
+        publicUrl: publicUrl,
         onFirstHostKey: (key) => _confirmRelayHostKey(context, key),
       );
       if (mounted) Navigator.pop(context, setup);
