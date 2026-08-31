@@ -160,3 +160,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：修复协议收尾问题：WebSocket 帧上限统一为 16 MiB 以覆盖 8 MiB 文件写入；手机断线在调用期限内用原 request ID 续接；校验手机 URL 设备 ID 与 hello 一致；恢复 Windows 独立仪表盘入口。
 - 2026-08-31：版本更新为 `1.0.5-beta.3+47`，release APK 使用数据盘构建并通过 manifest 与 SHA-256 校验；GitHub Pre-release 已创建并上传 APK，更新清单已同步。
 - 2026-08-31：补齐 relay 一键安装入口；部署脚本复制 `package-lock.json`，默认仅监听 `127.0.0.1:8787`，使用独立 Compose 项目且不执行 `--remove-orphans`，不会主动修改现有网站或其他 Compose 项目。真实服务器部署尚未在本轮执行。
+- 2026-08-31：在临时中转机验证实际部署；Docker 默认构建网络无法解析 npm registry，Compose 构建阶段改用 host 网络；relay 健康接口和现有网站均验证通过。
