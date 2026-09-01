@@ -317,3 +317,7 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
   大小 `80448525` 字节，SHA-256 为
   `d670716101cc957055d04f5d2f94bcb8f9c70ff17ab4b961f3a0399b36d9e912`。
   Windows/Tailscale 真机连接待发布后验证。
+- 2026-09-01：修复 Windows Agent relay 调用脱离事件回调后可能产生未处理 Promise、
+  心跳定时器异常可能直接退出的问题；异常调用现在关闭当前连接并交给既有重连循环，
+  独立 EXE 还会把未处理异常记录到 `%LOCALAPPDATA%\PocketServerOps\computer-agent\agent-error.log`。
+  Windows Agent 版本为 `1.0.0-beta.4`；回归测试 2 项和 bundle 检查通过。

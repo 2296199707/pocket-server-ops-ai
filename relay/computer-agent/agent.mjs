@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 
-const AGENT_VERSION = '1.0.0-beta.3';
+const AGENT_VERSION = '1.0.0-beta.4';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
 const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
@@ -360,13 +360,20 @@ class ComputerAgent {
     );
     this.heartbeatIntervalMs = interval;
     const sendHeartbeat = () => {
-      if (socket.readyState !== WebSocket.OPEN || !this.authenticated) return;
-      this.missedHeartbeats += 1;
-      if (this.missedHeartbeats > 2) {
-        socket.close(4001, 'heartbeat timeout');
-        return;
+      try {
+        if (socket.readyState !== WebSocket.OPEN || !this.authenticated) return;
+        this.missedHeartbeats += 1;
+        if (this.missedHeartbeats > 2) {
+          socket.close(4001, 'heartbeat timeout');
+          return;
+        }
+        this.sendFrameIfOpen(socket, { type: 'heartbeat', device_id: this.deviceId });
+      } catch (error) {
+        log('warn', '发送中转心跳失败，准备重连', error);
+        try {
+          socket.close(4001, 'heartbeat failed');
+        } catch (_) {}
       }
-      this.sendFrameIfOpen(socket, { type: 'heartbeat', device_id: this.deviceId });
     };
     this.heartbeatTimer = setInterval(sendHeartbeat, interval);
   }
@@ -564,7 +571,10 @@ class ComputerAgent {
         return;
       case 'call':
         if (!this.authenticated) throw new AgentError('not_authenticated', '未认证时收到调用');
-        void this.handleCall(socket, frame);
+        void this.handleCall(socket, frame).catch((error) => {
+          log('warn', '处理 relay 调用失败，准备重连', error);
+          if (socket.readyState === WebSocket.OPEN) socket.close(4002, 'call failed');
+        });
         return;
       case 'cancel':
         if (!this.authenticated) throw new AgentError('not_authenticated', '未认证时收到取消');
@@ -1686,6 +1696,19 @@ function log(level, message, error) {
   console[level === 'warn' ? 'warn' : 'log'](`[${new Date().toISOString()}] [${level}] ${message}${suffix}`);
 }
 
+async function writeRuntimeError(error) {
+  if (!isStandaloneExecutable()) return;
+  const logPath = path.join(path.dirname(defaultConfigPath()), 'agent-error.log');
+  try {
+    await fsp.mkdir(path.dirname(logPath), { recursive: true });
+    await fsp.appendFile(
+      logPath,
+      `[${new Date().toISOString()}] uptime=${Math.round(process.uptime())}s ${error?.stack ?? error?.message ?? String(error)}\n`,
+      'utf8',
+    );
+  } catch (_) {}
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -1722,8 +1745,17 @@ if (
     path.basename(process.argv[1] ?? '').toLowerCase(),
   )
 ) {
+  process.on('unhandledRejection', (reason) => {
+    log('error', '未处理的 Promise 异常', reason);
+    void writeRuntimeError(reason);
+  });
+  process.on('uncaughtException', (error) => {
+    log('error', '未捕获的运行时异常，进程即将退出', error);
+    void writeRuntimeError(error).finally(() => process.exit(1));
+  });
   main().catch((error) => {
     log('error', error.message ?? String(error), error);
+    void writeRuntimeError(error);
     process.exitCode = 1;
   });
 }
