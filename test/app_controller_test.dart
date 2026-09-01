@@ -1745,6 +1745,69 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'Tailscale direct computer uses its Agent token without a relay',
+    () async {
+      final directServer = await HttpServer.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      addTearDown(directServer.close);
+      final requests = <String>[];
+      final authorizations = <String?>[];
+      directServer.listen((request) async {
+        requests.add('${request.method} ${request.uri.path}');
+        authorizations.add(
+          request.headers.value(HttpHeaders.authorizationHeader),
+        );
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(
+          jsonEncode({
+            'device_id': 'computer-direct',
+            'name': '直连电脑',
+            'online': true,
+          }),
+        );
+        await request.response.close();
+      });
+      final credentials = MemoryCredentialStore();
+      final controller = AppController(
+        database: MemoryAppDatabase(),
+        credentials: credentials,
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveServer(
+        name: '直连电脑',
+        host: '',
+        port: 0,
+        username: '',
+        secret: '',
+        workingDirectory: r'C:\workspace',
+        targetType: serverTargetTypeWindows,
+        computerConnectionMode: windowsConnectionModeDirect,
+        relayUrl: 'http://127.0.0.1:${directServer.port}',
+        deviceId: 'computer-direct',
+        deviceToken: 'device-secret-123456',
+      );
+
+      final profile = controller.servers.single;
+      expect(profile.isDirectWindowsComputer, isTrue);
+      expect(profile.relayTokenRef, isNull);
+      final pairing = await controller.computerPairingInfo(profile);
+      expect(pairing['connection_mode'], windowsConnectionModeDirect);
+      expect(pairing['direct_listen_host'], '0.0.0.0');
+      expect(pairing['direct_listen_port'], '${directServer.port}');
+      expect(pairing.containsKey('relay_url'), isFalse);
+
+      final status = await controller.testComputer(profile);
+
+      expect(status['online'], isTrue);
+      expect(requests, ['GET /v1/devices/computer-direct/status']);
+      expect(authorizations, ['Bearer device-secret-123456']);
+    },
+  );
+
   test('testing a Windows computer only reads status', () async {
     final relayServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(relayServer.close);

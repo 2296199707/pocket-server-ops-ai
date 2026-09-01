@@ -15,6 +15,12 @@ PocketServerOps AI 使用以下开源项目。版本以 `pubspec.lock` 为准，
 | `sqflite` | 2.4.3 | BSD-2-Clause | https://github.com/tekartik/sqflite |
 | `xterm` | 4.0.0 | MIT | https://github.com/TerminalStudio/xterm.dart |
 
+## Windows Agent 依赖
+
+| Package | Version | License | Upstream |
+| --- | ---: | --- | --- |
+| `ws` | 8.21.3 | MIT | https://github.com/websockets/ws |
+
 ## 关键传递依赖
 
 | Package | Version | License | Used by |

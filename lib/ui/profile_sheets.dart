@@ -43,7 +43,9 @@ Future<void> showComputerPairingDialog(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  registrationError == null
+                  profile.isDirectWindowsComputer
+                      ? '直连配置已保存。手机和电脑加入同一 Tailscale 网络后，将下面配置粘贴到 Windows Agent。'
+                      : registrationError == null
                       ? '设备已登记。Windows 端只需要下面这组信息，不需要中转 API Token。'
                       : '配置已保存，但设备登记失败。启动 Windows Agent 后可在电脑菜单中重新测试连接。',
                 ),
@@ -562,10 +564,12 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
   late final TextEditingController _passphrase;
   late final TextEditingController _directory;
   late final TextEditingController _relayUrl;
+  late final TextEditingController _directUrl;
   late final TextEditingController _deviceId;
   late final TextEditingController _relayApiToken;
   late final TextEditingController _deviceToken;
   String _targetType = serverTargetTypeSsh;
+  String _computerConnectionMode = windowsConnectionModeRelay;
   String _authType = 'password';
   bool _clearPassphrase = false;
   bool _saving = false;
@@ -598,7 +602,19 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _secret = TextEditingController();
     _passphrase = TextEditingController();
     _directory = TextEditingController(text: profile?.defaultWorkingDirectory);
-    _relayUrl = TextEditingController(text: profile?.relayUrl);
+    _computerConnectionMode = profile?.isDirectWindowsComputer == true
+        ? windowsConnectionModeDirect
+        : windowsConnectionModeRelay;
+    _relayUrl = TextEditingController(
+      text: _computerConnectionMode == windowsConnectionModeRelay
+          ? profile?.relayUrl
+          : null,
+    );
+    _directUrl = TextEditingController(
+      text: _computerConnectionMode == windowsConnectionModeDirect
+          ? profile?.relayUrl
+          : null,
+    );
     _deviceId = TextEditingController(text: profile?.deviceId);
     _relayApiToken = TextEditingController();
     _deviceToken = TextEditingController();
@@ -626,6 +642,7 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _passphrase.dispose();
     _directory.dispose();
     _relayUrl.dispose();
+    _directUrl.dispose();
     _deviceId.dispose();
     _relayApiToken.dispose();
     _deviceToken.dispose();
@@ -642,11 +659,13 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     if (_directory.text.trim().isEmpty) {
       _directory.text = r'C:\Users\Public\PocketServerOps';
     }
-    if (_relayUrl.text.trim().isEmpty &&
+    if (_computerConnectionMode == windowsConnectionModeRelay &&
+        _relayUrl.text.trim().isEmpty &&
         widget.controller.computerRelayUrl != null) {
       _relayUrl.text = widget.controller.computerRelayUrl!;
     }
-    if (_relayUrl.text.trim().isEmpty) {
+    if (_computerConnectionMode == windowsConnectionModeRelay &&
+        _relayUrl.text.trim().isEmpty) {
       final server = _selectedRelayServer;
       if (server != null) {
         final suggested = _suggestedComputerRelayUrl(server);
@@ -685,7 +704,7 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 ),
                 DropdownMenuItem(
                   value: serverTargetTypeWindows,
-                  child: Text('Windows 电脑（中转）'),
+                  child: Text('Windows 电脑'),
                 ),
               ],
               onChanged: (value) {
@@ -705,66 +724,145 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
               },
             ),
             if (_targetType == serverTargetTypeWindows) ...[
-              DropdownButtonFormField<String>(
-                initialValue: _relayServerId,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: '中转服务器（SSH）'),
-                hint: const Text('请选择已绑定的 SSH 服务器'),
-                items: [
-                  for (final server in _relayServers)
-                    DropdownMenuItem(
-                      value: server.id,
-                      child: Text(
-                        '${server.name} · ${server.host}:${server.port}',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
+              const SizedBox(height: 12),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                    value: windowsConnectionModeRelay,
+                    icon: Icon(Icons.hub_outlined),
+                    label: Text('中转'),
+                  ),
+                  ButtonSegment(
+                    value: windowsConnectionModeDirect,
+                    icon: Icon(Icons.lan_outlined),
+                    label: Text('Tailscale 直连'),
+                  ),
                 ],
-                onChanged: _saving || _refreshingRelayToken
+                selected: {_computerConnectionMode},
+                onSelectionChanged: _saving
                     ? null
-                    : (value) {
-                        if (value == null) return;
-                        final server = _relayServers.firstWhere(
-                          (item) => item.id == value,
-                        );
+                    : (values) {
                         setState(() {
-                          _relayServerId = value;
-                          _relayServerSelectionChanged = true;
-                          _relayApiToken.clear();
-                          if (_relayUrl.text.trim().isEmpty) {
-                            final suggested = _suggestedComputerRelayUrl(
-                              server,
-                            );
-                            if (suggested.isNotEmpty) {
-                              _relayUrl.text = suggested;
-                            }
-                          }
+                          _computerConnectionMode = values.first;
                           _error = null;
+                          _ensureWindowsPairingFields();
                         });
                       },
-                validator: (value) =>
-                    _targetType == serverTargetTypeWindows &&
-                        _relayServers.isNotEmpty
-                    ? _required(value)
-                    : null,
               ),
-              if (_relayServers.isEmpty) const Text('请先添加一个 SSH 服务器作为中转服务器。'),
-              TextFormField(
-                controller: _relayUrl,
-                keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: '中转服务器地址（手机）',
-                  hintText: 'https://relay.example.com',
+              const SizedBox(height: 12),
+              if (_computerConnectionMode == windowsConnectionModeRelay) ...[
+                DropdownButtonFormField<String>(
+                  initialValue: _relayServerId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: '中转服务器（SSH）'),
+                  hint: const Text('请选择已绑定的 SSH 服务器'),
+                  items: [
+                    for (final server in _relayServers)
+                      DropdownMenuItem(
+                        value: server.id,
+                        child: Text(
+                          '${server.name} · ${server.host}:${server.port}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                  onChanged: _saving || _refreshingRelayToken
+                      ? null
+                      : (value) {
+                          if (value == null) return;
+                          final server = _relayServers.firstWhere(
+                            (item) => item.id == value,
+                          );
+                          setState(() {
+                            _relayServerId = value;
+                            _relayServerSelectionChanged = true;
+                            _relayApiToken.clear();
+                            if (_relayUrl.text.trim().isEmpty) {
+                              final suggested = _suggestedComputerRelayUrl(
+                                server,
+                              );
+                              if (suggested.isNotEmpty) {
+                                _relayUrl.text = suggested;
+                              }
+                            }
+                            _error = null;
+                          });
+                        },
+                  validator: (value) =>
+                      _targetType == serverTargetTypeWindows &&
+                          _computerConnectionMode ==
+                              windowsConnectionModeRelay &&
+                          _relayServers.isNotEmpty
+                      ? _required(value)
+                      : null,
                 ),
-                validator: (value) => _targetType == serverTargetTypeWindows
-                    ? _required(value)
-                    : null,
-              ),
-              OutlinedButton.icon(
-                onPressed: _saving ? null : _chooseComputerRelay,
-                icon: const Icon(Icons.hub_outlined),
-                label: const Text('选择已绑定服务器一键设置中转'),
-              ),
+                if (_relayServers.isEmpty) const Text('请先添加一个 SSH 服务器作为中转服务器。'),
+                TextFormField(
+                  controller: _relayUrl,
+                  keyboardType: TextInputType.url,
+                  decoration: const InputDecoration(
+                    labelText: '中转服务器地址（手机）',
+                    hintText: 'https://relay.example.com',
+                  ),
+                  validator: (value) =>
+                      _targetType == serverTargetTypeWindows &&
+                          _computerConnectionMode == windowsConnectionModeRelay
+                      ? _required(value)
+                      : null,
+                ),
+                OutlinedButton.icon(
+                  onPressed: _saving ? null : _chooseComputerRelay,
+                  icon: const Icon(Icons.hub_outlined),
+                  label: const Text('选择已绑定服务器一键设置中转'),
+                ),
+                TextFormField(
+                  controller: _relayApiToken,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    labelText: '中转 API Token（仅手机）',
+                    hintText: widget.existing == null
+                        ? '选择中转服务器后点击刷新自动获取'
+                        : '留空则保留已有 Token',
+                    suffixIcon: IconButton(
+                      tooltip: '从已选中转服务器读取 Token',
+                      onPressed: _saving || _refreshingRelayToken
+                          ? null
+                          : _refreshRelayToken,
+                      icon: _refreshingRelayToken
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh_outlined),
+                    ),
+                  ),
+                  validator: (value) {
+                    if (_targetType == serverTargetTypeWindows &&
+                        _computerConnectionMode == windowsConnectionModeRelay &&
+                        (widget.existing == null ||
+                            _relayServerSelectionChanged) &&
+                        (value?.trim().isEmpty ?? true)) {
+                      return '请先选择中转服务器后点击刷新';
+                    }
+                    return null;
+                  },
+                ),
+              ] else ...[
+                TextFormField(
+                  controller: _directUrl,
+                  keyboardType: TextInputType.url,
+                  decoration: const InputDecoration(
+                    labelText: '电脑直连地址',
+                    hintText: 'http://100.64.0.10:8788',
+                    helperText: '填写电脑的 Tailscale IP；同一局域网也可填写局域网 IP。',
+                  ),
+                  validator: (value) =>
+                      _targetType == serverTargetTypeWindows &&
+                          _computerConnectionMode == windowsConnectionModeDirect
+                      ? _required(value)
+                      : null,
+                ),
+              ],
               TextFormField(
                 controller: _deviceId,
                 decoration: InputDecoration(
@@ -779,37 +877,6 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 validator: (value) => _targetType == serverTargetTypeWindows
                     ? _required(value)
                     : null,
-              ),
-              TextFormField(
-                controller: _relayApiToken,
-                obscureText: true,
-                decoration: InputDecoration(
-                  labelText: '中转 API Token（仅手机）',
-                  hintText: widget.existing == null
-                      ? '选择中转服务器后点击刷新自动获取'
-                      : '留空则保留已有 Token',
-                  suffixIcon: IconButton(
-                    tooltip: '从已选中转服务器读取 Token',
-                    onPressed: _saving || _refreshingRelayToken
-                        ? null
-                        : _refreshRelayToken,
-                    icon: _refreshingRelayToken
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.refresh_outlined),
-                  ),
-                ),
-                validator: (value) {
-                  if (_targetType == serverTargetTypeWindows &&
-                      (widget.existing == null ||
-                          _relayServerSelectionChanged) &&
-                      (value?.trim().isEmpty ?? true)) {
-                    return '请先选择中转服务器后点击刷新';
-                  }
-                  return null;
-                },
               ),
               TextFormField(
                 controller: _deviceToken,
@@ -835,7 +902,9 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 },
               ),
               Text(
-                '设备 ID 和 Agent Token 会自动生成。保存后可复制电脑配对信息；中转 API Token 只保存在手机，不会交给电脑或 AI。',
+                _computerConnectionMode == windowsConnectionModeDirect
+                    ? '直连使用 Agent Token 认证；手机和电脑需要加入同一 Tailscale 网络。'
+                    : '设备 ID 和 Agent Token 会自动生成；中转 API Token 只保存在手机。',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ] else ...[
@@ -958,7 +1027,10 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
         passphrase: _passphrase.text,
         clearPassphrase: _clearPassphrase,
         targetType: _targetType,
-        relayUrl: _relayUrl.text,
+        computerConnectionMode: _computerConnectionMode,
+        relayUrl: _computerConnectionMode == windowsConnectionModeDirect
+            ? _directUrl.text
+            : _relayUrl.text,
         deviceId: _deviceId.text,
         relayApiToken: _relayApiToken.text,
         deviceToken: _deviceToken.text,

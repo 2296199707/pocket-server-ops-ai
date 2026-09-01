@@ -30,6 +30,10 @@
 
 开发依赖 `flutter_lints` 6.0.0 为 BSD-3-Clause；它不会进入应用运行时。
 
+Windows Agent 的直连服务使用 `ws` 8.21.3（MIT）；独立 EXE 会将其打入单文件，
+源码安装则通过 `npm ci --omit=dev` 安装。来源为
+[websockets/ws](https://github.com/websockets/ws)。
+
 ## 关键传递依赖
 
 以下是运行时依赖图中需要重点留意的非 Dart/Flutter 标准包及其许可证：

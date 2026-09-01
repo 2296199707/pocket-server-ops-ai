@@ -1,10 +1,12 @@
-# Windows 电脑中转连接进度
+# Windows 电脑连接进度
 
 ## 目标
 
 Goal：`01a02f79-5a29-7f70-bf38-2ffb76d5f034`
 
-为 PocketServerOps AI 增加第一版 Windows 电脑连接能力：手机从“服务器添加”进入电脑配置，Windows 端安装后台 Agent 后主动连接中转服务器，手机可以通过中转通道执行 PowerShell、读写文件、启动后台任务并读取基础状态。
+为 PocketServerOps AI 增加第一版 Windows 电脑连接能力：手机从“服务器添加”进入
+电脑配置，Windows 端安装后台 Agent 后，可以经中转服务器或 Tailscale 直连执行
+PowerShell、读写文件、启动后台任务并读取基础状态。
 
 本轮约束：最小实现、稳定优先、不过度限制 AI 能力、不修改旧项目 `/www/server-agent/workspace/apps/mobile`、构建和缓存只放数据盘、测试只覆盖关键路径。
 
@@ -45,6 +47,36 @@ Windows Agent ──主动 WSS/HTTPS──┘
 | G7 | 数据盘构建、文档和 beta 交付检查 | 已完成（Windows 真机未验证） |
 | G8 | 手机生成配对资料、Windows 独立 EXE 首次配置和登录启动 | 已完成（Windows 构建与真机未验证） |
 | G9 | 手机选择已绑定 SSH 服务器上传离线包、复制 AI 提示词并保存配置 | 已完成（真实 Windows 端未验证） |
+| G10 | Tailscale/局域网直连 Windows Agent，不经过中转服务器 | 已完成（自动化闭环，真机待验证） |
+
+## Tailscale 直连（2026-09-01）
+
+直连采用最小实现，不把 Tailscale SDK 或账号管理集成进 App。用户分别在 Android
+和 Windows 安装 Tailscale 并登录同一网络；手机保存电脑的 Tailscale IPv4 地址，
+例如 `http://100.64.0.10:8788`。Windows Agent 在 `0.0.0.0:8788` 提供与现有手机
+relay 客户端兼容的接口：
+
+```text
+GET /v1/health
+GET /v1/devices/<device_id>/status
+WS  /v1/devices/<device_id>/ws
+Authorization: Bearer <device_token>
+```
+
+直连继续复用现有 PowerShell、文件、后台进程、状态工具以及手机断线后用原
+`request_id` 续接的逻辑。HTTP 明文只用于 Tailscale 或受信局域网，链路加密由
+Tailscale 提供；不要把 Agent 端口映射到公网。
+
+手机端没有新增数据库列：Windows `ServerProfile.authType` 保存 `relay` 或
+`direct`，旧配置缺省保持 `relay`；`relayUrl` 在直连模式保存电脑地址。中转切到
+直连时保留原中转 Token 的安全存储引用，之后切回中转可以继续使用；直连首次创建
+没有中转 Token，改为中转时才要求填写。直连鉴权直接读取 Agent Token，中转 API
+Token 不参与直连，也不会发送给 AI。
+
+Windows 配对 JSON 在直连模式包含 `connection_mode=direct`、设备 ID、Agent
+Token、工作目录、监听地址和端口，不包含 relay 地址。独立 EXE 和源码安装脚本均
+支持该格式。第一版不会在直连失败后偷偷改走中转；连接方式由用户明确选择，失败时
+返回 Windows Agent 的连接或鉴权错误。
 
 ## 简化配对决定（2026-08-31）
 
@@ -228,6 +260,8 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 没有 Windows 真机和 WSS 反向代理环境，因此 PowerShell 执行、Windows 磁盘
   查询、登录启动任务和真实断线重连仍需用户环境验证；Node.js 语法、Agent CLI、
   relay 本地 WebSocket 闭环已经验证。
+- Tailscale 直连已完成本机 HTTP/WS 自动化闭环，但 Windows 防火墙首次放行、真实
+  Tailscale 地址访问和 Android 后台网络切换仍需真机验收。
 
 ## 测试记录
 
@@ -274,3 +308,12 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：版本更新为 `1.0.5-beta.7+51`，发布中转设置的跳过上传入口；原有离线包上传和 AI 安装流程保持不变。
 - 2026-09-01：Windows 目标设置页增加中转 SSH 服务器选择；点击 Token 刷新后通过选定服务器读取已安装 relay 的 `.env`，切换服务器后要求重新刷新，避免复用旧 Token。版本为 `1.0.5-beta.8+52`，控制器与设置页相关测试 73 项通过；Release APK 位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.8-release.apk`，大小 `80268121` 字节，SHA-256 为 `633931205cc70b9ff8475aba89839053042656ee61ebc930b098668c5863862d`；GitHub Pre-release 已创建：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.8`。
 - 2026-09-01：版本更新为 `1.0.5-beta.9+53`；修复 Windows Agent 在线状态被手机测试连接重复登记清空的问题，中转安装提示词允许在专属服务器上完成反向代理接入，Token 读取改为 `/www` 优先，并同步更新内置 relay 离线包。控制器与中转客户端相关测试 64 项通过，本次修改文件静态分析无问题；Release APK 位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.9-release.apk`，大小 `80268237` 字节，SHA-256 为 `58d01e28d61c5ef40975961ea1d28e0d816a6887ea45e0bd5548ba45813d3483`；GitHub Pre-release：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.9`。
+- 2026-09-01：Windows Agent 增加 `direct` 连接模式和带 Agent Token 鉴权的本地
+  HTTP/WebSocket 服务；手机 Windows 设置增加“中转 / Tailscale 直连”切换，直连
+  复用全部电脑工具且不要求中转 API Token。Windows Agent 直连端到端测试覆盖未
+  授权拒绝、状态接口、WebSocket 鉴权和一次真实 `status` RPC；相关 Flutter 测试
+  84 项通过，单文件 bundle 检查通过。版本更新为 `1.0.5-beta.10+54`；Release APK
+  位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.10-release.apk`，
+  大小 `80448525` 字节，SHA-256 为
+  `d670716101cc957055d04f5d2f94bcb8f9c70ff17ab4b961f3a0399b36d9e912`。
+  Windows/Tailscale 真机连接待发布后验证。

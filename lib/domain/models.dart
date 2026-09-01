@@ -269,6 +269,8 @@ String resolveWorkMode({
 
 const serverTargetTypeSsh = 'ssh';
 const serverTargetTypeWindows = 'windows';
+const windowsConnectionModeRelay = 'relay';
+const windowsConnectionModeDirect = 'direct';
 
 class ServerProfile {
   final String id;
@@ -311,6 +313,8 @@ class ServerProfile {
   });
 
   bool get isWindowsComputer => targetType == serverTargetTypeWindows;
+  bool get isDirectWindowsComputer =>
+      isWindowsComputer && authType == windowsConnectionModeDirect;
 
   factory ServerProfile.fromMap(Map<String, Object?> map) {
     return ServerProfile(

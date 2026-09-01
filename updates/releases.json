@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5-beta.10",
+      "title": "PocketServerOps AI v1.0.5-beta.10",
+      "notes": "新增 Windows 电脑 Tailscale/局域网直连：手机可绕过中转服务器，使用 Agent Token 连接 Windows Agent，并复用 PowerShell、文件、后台进程、状态和断线续接能力；Windows Agent 更新为 beta.3。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.10",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5-beta.10/pocket-server-ops-ai-v1.0.5-beta.10-release.apk",
+      "prerelease": true,
+      "published_at": "2026-09-01T02:34:26Z"
+    },
+    {
       "version": "1.0.5-beta.9",
       "title": "PocketServerOps AI v1.0.5-beta.9",
       "notes": "修复 Windows Agent 已认证但手机误报离线：测试连接不再重复登记设备，relay 重复登记保留在线状态；中转 Token 优先读取 /www 部署，并允许安装 AI 按现有站点配置 Caddy/Nginx 与验证公网健康检查。",

@@ -1,18 +1,22 @@
 {
   "name": "pocket-server-ops-computer-agent",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.3",
   "private": true,
   "description": "PocketServerOps Windows Agent",
   "type": "module",
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node agent.mjs",
     "check": "node --check agent.mjs",
+    "test": "node --test test/*.test.mjs",
     "bundle": "esbuild agent.mjs --bundle --platform=node --format=cjs --target=node22 --outfile=dist/agent.cjs",
     "check:bundle": "npm run bundle && node dist/agent.cjs --version",
     "build:windows": "npm run bundle && node tools/build-sea.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

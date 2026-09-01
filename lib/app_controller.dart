@@ -4243,6 +4243,7 @@ class AppController extends ChangeNotifier {
     if (!profile.isWindowsComputer) {
       throw ArgumentError('目标不是 Windows 电脑');
     }
+    if (profile.isDirectWindowsComputer) return;
     final relay = await _computerRelayFor(profile);
     try {
       final deviceToken = await _readCredential(
@@ -4400,7 +4401,9 @@ class AppController extends ChangeNotifier {
     if (!profile.isWindowsComputer) {
       throw ArgumentError('目标不是 Windows 电脑');
     }
-    final relayUrl = _normalizeComputerRelayUrl(profile.relayUrl ?? '');
+    final endpoint = profile.isDirectWindowsComputer
+        ? _normalizeComputerDirectUrl(profile.relayUrl ?? '')
+        : _normalizeComputerRelayUrl(profile.relayUrl ?? '');
     final deviceId = profile.deviceId?.trim();
     if (deviceId == null || deviceId.isEmpty) {
       throw StateError('Windows 电脑未配置设备 ID');
@@ -4409,7 +4412,25 @@ class AppController extends ChangeNotifier {
       profile.deviceTokenRef,
       'Windows 电脑设备 Token 不可用',
     );
-    final parsed = Uri.parse(relayUrl);
+    final parsed = Uri.parse(endpoint);
+    final common = {
+      'connection_mode': profile.isDirectWindowsComputer
+          ? windowsConnectionModeDirect
+          : windowsConnectionModeRelay,
+      'device_id': deviceId,
+      'device_token': deviceToken,
+      'working_directory':
+          profile.defaultWorkingDirectory?.trim().isNotEmpty == true
+          ? profile.defaultWorkingDirectory!.trim()
+          : r'C:\Users\Public\PocketServerOps',
+    };
+    if (profile.isDirectWindowsComputer) {
+      return {
+        ...common,
+        'direct_listen_host': '0.0.0.0',
+        'direct_listen_port': parsed.port.toString(),
+      };
+    }
     final basePath = parsed.path.replaceFirst(RegExp(r'/+$'), '');
     final agentPath = '$basePath/device/ws'.replaceFirst(RegExp(r'^/+'), '/');
     final agentUrl = parsed
@@ -4418,15 +4439,7 @@ class AppController extends ChangeNotifier {
           path: agentPath,
         )
         .toString();
-    return {
-      'relay_url': agentUrl,
-      'device_id': deviceId,
-      'device_token': deviceToken,
-      'working_directory':
-          profile.defaultWorkingDirectory?.trim().isNotEmpty == true
-          ? profile.defaultWorkingDirectory!.trim()
-          : r'C:\Users\Public\PocketServerOps',
-    };
+    return {...common, 'relay_url': agentUrl};
   }
 
   Future<SshCommandResult> runServerCommand(
@@ -5732,6 +5745,7 @@ class AppController extends ChangeNotifier {
     String passphrase = '',
     bool clearPassphrase = false,
     String targetType = serverTargetTypeSsh,
+    String computerConnectionMode = windowsConnectionModeRelay,
     String? relayUrl,
     String? deviceId,
     String relayApiToken = '',
@@ -5743,8 +5757,15 @@ class AppController extends ChangeNotifier {
       throw ArgumentError('不支持的目标类型');
     }
     final isWindows = targetType == serverTargetTypeWindows;
+    if (isWindows &&
+        computerConnectionMode != windowsConnectionModeRelay &&
+        computerConnectionMode != windowsConnectionModeDirect) {
+      throw ArgumentError('不支持的 Windows 连接方式');
+    }
     final normalizedRelayUrl = isWindows
-        ? _normalizeComputerRelayUrl(relayUrl ?? '')
+        ? computerConnectionMode == windowsConnectionModeDirect
+              ? _normalizeComputerDirectUrl(relayUrl ?? '')
+              : _normalizeComputerRelayUrl(relayUrl ?? '')
         : relayUrl?.trim() ?? '';
     final normalizedDeviceId = deviceId?.trim() ?? '';
     if (!isWindows && authType != 'password' && authType != 'privateKey') {
@@ -5756,7 +5777,7 @@ class AppController extends ChangeNotifier {
     final targetChanged = existing != null && existing.targetType != targetType;
     final authTypeChanged =
         existing != null &&
-        existing.authType != (isWindows ? 'relay' : authType);
+        existing.authType != (isWindows ? computerConnectionMode : authType);
     final endpointChanged = isWindows
         ? existing != null &&
               (existing.relayUrl != normalizedRelayUrl ||
@@ -5791,16 +5812,19 @@ class AppController extends ChangeNotifier {
         ? (existing?.credentialPassphraseRef ?? 'server:$id:passphrase')
         : null;
     final relayTokenRef = isWindows
-        ? (existing?.relayTokenRef ?? 'server:$id:relay-api')
+        ? computerConnectionMode == windowsConnectionModeRelay
+              ? (existing?.relayTokenRef ?? 'server:$id:relay-api')
+              : existing?.relayTokenRef
         : null;
     final deviceTokenRef = isWindows
         ? (existing?.deviceTokenRef ?? 'server:$id:device-token')
         : null;
     if (isWindows) {
       final needsRelayToken =
-          existing == null ||
-          !existing.isWindowsComputer ||
-          existing.relayTokenRef == null;
+          computerConnectionMode == windowsConnectionModeRelay &&
+          (existing == null ||
+              !existing.isWindowsComputer ||
+              existing.relayTokenRef == null);
       final needsDeviceToken =
           existing == null ||
           !existing.isWindowsComputer ||
@@ -5832,8 +5856,8 @@ class AppController extends ChangeNotifier {
     if (!isWindows && secret.isNotEmpty) {
       await _credentials.write(credentialRef!, secret);
     }
-    if (isWindows && relayApiToken.trim().isNotEmpty) {
-      await _credentials.write(relayTokenRef!, relayApiToken.trim());
+    if (isWindows && relayTokenRef != null && relayApiToken.trim().isNotEmpty) {
+      await _credentials.write(relayTokenRef, relayApiToken.trim());
     }
     if (isWindows && deviceToken.trim().isNotEmpty) {
       await _credentials.write(deviceTokenRef!, deviceToken.trim());
@@ -5844,7 +5868,7 @@ class AppController extends ChangeNotifier {
       host: isWindows ? normalizedRelayUrl : host,
       port: isWindows ? 0 : port,
       username: isWindows ? 'windows-agent' : username,
-      authType: isWindows ? 'relay' : authType,
+      authType: isWindows ? computerConnectionMode : authType,
       credentialRef: credentialRef,
       credentialPassphraseRef: passphraseRef,
       hostKey: isWindows || endpointChanged ? null : existing?.hostKey,
@@ -7848,14 +7872,20 @@ class AppController extends ChangeNotifier {
     if (!profile.isWindowsComputer) {
       throw ArgumentError('目标不是 Windows 电脑');
     }
-    final relayUrl = _normalizeComputerRelayUrl(profile.relayUrl ?? '');
+    final relayUrl = profile.isDirectWindowsComputer
+        ? _normalizeComputerDirectUrl(profile.relayUrl ?? '')
+        : _normalizeComputerRelayUrl(profile.relayUrl ?? '');
     final deviceId = profile.deviceId?.trim();
     if (deviceId == null || deviceId.isEmpty) {
       throw StateError('Windows 电脑未配置设备 ID');
     }
     final relayToken = await _readCredential(
-      profile.relayTokenRef,
-      'Windows 电脑中转 API Token 不可用',
+      profile.isDirectWindowsComputer
+          ? profile.deviceTokenRef
+          : profile.relayTokenRef,
+      profile.isDirectWindowsComputer
+          ? 'Windows Agent Token 不可用'
+          : 'Windows 电脑中转 API Token 不可用',
     );
     return ComputerRelayClient(baseUrl: relayUrl, apiToken: relayToken);
   }
@@ -8359,6 +8389,26 @@ String _normalizeComputerRelayUrl(String value) {
   var relayPath = parsed.path.replaceFirst(RegExp(r'/+$'), '');
   if (relayPath.isEmpty) relayPath = '/computer-relay';
   return parsed.replace(path: relayPath).toString();
+}
+
+String _normalizeComputerDirectUrl(String value) {
+  var trimmed = value.trim();
+  while (trimmed.endsWith('#') || trimmed.endsWith('?')) {
+    trimmed = trimmed.substring(0, trimmed.length - 1).trimRight();
+  }
+  final parsed = Uri.tryParse(trimmed);
+  if (parsed == null ||
+      parsed.host.isEmpty ||
+      parsed.scheme != 'http' ||
+      parsed.userInfo.isNotEmpty ||
+      parsed.query.isNotEmpty ||
+      parsed.fragment.isNotEmpty ||
+      (parsed.path.isNotEmpty && parsed.path != '/')) {
+    throw ArgumentError('请输入有效的 Tailscale 或局域网 http 地址');
+  }
+  return parsed
+      .replace(path: '', port: parsed.hasPort ? parsed.port : 8788)
+      .toString();
 }
 
 String? _normalizeStoredComputerRelayUrl(String? value) {

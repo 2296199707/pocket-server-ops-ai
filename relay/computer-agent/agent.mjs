@@ -1,15 +1,19 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fsp from 'node:fs/promises';
+import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
+import { WebSocketServer } from 'ws';
 
-const AGENT_VERSION = '1.0.0-beta.2';
+const AGENT_VERSION = '1.0.0-beta.3';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
 const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
+const DEFAULT_DIRECT_HOST = '0.0.0.0';
+const DEFAULT_DIRECT_PORT = 8788;
 const STARTUP_TASK_NAME = 'PocketServerOps-ComputerAgent';
 const PAIRING_PREFIX = 'POCKET_SERVER_OPS_PAIRING_V1:';
 
@@ -21,6 +25,7 @@ const MAX_POLL_BYTES = 256 * 1024;
 const MAX_FILE_READ_BYTES = 1024 * 1024;
 const MAX_FILE_WRITE_BYTES = 8 * 1024 * 1024;
 const MAX_REPLACE_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_DIRECT_FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_COMPLETED_CALLS = 128;
 const MAX_COMPLETED_RESULT_BYTES = 8 * 1024 * 1024;
 const MAX_COMPLETED_CACHE_BYTES = 32 * 1024 * 1024;
@@ -176,7 +181,16 @@ class TrackedProcess extends EventEmitter {
 class ComputerAgent {
   constructor(config) {
     this.config = config;
-    this.websocketUrl = normalizeWebSocketUrl(config.relay_url);
+    this.connectionMode = normalizeConnectionMode(config.connection_mode);
+    this.websocketUrl = this.connectionMode === 'relay'
+      ? normalizeWebSocketUrl(config.relay_url)
+      : null;
+    this.directListenHost = String(config.direct_listen_host || DEFAULT_DIRECT_HOST).trim();
+    this.directListenPort = normalizePort(
+      config.direct_listen_port,
+      DEFAULT_DIRECT_PORT,
+      'direct_listen_port',
+    );
     this.deviceId = config.device_id;
     this.deviceToken = config.device_token;
     this.agentVersion = config.agent_version || AGENT_VERSION;
@@ -199,6 +213,11 @@ class ComputerAgent {
     this.completedRequestIds = new Set();
     this.completedCallBytes = 0;
     this.reconnectDelayMs = 1_000;
+    this.directServer = null;
+    this.directWss = null;
+    this.stopped = new Promise((resolve) => {
+      this.resolveStopped = resolve;
+    });
   }
 
   async start() {
@@ -206,6 +225,11 @@ class ComputerAgent {
     await fsp.mkdir(this.outputDirectory, { recursive: true });
     log('info', `PocketServerOps Windows Agent ${this.agentVersion} 启动`);
     log('info', `工作目录: ${this.workingDirectory}`);
+    if (this.connectionMode === 'direct') {
+      await this.startDirectServer();
+      await this.stopped;
+      return;
+    }
     await this.runConnectionLoop();
   }
 
@@ -223,7 +247,9 @@ class ComputerAgent {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.socket.close(1000, 'agent stopping');
     }
+    await this.stopDirectServer();
     await fsp.rm(this.outputDirectory, { recursive: true, force: true });
+    this.resolveStopped();
   }
 
   async runConnectionLoop() {
@@ -348,6 +374,166 @@ class ComputerAgent {
   clearHeartbeat() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+  }
+
+  async startDirectServer() {
+    const server = createServer((request, response) => {
+      try {
+        this.handleDirectHttp(request, response);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 500, {
+          error: error?.message ?? String(error),
+        });
+      }
+    });
+    const wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: MAX_DIRECT_FRAME_BYTES,
+    });
+    server.on('upgrade', (request, socket, head) => {
+      let url;
+      try {
+        url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+      } catch {
+        rejectUpgrade(socket, 400, 'Bad Request');
+        return;
+      }
+      const deviceId = directPathDeviceId(url.pathname, '/ws');
+      if (deviceId !== this.deviceId) {
+        rejectUpgrade(socket, 404, 'Not Found');
+        return;
+      }
+      if (!this.isDirectAuthorized(request)) {
+        rejectUpgrade(socket, 401, 'Unauthorized');
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (client) => {
+        wss.emit('connection', client);
+      });
+    });
+    wss.on('connection', (socket) => this.handleDirectSocket(socket));
+    await new Promise((resolve, reject) => {
+      const onError = (error) => reject(error);
+      server.once('error', onError);
+      server.listen(this.directListenPort, this.directListenHost, () => {
+        server.off('error', onError);
+        resolve();
+      });
+    });
+    server.on('error', (error) => log('warn', '电脑直连服务异常', error));
+    this.directServer = server;
+    this.directWss = wss;
+    log(
+      'info',
+      `Tailscale/局域网直连监听: http://${this.directListenHost}:${this.directListenPort}`,
+    );
+  }
+
+  async stopDirectServer() {
+    const server = this.directServer;
+    const wss = this.directWss;
+    this.directServer = null;
+    this.directWss = null;
+    if (wss) {
+      for (const socket of wss.clients) socket.terminate();
+      await new Promise((resolve) => wss.close(resolve));
+    }
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+
+  handleDirectHttp(request, response) {
+    const url = new URL(
+      request.url ?? '/',
+      `http://${request.headers.host ?? 'localhost'}`,
+    );
+    if (request.method === 'GET' && url.pathname === '/v1/health') {
+      sendJson(response, 200, { status: 'ok', mode: 'direct' });
+      return;
+    }
+    if (!this.isDirectAuthorized(request)) {
+      sendJson(response, 401, { error: 'unauthorized' });
+      return;
+    }
+    const deviceId = directPathDeviceId(url.pathname, '/status');
+    if (request.method === 'GET' && deviceId === this.deviceId) {
+      sendJson(response, 200, {
+        device_id: this.deviceId,
+        name: os.hostname(),
+        online: true,
+        last_seen: new Date().toISOString(),
+        agent_version: this.agentVersion,
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: this.capabilities(),
+      });
+      return;
+    }
+    sendJson(response, 404, { error: 'not found' });
+  }
+
+  isDirectAuthorized(request) {
+    const authorization = request.headers.authorization;
+    if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) {
+      return false;
+    }
+    return safeSecretEqual(authorization.slice(7).trim(), this.deviceToken);
+  }
+
+  handleDirectSocket(socket) {
+    let authenticated = false;
+    const timer = setTimeout(() => {
+      if (!authenticated) socket.close(4001, 'hello required');
+    }, 5_000);
+    timer.unref?.();
+    socket.on('message', (raw, isBinary) => {
+      if (isBinary) {
+        socket.close(1003, 'text messages required');
+        return;
+      }
+      void (async () => {
+        const text = await websocketDataToText(raw);
+        const frame = JSON.parse(text);
+        if (!authenticated) {
+          if (frame?.type !== 'hello' || frame.device_id !== this.deviceId) {
+            socket.close(4003, 'device mismatch');
+            return;
+          }
+          authenticated = true;
+          clearTimeout(timer);
+          this.sendFrameIfOpen(socket, {
+            type: 'authenticated',
+            device_id: this.deviceId,
+          });
+          return;
+        }
+        if (frame?.type === 'request') {
+          await this.handleCall(socket, frame);
+          return;
+        }
+        if (frame?.type === 'cancel') {
+          this.handleCancel(frame);
+          return;
+        }
+        socket.close(1008, 'unsupported frame');
+      })().catch((error) => {
+        log('warn', '处理手机直连帧失败', error);
+        socket.close(1007, 'invalid frame');
+      });
+    });
+    socket.once('close', () => {
+      clearTimeout(timer);
+      for (const sockets of this.inFlightSockets.values()) sockets.delete(socket);
+    });
+    socket.on('error', () => {});
+  }
+
+  capabilities() {
+    return {
+      operations: AGENT_OPERATIONS,
+      platform: process.platform,
+      agent_version: this.agentVersion,
+    };
   }
 
   async handleFrame(socket, rawData, onAuthenticated) {
@@ -1090,6 +1276,59 @@ function normalizeWebSocketUrl(value) {
   return url.toString();
 }
 
+function normalizeConnectionMode(value) {
+  const mode = String(value || 'relay').trim().toLowerCase();
+  if (mode !== 'relay' && mode !== 'direct') {
+    throw new AgentError('invalid_config', 'connection_mode 必须是 relay 或 direct');
+  }
+  return mode;
+}
+
+function normalizePort(value, fallback, name) {
+  const port = value === undefined || value === null || value === ''
+    ? fallback
+    : Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new AgentError('invalid_config', `${name} 必须是 1 到 65535 的端口`);
+  }
+  return port;
+}
+
+function directPathDeviceId(pathname, suffix) {
+  const prefix = '/v1/devices/';
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return null;
+  const encoded = pathname.slice(prefix.length, -suffix.length);
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
+function safeSecretEqual(left, right) {
+  const leftHash = createHash('sha256').update(String(left)).digest();
+  const rightHash = createHash('sha256').update(String(right)).digest();
+  return timingSafeEqual(leftHash, rightHash);
+}
+
+function sendJson(response, statusCode, value) {
+  if (response.headersSent) return;
+  const body = JSON.stringify(value);
+  response.writeHead(statusCode, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+  });
+  response.end(body);
+}
+
+function rejectUpgrade(socket, statusCode, statusText) {
+  socket.write(
+    `HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+  );
+  socket.destroy();
+}
+
 async function loadConfig(configPath) {
   const source = await fsp.readFile(configPath, 'utf8');
   let config;
@@ -1098,12 +1337,29 @@ async function loadConfig(configPath) {
   } catch {
     throw new AgentError('invalid_config', `配置文件不是有效 JSON: ${configPath}`);
   }
-  for (const key of ['relay_url', 'device_id', 'device_token', 'working_directory']) {
+  for (const key of ['device_id', 'device_token', 'working_directory']) {
     if (typeof config[key] !== 'string' || config[key].trim().length === 0) {
       throw new AgentError('invalid_config', `配置缺少 ${key}`);
     }
   }
-  return { ...config, agent_version: config.agent_version || AGENT_VERSION };
+  const connectionMode = normalizeConnectionMode(config.connection_mode);
+  if (
+    connectionMode === 'relay' &&
+    (typeof config.relay_url !== 'string' || config.relay_url.trim().length === 0)
+  ) {
+    throw new AgentError('invalid_config', 'relay 模式配置缺少 relay_url');
+  }
+  return {
+    ...config,
+    connection_mode: connectionMode,
+    direct_listen_host: String(config.direct_listen_host || DEFAULT_DIRECT_HOST).trim(),
+    direct_listen_port: normalizePort(
+      config.direct_listen_port,
+      DEFAULT_DIRECT_PORT,
+      'direct_listen_port',
+    ),
+    agent_version: config.agent_version || AGENT_VERSION,
+  };
 }
 
 function parseArgs(argv) {
@@ -1138,7 +1394,7 @@ function printHelp() {
   console.log('PocketServerOps Windows Agent');
   console.log('用法: PocketServerOps-Computer.exe [--setup|--run|--uninstall]');
   console.log('首次运行会要求粘贴手机 App 显示的电脑配对信息。');
-  console.log('配置字段: relay_url, device_id, device_token, working_directory');
+  console.log('支持中转连接和 Tailscale/局域网直连。');
 }
 
 function runtimeModulePath() {
@@ -1202,7 +1458,7 @@ function parsePairingText(text) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new AgentError('invalid_pairing', '配对信息格式不正确');
   }
-  const relayUrl = normalizePairingUrl(parsed.relay_url);
+  const connectionMode = normalizeConnectionMode(parsed.connection_mode);
   const deviceId = normalizePairingValue(parsed.device_id, 'device_id');
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
     throw new AgentError('invalid_pairing', '设备 ID 只能包含字母、数字、点、下划线、冒号和短横线');
@@ -1211,8 +1467,8 @@ function parsePairingText(text) {
   if (deviceToken.length < 16) {
     throw new AgentError('invalid_pairing', '设备 Token 至少需要 16 个字符');
   }
-  return {
-    relay_url: relayUrl,
+  const config = {
+    connection_mode: connectionMode,
     device_id: deviceId,
     device_token: deviceToken,
     working_directory:
@@ -1220,6 +1476,20 @@ function parsePairingText(text) {
         ? parsed.working_directory.trim()
         : DEFAULT_WINDOWS_WORKING_DIRECTORY,
   };
+  if (connectionMode === 'relay') {
+    config.relay_url = normalizePairingUrl(parsed.relay_url);
+  } else {
+    config.direct_listen_host = typeof parsed.direct_listen_host === 'string'
+      && parsed.direct_listen_host.trim()
+      ? parsed.direct_listen_host.trim()
+      : DEFAULT_DIRECT_HOST;
+    config.direct_listen_port = normalizePort(
+      parsed.direct_listen_port,
+      DEFAULT_DIRECT_PORT,
+      'direct_listen_port',
+    );
+  }
+  return config;
 }
 
 async function runSetupWizard(configPath) {
@@ -1235,14 +1505,25 @@ async function runSetupWizard(configPath) {
     if (pasted.trim()) {
       config = parsePairingText(pasted);
     } else {
-      config = parsePairingText(JSON.stringify({
-        relay_url: await prompt.question('中转地址（wss:// 或 https://）: '),
+      const connectionMode = (
+        await prompt.question('连接方式（relay/direct，回车使用 relay）: ')
+      ).trim() || 'relay';
+      const values = {
+        connection_mode: connectionMode,
         device_id: await prompt.question('Windows 设备 ID: '),
         device_token: await prompt.question('Windows Agent Token: '),
         working_directory: await prompt.question(
           `默认工作目录（回车使用 ${DEFAULT_WINDOWS_WORKING_DIRECTORY}）: `,
         ),
-      }));
+      };
+      if (connectionMode === 'direct') {
+        values.direct_listen_port = await prompt.question(
+          `直连监听端口（回车使用 ${DEFAULT_DIRECT_PORT}）: `,
+        );
+      } else {
+        values.relay_url = await prompt.question('中转地址（wss:// 或 https://）: ');
+      }
+      config = parsePairingText(JSON.stringify(values));
     }
     await fsp.mkdir(path.dirname(configPath), { recursive: true });
     await fsp.writeFile(
@@ -1253,7 +1534,11 @@ async function runSetupWizard(configPath) {
     await secureConfigFile(configPath);
     if (isStandaloneExecutable()) await installStartupTask();
     console.log(`配置已保存: ${configPath}`);
-    console.log('Agent 将保持运行并主动连接中转服务器。');
+    console.log(
+      config.connection_mode === 'direct'
+        ? `Agent 将监听直连端口 ${config.direct_listen_port}。`
+        : 'Agent 将保持运行并主动连接中转服务器。',
+    );
   } finally {
     prompt.close();
   }
@@ -1429,9 +1714,13 @@ async function main() {
   await agent.start();
 }
 
+export { ComputerAgent, parsePairingText };
+
 if (
   isStandaloneExecutable() ||
-  (process.argv[1] && path.resolve(process.argv[1]) === runtimeModulePath())
+  ['agent.mjs', 'agent.cjs'].includes(
+    path.basename(process.argv[1] ?? '').toLowerCase(),
+  )
 ) {
   main().catch((error) => {
     log('error', error.message ?? String(error), error);

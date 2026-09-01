@@ -1,8 +1,8 @@
 # PocketServerOps Windows Agent beta
 
-这是 PocketServerOps 的 Windows 电脑端后台 Agent。它使用 Node.js 22
-自带的全局 `WebSocket`，由 Windows 主动连接中转服务器，不需要在中转服务器
-上反向连接 Windows。
+这是 PocketServerOps 的 Windows 电脑端后台 Agent。它支持两种连接方式：Windows
+主动连接中转服务器，或在 Tailscale/局域网内监听手机直连。两种方式复用同一套
+PowerShell、文件、后台进程和状态协议。
 
 推荐使用独立 EXE。电脑首次运行 EXE 时会进入配对向导，粘贴手机 App 的“电脑
 配对信息”即可；EXE 自带 Node.js 运行时，不需要另外安装 Node.js。当前仓库的
@@ -13,13 +13,15 @@ Actions 的 artifact 下载。
 
 - Windows 10/11；
 - 独立 EXE 不需要安装 Node.js；
-- 源码运行或使用旧安装脚本时需要 Node.js 22；
-- 中转服务器提供 `wss://.../device/ws`；
+- 源码运行或使用旧安装脚本时需要 Node.js 22 或更高版本；
+- 中转模式需要服务器提供 `wss://.../device/ws`；
+- 直连模式需要手机和电脑加入同一 Tailscale 网络，或处于同一局域网；
 - 设备已经在 PocketServerOps 中完成配对，并取得 `device_id` 和
   `device_token`。
 
-Agent 运行时不引入 npm 依赖。构建工具只用于生成独立 EXE。`device_token` 保存在当前用户安装目录的
-`config.json` 中，安装脚本会移除继承权限并只授予当前用户访问。
+独立 EXE 已把运行依赖打入单文件；源码运行会通过 `npm ci --omit=dev` 安装轻量
+WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.json` 中，安装
+脚本会移除继承权限并只授予当前用户访问。
 
 ## 独立 EXE 首次配置
 
@@ -27,7 +29,7 @@ Agent 运行时不引入 npm 依赖。构建工具只用于生成独立 EXE。`d
 在 PowerShell 中运行 EXE：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.2-win-x64.exe
+.\PocketServerOps-Computer-v1.0.0-beta.3-win-x64.exe
 ```
 
 当前构建未使用商业代码签名证书，Windows 首次运行可能显示 SmartScreen 提示；
@@ -35,19 +37,19 @@ Agent 运行时不引入 npm 依赖。构建工具只用于生成独立 EXE。`d
 
 在手机 App 的 Windows 电脑目标中保存配置后，打开“电脑配对信息”，点击“复制
 配置”，把得到的一行 JSON 粘贴到 EXE。程序会保存配置并注册当前用户登录时自动
-启动的任务。Windows Agent 只接收 `relay_url`、`device_id`、`device_token` 和
-`working_directory`，不会接收中转 API Token。
+启动的任务。Windows Agent 只接收连接方式、设备 ID、设备 Token 和工作目录；
+中转模式额外接收 `relay_url`，直连模式额外接收监听端口。它不会接收中转 API Token。
 
 以后需要重新配置时运行：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.2-win-x64.exe --setup
+.\PocketServerOps-Computer-v1.0.0-beta.3-win-x64.exe --setup
 ```
 
 卸载登录启动任务：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.2-win-x64.exe --uninstall
+.\PocketServerOps-Computer-v1.0.0-beta.3-win-x64.exe --uninstall
 ```
 
 ## 源码运行或旧脚本安装
@@ -62,9 +64,9 @@ Agent 运行时不引入 npm 依赖。构建工具只用于生成独立 EXE。`d
   -WorkingDirectory 'C:\\Users\\Public\\PocketServerOps'
 ```
 
-安装脚本会优先寻找已有的 Node.js 22，复制 Agent 到
+安装脚本会优先寻找已有的 Node.js 22 或更高版本，复制 Agent 到
 `%LOCALAPPDATA%\\PocketServerOps\\computer-agent`，然后注册当前用户登录时
-启动的 Scheduled Task。脚本不会自动下载 Node.js；找不到 Node.js 22 时会直接
+启动的 Scheduled Task。脚本不会自动下载 Node.js；找不到兼容版本时会直接
 报错。
 
 也可以先复制 `config.example.json` 为本目录的 `config.json`，填好配置后运行：
@@ -91,23 +93,50 @@ node .\\agent.mjs --config .\\config.json
 .\\uninstall.ps1 -RemoveFiles
 ```
 
+## Tailscale 直连
+
+1. 在手机和 Windows 电脑安装 Tailscale，并登录同一网络。
+2. 在电脑运行 `tailscale ip -4`，取得类似 `100.64.0.10` 的地址。
+3. 手机添加 Windows 目标时选择“Tailscale 直连”，填写
+   `http://100.64.0.10:8788`。
+4. 保存后复制电脑配对信息，粘贴到 `beta.3` 或更新版本的 Windows Agent。
+5. Windows 首次提示防火墙权限时允许专用网络访问，然后在手机测试连接。
+
+直连端点仍使用 Agent Token 认证，Tailscale 负责链路加密。不要把直连端口映射到
+公网；本版本不提供公网 TLS 服务。
+
 ## 配置
 
 配置文件至少包含：
 
 ```json
 {
+  "connection_mode": "relay",
   "relay_url": "wss://relay.example.com",
   "device_id": "windows-device-001",
   "device_token": "device-token",
-  "agent_version": "1.0.0-beta.1",
+  "agent_version": "1.0.0-beta.3",
   "protocol_version": "1",
   "working_directory": "C:\\Users\\Public\\PocketServerOps"
 }
 ```
 
-`relay_url` 必须是 `wss://`。如果没有写 `/device/ws`，Agent 会自动追加；完整
+`connection_mode` 可设为 `relay` 或 `direct`。中转模式下 `relay_url` 必须是
+`wss://`；如果没有写 `/device/ws`，Agent 会自动追加，完整
 地址也可以直接填写。
+
+直连配置不需要 `relay_url`：
+
+```json
+{
+  "connection_mode": "direct",
+  "direct_listen_host": "0.0.0.0",
+  "direct_listen_port": 8788,
+  "device_id": "windows-device-001",
+  "device_token": "replace-with-device-token",
+  "working_directory": "C:\\Users\\Public\\PocketServerOps"
+}
+```
 
 `working_directory` 是命令默认工作目录，也是相对文件路径的基准目录。Windows
 端 beta 没有把它伪装成 Linux shell：命令固定由 `powershell.exe` 执行，文件路径
@@ -116,14 +145,14 @@ node .\\agent.mjs --config .\\config.json
 
 ## WebSocket 协议
 
-连接地址为 `wss://<relay>/device/ws`。连接成功后首帧严格为：
+中转模式连接地址为 `wss://<relay>/device/ws`。连接成功后首帧严格为：
 
 ```json
 {
   "type": "authenticate",
   "device_id": "windows-device-001",
   "device_token": "device-token",
-  "agent_version": "1.0.0-beta.1",
+  "agent_version": "1.0.0-beta.3",
   "protocol_version": "1"
 }
 ```
@@ -170,6 +199,11 @@ Agent 返回：
 服务端可以发送 `{ "type": "cancel", "request_id": "request-001" }` 取消
 正在等待的调用。
 
+直连模式提供 `GET /v1/devices/<device_id>/status` 和
+`WS /v1/devices/<device_id>/ws`。手机使用 `Authorization: Bearer <device_token>`
+认证，WebSocket 首帧为 `hello`，后续 `request`、`result` 和 `cancel` 格式与
+中转手机通道一致。
+
 ## 操作
 
 支持以下 operation：
@@ -211,8 +245,7 @@ Agent 不会因为断线自动重放任何调用，尤其不会自动重放 `exe
 - 不支持 PTY、桌面画面、鼠标键盘控制和端口转发；
 - Agent 进程被系统终止后，后台进程和 `process_id` 不会恢复。
 
-## 未包含的服务端部分
+## 中转服务端
 
-本目录只提供 Windows Agent。中转服务器仍需实现同一 WebSocket 协议的
-`/device/ws` 端点、设备认证、调用队列和结果转发；Agent 不会兼容旧的 HTTP
-轮询接口。
+使用中转模式时，服务器仍需实现同一 WebSocket 协议的 `/device/ws` 端点、设备
+认证、调用队列和结果转发。直连模式不需要这部分服务。

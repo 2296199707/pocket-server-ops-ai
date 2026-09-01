@@ -1657,7 +1657,10 @@ class ServersPage extends StatelessWidget {
     } catch (error) {
       if (context.mounted) {
         final message = server.isWindowsComputer
-            ? _computerConnectionErrorText(error)
+            ? _computerConnectionErrorText(
+                error,
+                direct: server.isDirectWindowsComputer,
+              )
             : '连接失败：$error';
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(message)));
@@ -1665,8 +1668,15 @@ class ServersPage extends StatelessWidget {
     }
   }
 
-  String _computerConnectionErrorText(Object error) {
-    if (error is ComputerRelayException) return error.userMessage;
+  String _computerConnectionErrorText(Object error, {required bool direct}) {
+    if (error is ComputerRelayException) {
+      final message = error.userMessage;
+      return direct
+          ? message
+                .replaceAll('中转服务器', 'Windows Agent')
+                .replaceAll('电脑中转', '电脑直连')
+          : message;
+    }
     if (error is StateError || error is ArgumentError) {
       return '电脑连接配置错误：${error.toString().replaceFirst(RegExp(r'^(Bad state: |Invalid argument: )'), '')}';
     }
