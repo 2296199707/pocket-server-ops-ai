@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 
-const AGENT_VERSION = '1.0.0-beta.5';
+const AGENT_VERSION = '1.0.0-beta.6';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
 const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
@@ -1142,7 +1142,7 @@ function spawnPowerShell(command, workingDirectory, keepStdinOpen) {
 
 async function runPowerShell(command, { workingDirectory, input, timeoutMs, context }) {
   context.throwIfCancelled();
-  const child = spawnPowerShell(command, workingDirectory, Boolean(input));
+  const child = spawnPowerShell(command, workingDirectory, input !== undefined);
   const stdoutChunks = [];
   const stderrChunks = [];
   let stdoutBytes = 0;
@@ -1176,6 +1176,9 @@ async function runPowerShell(command, { workingDirectory, input, timeoutMs, cont
   });
   child.once('error', (error) => {
     spawnError = error;
+  });
+  child.stdin?.once('error', (error) => {
+    spawnError = spawnError ?? error;
   });
 
   if (input !== undefined) child.stdin?.end(input, 'utf8');

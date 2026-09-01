@@ -29,7 +29,7 @@ WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.j
 在 PowerShell 中运行 EXE：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.5-win-x64.exe
+.\PocketServerOps-Computer-v1.0.0-beta.6-win-x64.exe
 ```
 
 当前构建未使用商业代码签名证书，Windows 首次运行可能显示 SmartScreen 提示；
@@ -44,7 +44,7 @@ WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.j
 以后需要重新配置时运行：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.5-win-x64.exe --setup
+.\PocketServerOps-Computer-v1.0.0-beta.6-win-x64.exe --setup
 ```
 
 如果 Agent 运行一段时间后退出，先查看：
@@ -59,7 +59,7 @@ WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.j
 卸载登录启动任务：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.5-win-x64.exe --uninstall
+.\PocketServerOps-Computer-v1.0.0-beta.6-win-x64.exe --uninstall
 ```
 
 ## 源码运行或旧脚本安装
@@ -109,7 +109,7 @@ node .\\agent.mjs --config .\\config.json
 2. 在电脑运行 `tailscale ip -4`，取得类似 `100.64.0.10` 的地址。
 3. 手机添加 Windows 目标时选择“Tailscale 直连”，填写
    `http://100.64.0.10:8788`。
-4. 保存后复制电脑配对信息，粘贴到 `beta.5` 或更新版本的 Windows Agent。
+4. 保存后复制电脑配对信息，粘贴到 `beta.6` 或更新版本的 Windows Agent。
 5. Windows 首次提示防火墙权限时允许专用网络访问，然后在手机测试连接。
 
 直连端点仍使用 Agent Token 认证，Tailscale 负责链路加密。不要把直连端口映射到
@@ -125,7 +125,7 @@ node .\\agent.mjs --config .\\config.json
   "relay_url": "wss://relay.example.com",
   "device_id": "windows-device-001",
   "device_token": "device-token",
-  "agent_version": "1.0.0-beta.5",
+  "agent_version": "1.0.0-beta.6",
   "protocol_version": "1",
   "working_directory": "C:\\Users\\Public\\PocketServerOps"
 }
@@ -162,7 +162,7 @@ node .\\agent.mjs --config .\\config.json
   "type": "authenticate",
   "device_id": "windows-device-001",
   "device_token": "device-token",
-  "agent_version": "1.0.0-beta.5",
+  "agent_version": "1.0.0-beta.6",
   "protocol_version": "1"
 }
 ```

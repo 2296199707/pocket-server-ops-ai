@@ -330,3 +330,8 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-09-01：根据 Windows 真机日志修复后台进程 stdin 的 `write after end`：
   `process.write` 现在识别已结束或已完成的 stdin，并把竞态写入失败作为普通工具
   错误返回；后台 stdin 增加错误监听，避免 Node 未捕获流错误导致 EXE 退出。
+- 同一日志还确认 `exec` 的空字符串 `input` 会触发一次重复 `stdin.end()`；现在按
+  “参数是否存在”而不是字符串真假判断是否保留 stdin，并捕获一次性命令的 stdin
+  错误，避免空输入任务再次退出 Agent。
+- 该修复版本更新为 Windows Agent `1.0.0-beta.6`；源码回归测试、语法检查和
+  bundle 检查通过，Windows 真机仍需用 beta.6 EXE 验证。
