@@ -249,4 +249,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：版本更新为 `1.0.5-beta.6+50`；主页面左侧 Drawer 的边缘滑动触发区域调整为 72px，并显式开启向右滑动打开侧栏。
 - 2026-08-31：中转设置增加“中转已安装，跳过上传并读取配置”入口；换手机后选择已绑定 SSH 服务器即可直接读取 `/opt` 或 `/www` 安装目录中的 Token，不要求重复上传离线包。
 - 2026-08-31：版本更新为 `1.0.5-beta.7+51`，发布中转设置的跳过上传入口；原有离线包上传和 AI 安装流程保持不变。
-- 2026-09-01：Windows 目标设置页增加中转 SSH 服务器选择；点击 Token 刷新后通过选定服务器读取已安装 relay 的 `.env`，切换服务器后要求重新刷新，避免复用旧 Token。同步发布 `1.0.5-beta.8+52`。
+- 2026-09-01：Windows 目标设置页增加中转 SSH 服务器选择；点击 Token 刷新后通过选定服务器读取已安装 relay 的 `.env`，切换服务器后要求重新刷新，避免复用旧 Token。版本为 `1.0.5-beta.8+52`，控制器与设置页相关测试 73 项通过；Release APK 位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.8-release.apk`，大小 `80268121` 字节，SHA-256 为 `633931205cc70b9ff8475aba89839053042656ee61ebc930b098668c5863862d`；GitHub Pre-release 已创建：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.8`。
