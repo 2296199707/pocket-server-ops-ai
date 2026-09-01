@@ -340,3 +340,10 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
   支持从界面粘贴手机配对 JSON、打开日志和配置目录；新增 `--setup-stdin
   --configure-only` 供图形界面安全写入配置，不把 Token 放入命令行参数。Windows
   客户端与 Agent 一起打包，协议和手机端工具保持不变，版本更新为 `1.0.0-beta.7`。
+- 2026-09-01：首次 Windows CI 因主界面两个控件在辅助方法中初始化却声明为
+  `readonly`，触发 C# `CS0191`；已做最小修复并重新推送。Windows CI
+  `33510053661` 构建成功，产物已下载到数据盘
+  `/www/mobile-agent-tooling/windows-agent-artifacts/v1.0.0-beta.7/`，压缩包内含
+  Agent EXE、Client EXE 和 README，ZIP 可正常读取。当前仍未宣称 Windows 真机
+  验收完成；登录启动、托盘、PowerShell 执行和真实中转连接需要在用户 Windows
+  环境验证。
