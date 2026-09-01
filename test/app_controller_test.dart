@@ -1660,7 +1660,7 @@ void main() {
 
       final profile = controller.servers.single;
       expect(profile.isWindowsComputer, isTrue);
-      expect(profile.host, 'https://relay.example.com');
+      expect(profile.host, 'https://relay.example.com/computer-relay');
       expect(profile.credentialRef, isNull);
       expect(
         await credentials.read(profile.relayTokenRef!),
@@ -1675,6 +1675,37 @@ void main() {
       controller.dispose();
     },
   );
+
+  test('Windows relay URLs discard empty web suffixes', () async {
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+
+    await controller.load();
+    await controller.saveServer(
+      name: '办公电脑',
+      host: '',
+      port: 0,
+      username: '',
+      secret: '',
+      workingDirectory: r'C:\workspace',
+      targetType: serverTargetTypeWindows,
+      relayUrl: 'https://relay.example.com/computer-relay#?',
+      deviceId: 'computer-1',
+      relayApiToken: 'relay-api-secret',
+      deviceToken: 'device-secret-123456',
+    );
+
+    final profile = controller.servers.single;
+    expect(profile.relayUrl, 'https://relay.example.com/computer-relay');
+    final pairing = await controller.computerPairingInfo(profile);
+    expect(
+      pairing['relay_url'],
+      'wss://relay.example.com/computer-relay/device/ws',
+    );
+    controller.dispose();
+  });
 
   test('computer pairing info excludes the relay API token', () async {
     final database = MemoryAppDatabase();

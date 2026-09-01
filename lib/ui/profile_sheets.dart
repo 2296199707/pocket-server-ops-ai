@@ -569,7 +569,23 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
   String _authType = 'password';
   bool _clearPassphrase = false;
   bool _saving = false;
+  bool _refreshingRelayToken = false;
+  String? _relayServerId;
+  bool _relayServerSelectionChanged = false;
   String? _error;
+
+  List<ServerProfile> get _relayServers => widget.controller.servers
+      .where((server) => !server.isWindowsComputer)
+      .toList(growable: false);
+
+  ServerProfile? get _selectedRelayServer {
+    final id = _relayServerId;
+    if (id == null) return null;
+    for (final server in _relayServers) {
+      if (server.id == id) return server;
+    }
+    return null;
+  }
 
   @override
   void initState() {
@@ -590,6 +606,11 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     _authType = profile?.isWindowsComputer == true
         ? 'password'
         : profile?.authType ?? 'password';
+    final savedRelayServerId = widget.controller.computerRelayServerId;
+    _relayServerId =
+        _relayServers.any((server) => server.id == savedRelayServerId)
+        ? savedRelayServerId
+        : null;
     if (profile == null && _targetType == serverTargetTypeWindows) {
       _ensureWindowsPairingFields();
     }
@@ -624,6 +645,15 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     if (_relayUrl.text.trim().isEmpty &&
         widget.controller.computerRelayUrl != null) {
       _relayUrl.text = widget.controller.computerRelayUrl!;
+    }
+    if (_relayUrl.text.trim().isEmpty) {
+      final server = _selectedRelayServer;
+      if (server != null) {
+        final suggested = _suggestedComputerRelayUrl(server);
+        if (suggested.isNotEmpty) {
+          _relayUrl.text = suggested;
+        }
+      }
     }
   }
 
@@ -675,6 +705,50 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
               },
             ),
             if (_targetType == serverTargetTypeWindows) ...[
+              DropdownButtonFormField<String>(
+                initialValue: _relayServerId,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: '中转服务器（SSH）'),
+                hint: const Text('请选择已绑定的 SSH 服务器'),
+                items: [
+                  for (final server in _relayServers)
+                    DropdownMenuItem(
+                      value: server.id,
+                      child: Text(
+                        '${server.name} · ${server.host}:${server.port}',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: _saving || _refreshingRelayToken
+                    ? null
+                    : (value) {
+                        if (value == null) return;
+                        final server = _relayServers.firstWhere(
+                          (item) => item.id == value,
+                        );
+                        setState(() {
+                          _relayServerId = value;
+                          _relayServerSelectionChanged = true;
+                          _relayApiToken.clear();
+                          if (_relayUrl.text.trim().isEmpty) {
+                            final suggested = _suggestedComputerRelayUrl(
+                              server,
+                            );
+                            if (suggested.isNotEmpty) {
+                              _relayUrl.text = suggested;
+                            }
+                          }
+                          _error = null;
+                        });
+                      },
+                validator: (value) =>
+                    _targetType == serverTargetTypeWindows &&
+                        _relayServers.isNotEmpty
+                    ? _required(value)
+                    : null,
+              ),
+              if (_relayServers.isEmpty) const Text('请先添加一个 SSH 服务器作为中转服务器。'),
               TextFormField(
                 controller: _relayUrl,
                 keyboardType: TextInputType.url,
@@ -711,13 +785,28 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
                 obscureText: true,
                 decoration: InputDecoration(
                   labelText: '中转 API Token（仅手机）',
-                  hintText: widget.existing == null ? null : '留空则保留已有 Token',
+                  hintText: widget.existing == null
+                      ? '选择中转服务器后点击刷新自动获取'
+                      : '留空则保留已有 Token',
+                  suffixIcon: IconButton(
+                    tooltip: '从已选中转服务器读取 Token',
+                    onPressed: _saving || _refreshingRelayToken
+                        ? null
+                        : _refreshRelayToken,
+                    icon: _refreshingRelayToken
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh_outlined),
+                  ),
                 ),
                 validator: (value) {
                   if (_targetType == serverTargetTypeWindows &&
-                      widget.existing == null &&
+                      (widget.existing == null ||
+                          _relayServerSelectionChanged) &&
                       (value?.trim().isEmpty ?? true)) {
-                    return '请输入中转 API Token';
+                    return '请先选择中转服务器后点击刷新';
                   }
                   return null;
                 },
@@ -851,15 +940,6 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
   }
 
   Future<void> _save() async {
-    if (widget.existing == null &&
-        _targetType == serverTargetTypeWindows &&
-        _relayApiToken.text.trim().isEmpty) {
-      final configured = await widget.controller.configuredComputerRelay();
-      if (configured != null) {
-        _relayUrl.text = configured.relayUrl;
-        _relayApiToken.text = configured.apiToken;
-      }
-    }
     if (!_formKey.currentState!.validate()) return;
     setState(() {
       _saving = true;
@@ -913,9 +993,52 @@ class _ServerEditorSheetState extends State<_ServerEditorSheet> {
     final setup = await showComputerRelaySetupSheet(context, widget.controller);
     if (!mounted || setup == null) return;
     setState(() {
+      _relayServerId = setup.serverId;
       _relayUrl.text = setup.relayUrl;
       _relayApiToken.text = setup.apiToken;
+      _relayServerSelectionChanged = false;
+      _error = null;
     });
+  }
+
+  Future<void> _refreshRelayToken() async {
+    final server = _selectedRelayServer;
+    if (server == null) {
+      setState(
+        () => _error = _relayServers.isEmpty
+            ? '请先添加一个 SSH 服务器作为中转服务器'
+            : '请先选择中转服务器',
+      );
+      return;
+    }
+
+    var publicUrl = _relayUrl.text.trim();
+    if (publicUrl.isEmpty) publicUrl = widget.controller.computerRelayUrl ?? '';
+    if (publicUrl.isEmpty) {
+      setState(() => _error = '请先选择中转服务器并填写公网中转地址');
+      return;
+    }
+    setState(() {
+      _refreshingRelayToken = true;
+      _error = null;
+    });
+    try {
+      final setup = await widget.controller.readComputerRelaySetup(
+        server: server,
+        publicUrl: publicUrl,
+        onFirstHostKey: (key) => _confirmRelayHostKey(context, key),
+      );
+      if (!mounted) return;
+      setState(() {
+        _relayUrl.text = setup.relayUrl;
+        _relayApiToken.text = setup.apiToken;
+        _relayServerSelectionChanged = false;
+      });
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _refreshingRelayToken = false);
+    }
   }
 }
 

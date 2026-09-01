@@ -705,9 +705,14 @@ class AppController extends ChangeNotifier {
     final savedComputerRelayUrl = await _database.readSetting(
       _computerRelayUrlSetting,
     );
-    _computerRelayUrl = savedComputerRelayUrl?.trim().isEmpty == true
-        ? null
-        : savedComputerRelayUrl?.trim();
+    _computerRelayUrl = _normalizeStoredComputerRelayUrl(savedComputerRelayUrl);
+    if (savedComputerRelayUrl != null &&
+        _computerRelayUrl != null &&
+        savedComputerRelayUrl.trim() != _computerRelayUrl) {
+      unawaited(
+        _database.writeSetting(_computerRelayUrlSetting, _computerRelayUrl!),
+      );
+    }
     final savedPendingComputerRelayPackage = await _database.readSetting(
       _computerRelayPendingPackageSetting,
     );
@@ -4407,11 +4412,8 @@ class AppController extends ChangeNotifier {
     if (!profile.isWindowsComputer) {
       throw ArgumentError('目标不是 Windows 电脑');
     }
-    final relayUrl = profile.relayUrl?.trim();
+    final relayUrl = _normalizeComputerRelayUrl(profile.relayUrl ?? '');
     final deviceId = profile.deviceId?.trim();
-    if (relayUrl == null || relayUrl.isEmpty) {
-      throw StateError('Windows 电脑未配置中转服务器地址');
-    }
     if (deviceId == null || deviceId.isEmpty) {
       throw StateError('Windows 电脑未配置设备 ID');
     }
@@ -5753,19 +5755,15 @@ class AppController extends ChangeNotifier {
       throw ArgumentError('不支持的目标类型');
     }
     final isWindows = targetType == serverTargetTypeWindows;
-    final normalizedRelayUrl = relayUrl?.trim() ?? '';
+    final normalizedRelayUrl = isWindows
+        ? _normalizeComputerRelayUrl(relayUrl ?? '')
+        : relayUrl?.trim() ?? '';
     final normalizedDeviceId = deviceId?.trim() ?? '';
     if (!isWindows && authType != 'password' && authType != 'privateKey') {
       throw ArgumentError('不支持的服务器认证方式');
     }
-    if (isWindows) {
-      final relayUri = Uri.tryParse(normalizedRelayUrl);
-      if (relayUri == null ||
-          relayUri.host.isEmpty ||
-          (relayUri.scheme != 'http' && relayUri.scheme != 'https')) {
-        throw ArgumentError('请输入有效的中转服务器 http(s) 地址');
-      }
-      if (normalizedDeviceId.isEmpty) throw ArgumentError('设备 ID 不能为空');
+    if (isWindows && normalizedDeviceId.isEmpty) {
+      throw ArgumentError('设备 ID 不能为空');
     }
     final targetChanged = existing != null && existing.targetType != targetType;
     final authTypeChanged =
@@ -7862,11 +7860,8 @@ class AppController extends ChangeNotifier {
     if (!profile.isWindowsComputer) {
       throw ArgumentError('目标不是 Windows 电脑');
     }
-    final relayUrl = profile.relayUrl?.trim();
+    final relayUrl = _normalizeComputerRelayUrl(profile.relayUrl ?? '');
     final deviceId = profile.deviceId?.trim();
-    if (relayUrl == null || relayUrl.isEmpty) {
-      throw StateError('Windows 电脑未配置中转服务器地址');
-    }
     if (deviceId == null || deviceId.isEmpty) {
       throw StateError('Windows 电脑未配置设备 ID');
     }
@@ -8359,7 +8354,10 @@ String _computerRelayInstallPrompt({
 安装完成后，请保留 /www/pocket-server-ops-computer-relay/.env，手机会通过 SSH 单独读取 Token。''';
 
 String _normalizeComputerRelayUrl(String value) {
-  final trimmed = value.trim();
+  var trimmed = value.trim();
+  while (trimmed.endsWith('#') || trimmed.endsWith('?')) {
+    trimmed = trimmed.substring(0, trimmed.length - 1).trimRight();
+  }
   final parsed = Uri.tryParse(trimmed);
   if (parsed == null ||
       parsed.host.isEmpty ||
@@ -8372,6 +8370,15 @@ String _normalizeComputerRelayUrl(String value) {
   var relayPath = parsed.path.replaceFirst(RegExp(r'/+$'), '');
   if (relayPath.isEmpty) relayPath = '/computer-relay';
   return parsed.replace(path: relayPath).toString();
+}
+
+String? _normalizeStoredComputerRelayUrl(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  try {
+    return _normalizeComputerRelayUrl(value);
+  } on Object {
+    return null;
+  }
 }
 
 String? _relayTokenFromSetupOutput(String output) {
