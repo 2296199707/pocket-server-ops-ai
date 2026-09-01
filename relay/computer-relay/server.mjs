@@ -164,16 +164,38 @@ async function registerDevice(request, response, deviceId) {
   const body = await readJson(request);
   const name = boundedText(body.name, 'name', 1, 120);
   const token = boundedText(body.device_token, 'device_token', 16, 512);
+  const tokenHash = hashToken(deviceId, token);
+  const existing = devices.get(deviceId);
+  if (existing && safeEqual(existing.tokenHash, tokenHash)) {
+    existing.name = name;
+    saveDevices();
+    return sendJson(response, 200, {
+      registered: true,
+      device_id: deviceId,
+      online: isDeviceOnline(deviceId),
+    });
+  }
+  const existingSocket = deviceSockets.get(deviceId);
+  if (existingSocket) {
+    deviceSockets.delete(deviceId);
+    if (existingSocket.readyState <= WebSocket.OPEN) {
+      existingSocket.close(4003, 'device credentials changed');
+    }
+  }
   devices.set(deviceId, {
     name,
-    tokenHash: hashToken(deviceId, token),
+    tokenHash,
     agentVersion: null,
     protocolVersion: null,
     lastSeen: null,
     capabilities: null,
   });
   saveDevices();
-  return sendJson(response, 200, { registered: true, device_id: deviceId });
+  return sendJson(response, 200, {
+    registered: true,
+    device_id: deviceId,
+    online: false,
+  });
 }
 
 deviceWss.on('connection', (socket) => {

@@ -4222,8 +4222,7 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// Registers the Windows device token (when needed) and reads the paired
-  /// Agent status. Tokens stay in the secure credential store.
+  /// Reads the paired Windows Agent status without changing its registration.
   Future<Map<String, Object?>> testComputer(ServerProfile profile) async {
     if (previewMode) throw StateError('预览模式不会连接电脑');
     if (!profile.isWindowsComputer) {
@@ -4231,18 +4230,7 @@ class AppController extends ChangeNotifier {
     }
     final relay = await _computerRelayFor(profile);
     try {
-      final deviceToken = profile.deviceTokenRef == null
-          ? null
-          : await _credentials.read(profile.deviceTokenRef!);
-      if (deviceToken != null && deviceToken.isNotEmpty) {
-        await relay.registerDevice(
-          deviceId: profile.deviceId!,
-          name: profile.name,
-          deviceToken: deviceToken,
-        );
-      }
-      final status = await relay.deviceStatus(profile.deviceId!);
-      return status;
+      return await relay.deviceStatus(profile.deviceId!);
     } finally {
       await relay.close();
     }
@@ -8307,7 +8295,7 @@ has_file() {
     sudo -n test -f "$1"
   fi
 }
-for candidate in /opt/pocket-server-ops-computer-relay /www/pocket-server-ops-computer-relay; do
+for candidate in /www/pocket-server-ops-computer-relay /opt/pocket-server-ops-computer-relay; do
   if has_file "$candidate/.env"; then
     env_file="$candidate/.env"
     if [ "$(id -u)" -eq 0 ]; then
@@ -8348,8 +8336,9 @@ String _computerRelayInstallPrompt({
      sudo -n env RELAY_INSTALL_DIR=/www/pocket-server-ops-computer-relay bash /tmp/pocket-server-ops-computer-relay/deploy.sh
    fi
 4. 检查 relay 容器状态和 http://127.0.0.1:8787/v1/health 是否正常。
-5. 不要修改 Caddy、Nginx 或现有网站配置；反向代理需要用户单独确认后再处理。
-6. 不要输出 RELAY_API_TOKEN、密码、私钥或 .env 内容，只返回安装是否成功、容器状态和失败原因。
+5. 允许检查并修改当前服务器现有的 Caddy 或 Nginx 配置，为 $publicUrl 补充 relay 的 HTTP 和 WebSocket 反向代理。先识别代理的宿主机或容器网络，确保代理能访问 relay；只修改该域名下的 relay 路径，不覆盖其他路由，不关闭现有网站。修改前备份相关配置，配置校验通过后再平滑重载。
+6. 验证 $publicUrl/v1/health 可以从公网正常访问；如果失败，请继续排查反向代理路径、容器网络和上游地址，并返回具体原因。
+7. 不要输出 RELAY_API_TOKEN、密码、私钥或 .env 内容，只返回安装是否成功、容器状态、反向代理状态和失败原因。
 
 安装完成后，请保留 /www/pocket-server-ops-computer-relay/.env，手机会通过 SSH 单独读取 Token。''';
 

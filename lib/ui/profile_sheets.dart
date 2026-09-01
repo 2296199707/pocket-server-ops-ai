@@ -171,7 +171,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
           Text('中转服务器设置', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
           const Text(
-            '请选择一台已绑定的 SSH 服务器作为唯一安装目标。手机只会对当前选中的服务器执行中转软件安装或更新，不会遍历其他服务器，也不会自动安装或修改 Caddy/Nginx。',
+            '请选择一台已绑定的 SSH 服务器作为唯一安装目标。手机不会遍历其他服务器；安装提示词允许 AI 在这台服务器上完成中转部署，并按现有站点结构接入 Caddy/Nginx。',
           ),
           if (savedUrl != null) ...[
             const SizedBox(height: 12),
@@ -240,7 +240,7 @@ class _ComputerRelaySetupSheetState extends State<_ComputerRelaySetupSheet> {
             ),
             const SizedBox(height: 12),
             Text(
-              '手机可以上传离线安装包；如果中转已安装，也可以直接读取配置，不会重复上传。安装包使用独立目录和 Compose 项目，不会自动修改现有网站配置。',
+              '手机可以上传离线安装包；如果中转已安装，也可以直接读取配置，不会重复上传。中转使用独立目录和 Compose 项目，AI 只为指定路径补充反向代理，不覆盖现有网站。',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             if (_packageTransfer != null) ...[
@@ -498,7 +498,7 @@ Future<bool> _confirmRelayPackageUpload(
                 SelectableText(publicUrl),
                 const SizedBox(height: 16),
                 const Text(
-                  '安装包只会写入当前服务器的临时目录。上传后由你指定的 AI 执行安装，本次不会自动安装，也不会自动修改 Caddy/Nginx 或网站配置。',
+                  '安装包只会写入当前服务器的临时目录。上传后由你指定的 AI 执行安装，并可在这台服务器上为指定地址配置 Caddy/Nginx；现有网站和其他路由必须保留。',
                 ),
                 const SizedBox(height: 8),
                 SelectableText('上传路径：$remotePath'),

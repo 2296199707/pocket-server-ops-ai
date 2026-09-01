@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5-beta.9",
+      "title": "PocketServerOps AI v1.0.5-beta.9",
+      "notes": "修复 Windows Agent 已认证但手机误报离线：测试连接不再重复登记设备，relay 重复登记保留在线状态；中转 Token 优先读取 /www 部署，并允许安装 AI 按现有站点配置 Caddy/Nginx 与验证公网健康检查。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.9",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5-beta.9/pocket-server-ops-ai-v1.0.5-beta.9-release.apk",
+      "prerelease": true,
+      "published_at": "2026-09-01T01:54:21Z"
+    },
+    {
       "version": "1.0.5-beta.8",
       "title": "PocketServerOps AI v1.0.5-beta.8",
       "notes": "Windows 电脑设置新增中转 SSH 服务器选择；点击 Token 刷新即可通过 SSH 自动读取已安装中转服务的 Token，并修复中转地址尾部 #? 导致的连接问题。切换中转服务器后必须重新刷新，避免凭据错配。",

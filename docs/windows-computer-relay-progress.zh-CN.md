@@ -87,12 +87,14 @@ GitHub Actions 文件为 `.github/workflows/windows-computer-agent.yml`，beta
 上传完成后，App 自动复制一段不包含密码、私钥或 `RELAY_API_TOKEN` 的安装提示词。
 用户把提示词交给连接着这台服务器的 AI，由 AI 在当前服务器检查环境、解压安装包、
 执行 `deploy.sh` 并返回健康检查结果。提示词明确要求 AI 不连接其他服务器、不执行
-`docker compose --remove-orphans`，不修改现有 Caddy/Nginx 或网站配置；反向代理仍
-由用户单独决定和配置。
+`docker compose --remove-orphans`。用户已经选择专属中转服务器并确认上传后，AI
+可以检查并最小修改当前服务器的 Caddy/Nginx，为指定公网路径补充 HTTP 与 WebSocket
+反向代理。修改前需要备份并校验配置，只能改 relay 路径，不能覆盖其他路由或关闭
+现有网站；代理容器化时还要检查其与 relay 的网络可达性，最后验证公网健康检查。
 
 AI 完成安装后，用户点击“我已让 AI 安装，读取配置”。App 再通过已绑定 SSH 连接
-只读取 `/opt/pocket-server-ops-computer-relay/.env` 或
-`/www/pocket-server-ops-computer-relay/.env` 中的 `RELAY_API_TOKEN`，并将 Token
+优先读取 `/www/pocket-server-ops-computer-relay/.env`，旧版部署才回退读取
+`/opt/pocket-server-ops-computer-relay/.env` 中的 `RELAY_API_TOKEN`，并将 Token
 写入手机安全凭据存储，同时保存中转服务器 ID 和公网地址。Token 不写入任务、对话、
 普通设置或 AI 请求，也不会通过提示词显示给 AI。
 
@@ -113,6 +115,27 @@ Caddy/Nginx 的路径。App 会根据 SSH 主机名建议
 抽屉关闭、返回对话页或 App 重启后仍会显示“安装包已上传”和“我已让 AI 安装，读取
 配置”入口。提示词根据固定远程路径重新生成，不把 Token 或完整提示词重复写入设置。
 读取配置成功后，待安装标记会清除，后续直接使用已保存的中转配置。
+
+## 实际部署排障记录（2026-09-01）
+
+一次真实部署中，Caddy 容器只连接 `beast-public`，relay 只连接自己的 Compose 默认
+网络，导致 Caddy 无法解析 `computer-relay`，手机登记和 Windows WebSocket 均返回
+502。修复方式是让 relay 同时保留默认网络并加入代理所在的外部网络，不需要覆盖或
+重写现有 Caddy 配置。修复后代理容器可以解析并访问 relay，公网
+`/computer-relay/v1/health` 返回 200，未带 Token 的登记请求返回预期的 401。
+
+该服务器还同时残留 `/opt` 和 `/www` 两套部署，且 Token 不同；实际运行容器使用
+`/www`。旧 `/opt` 目录在确认没有运行容器引用后被改名保留为停用备份，App 的读取
+顺序也改为 `/www` 优先、`/opt` 回退。后续安装 AI 必须检查代理容器与 relay 的网络
+可达性，并在交付前验证公网健康检查，不能只验证 relay 容器内部健康状态。
+
+公网修复后发现 Windows Agent 已认证，但手机执行“测试连接”会将其显示为离线。
+根因是 App 在读取状态前重复调用设备登记，而 relay 的旧登记实现会替换设备对象并
+清空 `lastSeen`；已连接的 WebSocket 仍更新旧对象，状态接口因此持续返回离线。App
+现已改为测试时只读取状态，登记只在保存或重新配对时执行。relay 的登记接口也改为
+幂等：设备 ID 与 Token 相同时只更新名称并保留连接、心跳和能力状态；Token 真正
+变化时才关闭旧连接并等待电脑使用新凭据重新认证。修复已同步到内置离线包和实际
+部署，电脑 Agent 在 relay 重建后自动重连并恢复在线。
 
 离线包中的 `Dockerfile`、`package.json`、`package-lock.json`、`server.mjs` 和
 `compose.yaml` 固定为可读权限，`deploy.sh` 为可执行权限。部署脚本复制到
@@ -250,3 +273,4 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
 - 2026-08-31：中转设置增加“中转已安装，跳过上传并读取配置”入口；换手机后选择已绑定 SSH 服务器即可直接读取 `/opt` 或 `/www` 安装目录中的 Token，不要求重复上传离线包。
 - 2026-08-31：版本更新为 `1.0.5-beta.7+51`，发布中转设置的跳过上传入口；原有离线包上传和 AI 安装流程保持不变。
 - 2026-09-01：Windows 目标设置页增加中转 SSH 服务器选择；点击 Token 刷新后通过选定服务器读取已安装 relay 的 `.env`，切换服务器后要求重新刷新，避免复用旧 Token。版本为 `1.0.5-beta.8+52`，控制器与设置页相关测试 73 项通过；Release APK 位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.8-release.apk`，大小 `80268121` 字节，SHA-256 为 `633931205cc70b9ff8475aba89839053042656ee61ebc930b098668c5863862d`；GitHub Pre-release 已创建：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.8`。
+- 2026-09-01：版本更新为 `1.0.5-beta.9+53`；修复 Windows Agent 在线状态被手机测试连接重复登记清空的问题，中转安装提示词允许在专属服务器上完成反向代理接入，Token 读取改为 `/www` 优先，并同步更新内置 relay 离线包。控制器与中转客户端相关测试 64 项通过，本次修改文件静态分析无问题；Release APK 位于 `/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.9-release.apk`，大小 `80268237` 字节，SHA-256 为 `58d01e28d61c5ef40975961ea1d28e0d816a6887ea45e0bd5548ba45813d3483`；GitHub Pre-release：`https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.9`。

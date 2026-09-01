@@ -1745,6 +1745,44 @@ void main() {
     controller.dispose();
   });
 
+  test('testing a Windows computer only reads status', () async {
+    final relayServer = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(relayServer.close);
+    final requests = <String>[];
+    relayServer.listen((request) async {
+      requests.add('${request.method} ${request.uri.path}');
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({'device_id': 'computer-1', 'name': '办公电脑', 'online': true}),
+      );
+      await request.response.close();
+    });
+    final controller = AppController(
+      database: MemoryAppDatabase(),
+      credentials: MemoryCredentialStore(),
+    );
+    addTearDown(controller.dispose);
+    await controller.load();
+    await controller.saveServer(
+      name: '办公电脑',
+      host: '',
+      port: 0,
+      username: '',
+      secret: '',
+      workingDirectory: r'C:\workspace',
+      targetType: serverTargetTypeWindows,
+      relayUrl: 'http://127.0.0.1:${relayServer.port}',
+      deviceId: 'computer-1',
+      relayApiToken: 'relay-api-secret',
+      deviceToken: 'device-secret-123456',
+    );
+
+    final status = await controller.testComputer(controller.servers.single);
+
+    expect(status['online'], isTrue);
+    expect(requests, ['GET /computer-relay/v1/devices/computer-1/status']);
+  });
+
   test(
     'relay package upload and post-install read use the bound SSH server',
     () async {
@@ -1794,6 +1832,9 @@ void main() {
       expect(transfer.prompt, contains(r'$(id -u)'));
       expect(transfer.prompt, contains('chmod 644'));
       expect(transfer.prompt, contains('chmod 755'));
+      expect(transfer.prompt, contains('允许检查并修改当前服务器现有的 Caddy 或 Nginx'));
+      expect(transfer.prompt, contains('/v1/health 可以从公网正常访问'));
+      expect(transfer.prompt, isNot(contains('不要修改 Caddy')));
       expect(connector.commands, isEmpty);
       expect(connector.uploadedFiles[transfer.remotePath], isNotNull);
       expect(
