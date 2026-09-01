@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 
-const AGENT_VERSION = '1.0.0-beta.6';
+const AGENT_VERSION = '1.0.0-beta.7';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
 const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
@@ -622,6 +622,7 @@ class ComputerAgent {
     const context = new CallContext(requestId);
     this.inFlightCalls.set(requestId, context);
     this.inFlightSockets.set(requestId, new Set([socket]));
+    if (operation !== 'process.poll') log('info', `收到工具调用：${operation}`);
     let resultFrame;
     try {
       const result = await this.dispatch(operation, payload, context);
@@ -635,6 +636,10 @@ class ComputerAgent {
       };
     } finally {
       this.inFlightCalls.delete(requestId);
+    }
+
+    if (operation !== 'process.poll') {
+      log('info', `工具调用${resultFrame.ok ? '完成' : '失败'}：${operation}`);
     }
 
     this.rememberCompleted(requestId, resultFrame);
@@ -1390,6 +1395,8 @@ function parseArgs(argv) {
   const args = {
     config: defaultConfigPath(),
     setup: false,
+    setupStdin: false,
+    configureOnly: false,
     run: false,
     uninstall: false,
   };
@@ -1399,6 +1406,10 @@ function parseArgs(argv) {
       args.config = argv[++index];
     } else if (value === '--setup') {
       args.setup = true;
+    } else if (value === '--setup-stdin') {
+      args.setupStdin = true;
+    } else if (value === '--configure-only') {
+      args.configureOnly = true;
     } else if (value === '--run') {
       args.run = true;
     } else if (value === '--uninstall') {
@@ -1417,6 +1428,7 @@ function parseArgs(argv) {
 function printHelp() {
   console.log('PocketServerOps Windows Agent');
   console.log('用法: PocketServerOps-Computer.exe [--setup|--run|--uninstall]');
+  console.log('图形客户端使用 --setup-stdin --configure-only 写入手机配对配置。');
   console.log('首次运行会要求粘贴手机 App 显示的电脑配对信息。');
   console.log('支持中转连接和 Tailscale/局域网直连。');
 }
@@ -1549,14 +1561,7 @@ async function runSetupWizard(configPath) {
       }
       config = parsePairingText(JSON.stringify(values));
     }
-    await fsp.mkdir(path.dirname(configPath), { recursive: true });
-    await fsp.writeFile(
-      configPath,
-      `${JSON.stringify({ ...config, agent_version: AGENT_VERSION, protocol_version: PROTOCOL_VERSION }, null, 2)}\n`,
-      'utf8',
-    );
-    await secureConfigFile(configPath);
-    console.log(`配置已保存: ${configPath}`);
+    await saveSetupConfig(configPath, config);
     if (isStandaloneExecutable()) await installStartupTask();
     console.log(
       config.connection_mode === 'direct'
@@ -1566,6 +1571,42 @@ async function runSetupWizard(configPath) {
   } finally {
     prompt.close();
   }
+}
+
+async function runSetupFromStdin(configPath, configureOnly) {
+  const pasted = (await readStdinText()).trim();
+  if (!pasted) throw new AgentError('setup_input', '没有收到配对配置 JSON');
+  const config = parsePairingText(pasted);
+  await saveSetupConfig(configPath, config);
+  if (configureOnly) {
+    console.log('配置完成；请启动电脑客户端以连接 Agent。');
+    return;
+  }
+  if (isStandaloneExecutable()) await installStartupTask();
+  console.log(
+    config.connection_mode === 'direct'
+      ? `Agent 将监听直连端口 ${config.direct_listen_port}。`
+      : 'Agent 将保持运行并主动连接中转服务器。',
+  );
+}
+
+async function saveSetupConfig(configPath, config) {
+  await fsp.mkdir(path.dirname(configPath), { recursive: true });
+  await fsp.writeFile(
+    configPath,
+    `${JSON.stringify({ ...config, agent_version: AGENT_VERSION, protocol_version: PROTOCOL_VERSION }, null, 2)}\n`,
+    'utf8',
+  );
+  await secureConfigFile(configPath);
+  console.log(`配置已保存: ${configPath}`);
+}
+
+async function readStdinText() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+  }
+  return chunks.join('');
 }
 
 async function secureConfigFile(configPath) {
@@ -1726,7 +1767,17 @@ function sleep(milliseconds) {
 
 function log(level, message, error) {
   const suffix = error ? `: ${error.message ?? error}` : '';
-  console[level === 'warn' ? 'warn' : 'log'](`[${new Date().toISOString()}] [${level}] ${message}${suffix}`);
+  const line = `[${new Date().toISOString()}] [${level}] ${message}${suffix}`;
+  console[level === 'warn' ? 'warn' : 'log'](line);
+  appendRuntimeLog(line);
+}
+
+function appendRuntimeLog(line) {
+  if (!isStandaloneExecutable()) return;
+  const logPath = path.join(path.dirname(defaultConfigPath()), 'agent.log');
+  void fsp.mkdir(path.dirname(logPath), { recursive: true })
+    .then(() => fsp.appendFile(logPath, `${line}\n`, 'utf8'))
+    .catch(() => {});
 }
 
 async function writeRuntimeError(error) {
@@ -1757,7 +1808,10 @@ async function main() {
     return;
   }
   const configPath = path.resolve(args.config);
-  if (args.setup || (!args.run && isStandaloneExecutable() && !(await fileExists(configPath)))) {
+  if (args.setupStdin) {
+    await runSetupFromStdin(configPath, args.configureOnly);
+    if (args.configureOnly) return;
+  } else if (args.setup || (!args.run && isStandaloneExecutable() && !(await fileExists(configPath)))) {
     await runSetupWizard(configPath);
   }
   const config = await loadConfig(configPath);

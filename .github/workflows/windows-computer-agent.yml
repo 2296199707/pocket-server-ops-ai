@@ -33,9 +33,11 @@ jobs:
       - name: Package download
         shell: pwsh
         run: |
-          $exe = Get-ChildItem dist -Filter 'PocketServerOps-Computer-*.exe' | Select-Object -First 1
-          Compress-Archive -Path $exe.FullName, README.md -DestinationPath PocketServerOps-Computer-windows-x64.zip
-      - name: Upload Windows Agent
+          $agent = Get-ChildItem dist -Filter 'PocketServerOps-Computer-v*-win-x64.exe' | Select-Object -First 1
+          $client = Get-ChildItem dist -Filter 'PocketServerOps-Computer-Client-v*-win-x64.exe' | Select-Object -First 1
+          if (-not $agent -or -not $client) { throw '未找到 Agent 或 Windows 主界面构建产物' }
+          Compress-Archive -Path $agent.FullName, $client.FullName, README.md -DestinationPath PocketServerOps-Computer-windows-x64.zip
+      - name: Upload Windows client
         uses: actions/upload-artifact@v4
         with:
           name: pocket-server-ops-computer-agent-windows-x64

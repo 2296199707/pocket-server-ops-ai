@@ -4,10 +4,11 @@
 主动连接中转服务器，或在 Tailscale/局域网内监听手机直连。两种方式复用同一套
 PowerShell、文件、后台进程和状态协议。
 
-推荐使用独立 EXE。电脑首次运行 EXE 时会进入配对向导，粘贴手机 App 的“电脑
-配对信息”即可；EXE 自带 Node.js 运行时，不需要另外安装 Node.js。当前仓库的
-GitHub Actions 会在 beta 分支更新后构建 Windows x64 压缩包，构建完成后可从
-Actions 的 artifact 下载。
+推荐使用压缩包中的“电脑客户端” EXE。它会在后台启动 Agent，并在主界面显示
+连接状态、运行消息和错误日志；首次运行时可以直接在界面粘贴手机 App 的“电脑
+配对信息”。压缩包也保留独立 Agent EXE，适合命令行或无界面运行。两者都不需要
+另外安装 Node.js。当前仓库的 GitHub Actions 会在 beta 分支更新后构建 Windows
+x64 压缩包。
 
 ## 要求
 
@@ -25,11 +26,24 @@ WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.j
 
 ## 独立 EXE 首次配置
 
+解压后双击类似下面的电脑客户端即可打开主界面：
+
+```text
+PocketServerOps-Computer-Client-v1.0.0-beta.7-win-x64.exe
+```
+
+主界面的“运行消息”会读取 `%LOCALAPPDATA%\PocketServerOps\computer-agent\agent.log`，
+并显示连接、重连、工具调用和错误状态。关闭主窗口会缩到右下角托盘，托盘菜单
+可以重新打开界面、重新配对或打开日志。电脑客户端和 Agent EXE 请保持在同一个
+文件夹中。
+
+## 独立 Agent EXE 首次配置
+
 从 beta 构建 artifact 下载并解压 `PocketServerOps-Computer-windows-x64.zip`，
 在 PowerShell 中运行 EXE：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.6-win-x64.exe
+.\PocketServerOps-Computer-v1.0.0-beta.7-win-x64.exe
 ```
 
 当前构建未使用商业代码签名证书，Windows 首次运行可能显示 SmartScreen 提示；
@@ -44,7 +58,7 @@ WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.j
 以后需要重新配置时运行：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.6-win-x64.exe --setup
+.\PocketServerOps-Computer-v1.0.0-beta.7-win-x64.exe --setup
 ```
 
 如果 Agent 运行一段时间后退出，先查看：
@@ -59,7 +73,7 @@ WebSocket 依赖。`device_token` 保存在当前用户安装目录的 `config.j
 卸载登录启动任务：
 
 ```powershell
-.\PocketServerOps-Computer-v1.0.0-beta.6-win-x64.exe --uninstall
+.\PocketServerOps-Computer-v1.0.0-beta.7-win-x64.exe --uninstall
 ```
 
 ## 源码运行或旧脚本安装
@@ -109,7 +123,7 @@ node .\\agent.mjs --config .\\config.json
 2. 在电脑运行 `tailscale ip -4`，取得类似 `100.64.0.10` 的地址。
 3. 手机添加 Windows 目标时选择“Tailscale 直连”，填写
    `http://100.64.0.10:8788`。
-4. 保存后复制电脑配对信息，粘贴到 `beta.6` 或更新版本的 Windows Agent。
+4. 保存后复制电脑配对信息，粘贴到 `beta.7` 或更新版本的 Windows Agent。
 5. Windows 首次提示防火墙权限时允许专用网络访问，然后在手机测试连接。
 
 直连端点仍使用 Agent Token 认证，Tailscale 负责链路加密。不要把直连端口映射到
@@ -125,7 +139,7 @@ node .\\agent.mjs --config .\\config.json
   "relay_url": "wss://relay.example.com",
   "device_id": "windows-device-001",
   "device_token": "device-token",
-  "agent_version": "1.0.0-beta.6",
+  "agent_version": "1.0.0-beta.7",
   "protocol_version": "1",
   "working_directory": "C:\\Users\\Public\\PocketServerOps"
 }
@@ -162,7 +176,7 @@ node .\\agent.mjs --config .\\config.json
   "type": "authenticate",
   "device_id": "windows-device-001",
   "device_token": "device-token",
-  "agent_version": "1.0.0-beta.6",
+  "agent_version": "1.0.0-beta.7",
   "protocol_version": "1"
 }
 ```

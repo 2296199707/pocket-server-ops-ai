@@ -36,6 +36,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "npm ci 失败，退出码 $LASTEXITCODE" }
     & $npmCommand run build:windows
     if ($LASTEXITCODE -ne 0) { throw "Windows Agent 构建失败，退出码 $LASTEXITCODE" }
+    & (Join-Path $sourceDir 'tools\build-client.ps1')
+    if ($LASTEXITCODE -ne 0) { throw "Windows 主界面构建失败，退出码 $LASTEXITCODE" }
 } finally {
     Pop-Location
 }
