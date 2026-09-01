@@ -32,8 +32,8 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private readonly Panel _content;
     private readonly TextBox _messageBox;
-    private readonly Label _statusLabel;
-    private readonly Label _detailLabel;
+    private Label _statusLabel;
+    private Label _detailLabel;
     private readonly NotifyIcon _tray;
     private Button _startupButton;
     private Label _startupLabel;
