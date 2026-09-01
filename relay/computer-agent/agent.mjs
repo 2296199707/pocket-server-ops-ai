@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 
-const AGENT_VERSION = '1.0.0-beta.4';
+const AGENT_VERSION = '1.0.0-beta.5';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
 const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
@@ -732,6 +732,10 @@ class ComputerAgent {
     this.trimProcessRegistry();
     attachProcessOutput(tracked, child.stdout, 'stdout');
     attachProcessOutput(tracked, child.stderr, 'stderr');
+    child.stdin?.on('error', (error) => {
+      tracked.error = tracked.error ?? error;
+      tracked.notify();
+    });
     child.once('error', (error) => tracked.markClosed(null, null, error));
     child.once('close', (code, signal) => tracked.markClosed(code, signal));
     context.onCancel(() => {
@@ -793,11 +797,18 @@ class ComputerAgent {
     const tracked = this.getProcess(payload.process_id);
     const input = requiredString(payload.input, 'input');
     ensureByteLimit(input, MAX_INPUT_BYTES, 'input');
-    if (!tracked.running || !tracked.child.stdin || tracked.child.stdin.destroyed) {
+    const stdin = tracked.child.stdin;
+    if (
+      !tracked.running ||
+      !stdin ||
+      stdin.destroyed ||
+      stdin.writableEnded ||
+      stdin.writableFinished
+    ) {
       throw new AgentError('process_not_running', '后台进程没有可写入的 stdin');
     }
     await new Promise((resolve, reject) => {
-      tracked.child.stdin.write(input, 'utf8', (error) => (error ? reject(error) : resolve()));
+      stdin.write(input, 'utf8', (error) => (error ? reject(error) : resolve()));
     });
     return { process_id: tracked.processId, bytes_written: Buffer.byteLength(input, 'utf8') };
   }
@@ -1542,8 +1553,8 @@ async function runSetupWizard(configPath) {
       'utf8',
     );
     await secureConfigFile(configPath);
-    if (isStandaloneExecutable()) await installStartupTask();
     console.log(`配置已保存: ${configPath}`);
+    if (isStandaloneExecutable()) await installStartupTask();
     console.log(
       config.connection_mode === 'direct'
         ? `Agent 将监听直连端口 ${config.direct_listen_port}。`
@@ -1557,41 +1568,60 @@ async function runSetupWizard(configPath) {
 async function secureConfigFile(configPath) {
   if (process.platform !== 'win32' || !process.env.USERNAME) return;
   const account = `${process.env.USERDOMAIN || '.'}\\${process.env.USERNAME}`;
-  const result = spawnSync(
-    'icacls.exe',
-    [configPath, '/inheritance:r', '/grant:r', `${account}:(F)`],
-    { windowsHide: true, encoding: 'utf8' },
-  );
+  let result;
+  try {
+    result = spawnSync(
+      'icacls.exe',
+      [configPath, '/inheritance:r', '/grant:r', `${account}:(F)`],
+      { windowsHide: true, encoding: 'buffer' },
+    );
+  } catch (error) {
+    log('warn', '无法收紧配置文件权限，Agent 将继续运行', error);
+    return;
+  }
   if (result.status !== 0) {
-    log('warn', `无法收紧配置文件权限: ${(result.stderr || '').trim()}`);
+    log(
+      'warn',
+      `无法收紧配置文件权限（退出码 ${result.status ?? 'unknown'}${result.error?.code ? `，${result.error.code}` : ''}），Agent 将继续运行`,
+    );
   }
 }
 
 async function installStartupTask() {
   if (process.platform !== 'win32' || !isStandaloneExecutable()) return;
   const command = `"${process.execPath.replaceAll('"', '\\"')}" --run`;
-  const result = spawnSync(
-    'schtasks.exe',
-    [
-      '/Create',
-      '/F',
-      '/SC',
-      'ONLOGON',
-      '/TN',
-      STARTUP_TASK_NAME,
-      '/TR',
-      command,
-      '/RL',
-      'LIMITED',
-    ],
-    { windowsHide: true, encoding: 'utf8' },
-  );
-  if (result.status !== 0) {
-    throw new AgentError(
-      'startup_task_failed',
-      `无法注册 Windows 登录启动任务: ${(result.stderr || result.stdout || '').trim()}`,
+  let result;
+  try {
+    result = spawnSync(
+      'schtasks.exe',
+      [
+        '/Create',
+        '/F',
+        '/SC',
+        'ONLOGON',
+        '/TN',
+        STARTUP_TASK_NAME,
+        '/TR',
+        command,
+        '/RL',
+        'LIMITED',
+      ],
+      { windowsHide: true, encoding: 'buffer' },
     );
+  } catch (error) {
+    log('warn', '无法注册 Windows 登录启动任务，Agent 将继续运行', error);
+    console.log('登录启动任务未注册；如需后台运行，请保持窗口打开，或稍后手动运行 --run。');
+    return false;
   }
+  if (result.status !== 0) {
+    log(
+      'warn',
+      `无法注册 Windows 登录启动任务（退出码 ${result.status ?? 'unknown'}${result.error?.code ? `，${result.error.code}` : ''}），Agent 将继续运行`,
+    );
+    console.log('登录启动任务未注册；如需后台运行，请保持窗口打开，或稍后手动运行 --run。');
+    return false;
+  }
+  return true;
 }
 
 function uninstallStartupTask() {

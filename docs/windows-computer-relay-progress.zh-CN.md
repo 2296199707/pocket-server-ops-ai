@@ -321,3 +321,12 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
   心跳定时器异常可能直接退出的问题；异常调用现在关闭当前连接并交给既有重连循环，
   独立 EXE 还会把未处理异常记录到 `%LOCALAPPDATA%\PocketServerOps\computer-agent\agent-error.log`。
   Windows Agent 版本为 `1.0.0-beta.4`；回归测试 2 项和 bundle 检查通过。
+- 2026-09-01：修复 Windows Agent 首次 `--setup` 的可选系统配置步骤：
+  `schtasks` 无法创建登录启动任务，或 `icacls` 无法收紧配置文件权限时，不再把
+  配置失败当成 Agent 启动失败；配置先保存，Agent 会继续运行并明确提示登录启动
+  未注册。Windows 命令错误不再直接按 UTF-8 打印系统代码页输出，避免乱码。
+  Windows Agent 版本更新为 `1.0.0-beta.5`；配置写入、可选步骤失败和运行时重连
+  仍待 Windows 真机确认。
+- 2026-09-01：根据 Windows 真机日志修复后台进程 stdin 的 `write after end`：
+  `process.write` 现在识别已结束或已完成的 stdin，并把竞态写入失败作为普通工具
+  错误返回；后台 stdin 增加错误监听，避免 Node 未捕获流错误导致 EXE 退出。
