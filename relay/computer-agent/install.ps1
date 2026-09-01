@@ -84,7 +84,7 @@ Set-ConfigValue -Path $configPath -Key 'device_id' -Value $DeviceId
 Set-ConfigValue -Path $configPath -Key 'device_token' -Value $DeviceToken
 Set-ConfigValue -Path $configPath -Key 'working_directory' -Value $WorkingDirectory
 if (-not $script:Config['connection_mode']) { $script:Config['connection_mode'] = 'relay' }
-if (-not $script:Config['agent_version']) { $script:Config['agent_version'] = '1.0.0-beta.7' }
+if (-not $script:Config['agent_version']) { $script:Config['agent_version'] = '1.0.0-beta.8' }
 if (-not $script:Config['protocol_version']) { $script:Config['protocol_version'] = '1' }
 
 $required = @('device_id', 'device_token', 'working_directory')

@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 
-const AGENT_VERSION = '1.0.0-beta.7';
+const AGENT_VERSION = '1.0.0-beta.8';
 const PROTOCOL_VERSION = '1';
 const DEFAULT_CONFIG_NAME = 'config.json';
 const DEFAULT_WINDOWS_WORKING_DIRECTORY = 'C:\\Users\\Public\\PocketServerOps';
@@ -30,6 +30,7 @@ const MAX_COMPLETED_CALLS = 128;
 const MAX_COMPLETED_RESULT_BYTES = 8 * 1024 * 1024;
 const MAX_COMPLETED_CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_TRACKED_PROCESSES = 64;
+const MAX_RUNTIME_LOG_BYTES = 5 * 1024 * 1024;
 const DEFAULT_EXEC_TIMEOUT_MS = 2 * 60 * 1000;
 const MAX_EXEC_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -1775,22 +1776,62 @@ function log(level, message, error) {
 function appendRuntimeLog(line) {
   if (!isStandaloneExecutable()) return;
   const logPath = path.join(path.dirname(defaultConfigPath()), 'agent.log');
-  void fsp.mkdir(path.dirname(logPath), { recursive: true })
-    .then(() => fsp.appendFile(logPath, `${line}\n`, 'utf8'))
+  runtimeLogWrite = runtimeLogWrite
+    .catch(() => {})
+    .then(() => appendRotatedLog(logPath, `${line}\n`))
     .catch(() => {});
 }
 
-async function writeRuntimeError(error) {
-  if (!isStandaloneExecutable()) return;
+function writeRuntimeError(error) {
+  if (!isStandaloneExecutable()) return Promise.resolve();
   const logPath = path.join(path.dirname(defaultConfigPath()), 'agent-error.log');
+  const line = `[${new Date().toISOString()}] uptime=${Math.round(process.uptime())}s ${error?.stack ?? error?.message ?? String(error)}\n`;
+  runtimeErrorWrite = runtimeErrorWrite
+    .catch(() => {})
+    .then(() => appendRotatedLog(logPath, line))
+    .catch(() => {});
+  return runtimeErrorWrite;
+}
+
+let runtimeLogWrite = Promise.resolve();
+let runtimeErrorWrite = Promise.resolve();
+
+async function appendRotatedLog(logPath, content) {
+  await fsp.mkdir(path.dirname(logPath), { recursive: true });
+  const bytes = Buffer.byteLength(content, 'utf8');
+  let size = 0;
   try {
-    await fsp.mkdir(path.dirname(logPath), { recursive: true });
-    await fsp.appendFile(
-      logPath,
-      `[${new Date().toISOString()}] uptime=${Math.round(process.uptime())}s ${error?.stack ?? error?.message ?? String(error)}\n`,
-      'utf8',
-    );
-  } catch (_) {}
+    size = (await fsp.stat(logPath)).size;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (size > 0 && size + bytes > MAX_RUNTIME_LOG_BYTES) {
+    const backupPath = `${logPath}.1`;
+    await fsp.rm(backupPath, { force: true });
+    await fsp.rename(logPath, backupPath);
+  }
+  await fsp.appendFile(logPath, content, 'utf8');
+}
+
+function listenForControlInput(stop) {
+  if (process.stdin.isTTY) return;
+  let buffer = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      try {
+        if (JSON.parse(line).type === 'stop') {
+          process.stdin.pause();
+          process.stdin.unref?.();
+          stop();
+        }
+      } catch (_) {}
+    }
+  });
+  process.stdin.on('error', () => {});
 }
 
 async function main() {
@@ -1819,6 +1860,7 @@ async function main() {
   const stop = () => {
     void agent.stop();
   };
+  listenForControlInput(stop);
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   await agent.start();

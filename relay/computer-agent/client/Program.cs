@@ -35,6 +35,7 @@ internal sealed class MainForm : Form
     private Label _statusLabel;
     private Label _detailLabel;
     private readonly NotifyIcon _tray;
+    private Button _agentButton;
     private Button _startupButton;
     private Label _startupLabel;
     private Process _agentProcess;
@@ -43,6 +44,7 @@ internal sealed class MainForm : Form
     private string _lastLog = string.Empty;
     private bool _allowClose;
     private bool _startupEnabled;
+    private bool _agentStopping;
     private readonly bool _startInBackground;
 
     public MainForm()
@@ -90,14 +92,14 @@ internal sealed class MainForm : Form
         var header = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 102,
+            Height = 126,
             ColumnCount = 2,
             RowCount = 3,
             Padding = new Padding(16, 12, 16, 8)
         };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62F));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38F));
-        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42F));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58F));
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F));
         header.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
         header.RowStyles.Add(new RowStyle(SizeType.Absolute, 20F));
 
@@ -138,12 +140,15 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
+            WrapContents = true,
             AutoSize = false
         };
+        _agentButton = CreateButton("启动 Agent", delegate { RestartAgent(); });
+        actions.Controls.Add(_agentButton);
         _startupButton = CreateButton("开机启动", delegate { ToggleStartup(); });
         actions.Controls.Add(_startupButton);
         actions.Controls.Add(CreateButton("重新配对", delegate { ShowSetup(); }));
+        actions.Controls.Add(CreateButton("连接诊断", delegate { ShowDiagnostics(); }));
         actions.Controls.Add(CreateButton("打开日志", delegate { OpenFile(_logPath); }));
         actions.Controls.Add(CreateButton("配置目录", delegate { OpenDirectory(); }));
 
@@ -175,6 +180,8 @@ internal sealed class MainForm : Form
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开主界面", null, delegate { ShowMainWindow(); });
         menu.Items.Add("重新配对", null, delegate { ShowMainWindow(); ShowSetup(); });
+        menu.Items.Add("启动/重启 Agent", null, delegate { ShowMainWindow(); RestartAgent(); });
+        menu.Items.Add("连接诊断", null, delegate { ShowMainWindow(); ShowDiagnostics(); });
         menu.Items.Add("打开运行日志", null, delegate { OpenFile(_logPath); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出界面（Agent继续运行）", null, delegate
@@ -205,6 +212,7 @@ internal sealed class MainForm : Form
             if (_startInBackground) BeginInvoke(new Action(Hide));
         }
         else ShowSetup();
+        UpdateAgentButton();
         _refreshTimer.Start();
     }
 
@@ -324,10 +332,16 @@ internal sealed class MainForm : Form
 
     private void StartAgent()
     {
-        if (_agentProcess != null && !_agentProcess.HasExited) return;
+        if (_agentProcess != null)
+        {
+            if (!_agentProcess.HasExited) return;
+            _agentProcess.Dispose();
+            _agentProcess = null;
+        }
         if (string.IsNullOrEmpty(_agentPath))
         {
             SetStatus("● 找不到 Agent", Color.Firebrick, "请将客户端和 Agent 放在同一个文件夹");
+            UpdateAgentButton();
             return;
         }
         var info = new ProcessStartInfo
@@ -337,31 +351,95 @@ internal sealed class MainForm : Form
             WorkingDirectory = Path.GetDirectoryName(_agentPath),
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
         try
         {
-            _agentProcess = new Process { StartInfo = info, EnableRaisingEvents = true };
-            _agentProcess.OutputDataReceived += OnAgentOutput;
-            _agentProcess.ErrorDataReceived += OnAgentOutput;
-            _agentProcess.Exited += delegate
+            var process = new Process { StartInfo = info, EnableRaisingEvents = true };
+            _agentProcess = process;
+            process.OutputDataReceived += OnAgentOutput;
+            process.ErrorDataReceived += OnAgentOutput;
+            process.Exited += delegate
             {
                 RunOnUi(delegate
                 {
+                    if (_agentProcess != process) return;
                     SetStatus("● Agent 已退出", Color.Firebrick, "请查看运行日志");
                     AppendLive("[client] Agent 进程已退出");
                 });
             };
-            _agentProcess.Start();
-            _agentProcess.BeginOutputReadLine();
-            _agentProcess.BeginErrorReadLine();
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
             SetStatus("● 连接中", Color.DarkOrange, "Agent 已启动，等待中转认证");
+            UpdateAgentButton();
         }
         catch (Exception error)
         {
             SetStatus("● 启动失败", Color.Firebrick, error.Message);
+            UpdateAgentButton();
         }
+    }
+
+    private async void RestartAgent()
+    {
+        if (_agentStopping) return;
+        if (_agentProcess == null || _agentProcess.HasExited)
+        {
+            StartAgent();
+            return;
+        }
+        var choice = MessageBox.Show(
+            this,
+            "Agent 正在运行。重启会结束当前电脑端后台任务，是否继续？",
+            "重启 Agent",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (choice != DialogResult.Yes) return;
+
+        var process = _agentProcess;
+        _agentStopping = true;
+        UpdateAgentButton();
+        SetStatus("● 正在停止", Color.DarkOrange, "正在等待 Agent 清理后台任务");
+        try
+        {
+            if (!process.HasExited)
+            {
+                await process.StandardInput.WriteLineAsync("{\"type\":\"stop\"}");
+                await process.StandardInput.FlushAsync();
+            }
+            var stopped = await Task.Run(delegate { return process.WaitForExit(8000); });
+            if (!stopped)
+            {
+                SetStatus("● Agent 未响应", Color.Firebrick, "未强制结束进程，请稍后查看日志");
+                return;
+            }
+            process.Dispose();
+            if (_agentProcess == process) _agentProcess = null;
+            StartAgent();
+        }
+        catch (Exception error)
+        {
+            SetStatus("● 重启失败", Color.Firebrick, error.Message);
+        }
+        finally
+        {
+            _agentStopping = false;
+            UpdateAgentButton();
+        }
+    }
+
+    private void UpdateAgentButton()
+    {
+        if (_agentButton == null) return;
+        var configured = File.Exists(_configPath);
+        var running = _agentProcess != null && !_agentProcess.HasExited;
+        _agentButton.Text = _agentStopping
+            ? "停止中..."
+            : !configured ? "等待配置" : (running ? "重启 Agent" : "启动 Agent");
+        _agentButton.Enabled = !_agentStopping && configured && !string.IsNullOrEmpty(_agentPath);
     }
 
     private void ToggleStartup()
@@ -412,6 +490,33 @@ internal sealed class MainForm : Form
         {
             SetStatus("● Agent 已退出", Color.Firebrick, "请查看运行日志");
         }
+        UpdateAgentButton();
+    }
+
+    private void ShowDiagnostics()
+    {
+        var configExists = File.Exists(_configPath);
+        var agentRunning = _agentProcess != null && !_agentProcess.HasExited;
+        var logExists = File.Exists(_logPath);
+        var logText = ReadLogText();
+        var latest = GetLatestRelevantLogLine(logText);
+        var diagnosis = new StringBuilder();
+        diagnosis.AppendLine("本机连接诊断");
+        diagnosis.AppendLine();
+        diagnosis.AppendLine("配置：" + (configExists ? "已保存" : "未找到"));
+        diagnosis.AppendLine("Agent：" + (agentRunning ? "进程运行中" : "未运行"));
+        diagnosis.AppendLine("日志：" + (logExists ? "可读取" : "尚未生成"));
+        diagnosis.AppendLine("界面状态：" + _statusLabel.Text.Trim());
+        diagnosis.AppendLine("状态说明：" + _detailLabel.Text.Trim());
+        if (latest.Length > 0)
+        {
+            diagnosis.AppendLine();
+            diagnosis.AppendLine("最近相关消息：");
+            diagnosis.AppendLine(latest);
+        }
+        diagnosis.AppendLine();
+        diagnosis.AppendLine("诊断只读取本机配置、进程和日志，不会执行服务器命令。");
+        MessageBox.Show(this, diagnosis.ToString(), "连接诊断", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private void RefreshLog()
@@ -419,7 +524,7 @@ internal sealed class MainForm : Form
         if (!File.Exists(_logPath)) return;
         try
         {
-            var text = File.ReadAllText(_logPath, Encoding.UTF8);
+            var text = ReadLogText();
             if (text.Length > 240000) text = text.Substring(text.Length - 240000);
             if (text == _lastLog) return;
             _lastLog = text;
@@ -435,6 +540,35 @@ internal sealed class MainForm : Form
         catch (UnauthorizedAccessException) { }
     }
 
+    private string ReadLogText()
+    {
+        if (!File.Exists(_logPath)) return string.Empty;
+        try
+        {
+            return File.ReadAllText(_logPath, Encoding.UTF8);
+        }
+        catch (IOException) { return string.Empty; }
+        catch (UnauthorizedAccessException) { return string.Empty; }
+    }
+
+    private string GetLatestRelevantLogLine(string text)
+    {
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            var line = lines[i];
+            if (line.IndexOf("已认证", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("连接", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("重连", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("错误", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("失败", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return line.Trim();
+            }
+        }
+        return string.Empty;
+    }
+
     private void UpdateStatusFromLog(string text)
     {
         var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -446,7 +580,16 @@ internal sealed class MainForm : Form
                 SetStatus("● 已连接", Color.SeaGreen, "中转连接正常");
                 return;
             }
-            if (line.IndexOf("重连", StringComparison.OrdinalIgnoreCase) >= 0 || line.IndexOf("断开", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (line.IndexOf("认证失败", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("认证响应超时", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("连接失败", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                SetStatus("● 连接失败", Color.Firebrick, line.Trim());
+                return;
+            }
+            if (line.IndexOf("重连", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("断开", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("已关闭", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 SetStatus("● 重连中", Color.DarkOrange, line.Trim());
                 return;

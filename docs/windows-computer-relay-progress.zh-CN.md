@@ -347,3 +347,8 @@ base64 编码后的空间；普通文件读取上限为 1 MiB，后台进程单�
   Agent EXE、Client EXE 和 README，ZIP 可正常读取。当前仍未宣称 Windows 真机
   验收完成；登录启动、托盘、PowerShell 执行和真实中转连接需要在用户 Windows
   环境验证。
+- 2026-09-01：继续完善 Windows 客户端，Agent 增加串行日志轮换（`agent.log` 和
+  `agent-error.log` 单文件上限 5MB，保留一份 `.1`），并增加本地标准输入控制帧，
+  供客户端请求优雅停止。主界面增加 Agent 启动/重启、连接诊断和托盘入口；重启
+  会等待 Agent 清理连接与后台进程，超时不强杀，避免遗留任务。新增控制通道测试
+  通过；Windows Agent 版本更新为 `1.0.0-beta.8`，Windows 真机验收仍待完成。
