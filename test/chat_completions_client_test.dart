@@ -18,6 +18,7 @@ void main() {
         apiKey: 'test-key',
         model: 'test-model',
         reasoningEffort: 'high',
+        sessionId: 'task-conversation-1',
         stream: false,
         client: MockClient((incoming) async {
           request = incoming;
@@ -54,7 +55,7 @@ void main() {
       );
       addTearDown(client.close);
       expect(client.maxResponseBytes, isNull);
-      expect(client.timeout, Duration.zero);
+      expect(client.timeout, const Duration(minutes: 5));
 
       final response = await client.complete(
         messages: [
@@ -71,6 +72,7 @@ void main() {
       );
 
       expect(request.url.path, '/v1/chat/completions');
+      expect(request.headers['x-opencode-session'], 'task-conversation-1');
       final body = jsonDecode(request.body) as Map<String, Object?>;
       expect(body['stream'], false);
       expect(body['reasoning_effort'], 'high');
@@ -181,14 +183,16 @@ void main() {
       baseUrl: 'https://provider.example/v1',
       apiKey: 'test-key',
       model: 'test-model',
+      sessionId: 'task-retry-1',
       retryPolicy: const AiRetryPolicy(
         requestMaxRetries: 0,
         streamMaxRetries: 1,
         initialDelay: Duration.zero,
       ),
       onRetry: retryEvents.add,
-      client: MockClient((_) async {
+      client: MockClient((request) async {
         requestCount++;
+        expect(request.headers['x-opencode-session'], 'task-retry-1');
         if (requestCount == 1) {
           return http.Response.bytes(
             utf8.encode(

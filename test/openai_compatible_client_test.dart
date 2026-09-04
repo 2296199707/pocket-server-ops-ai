@@ -131,6 +131,7 @@ void main() {
         baseUrl: 'https://provider.example/v1',
         apiKey: 'test-key',
         model: 'gpt-5.6-luna',
+        sessionId: 'task-conversation-1',
         client: MockClient((incoming) async {
           request = incoming;
           return http.Response(
@@ -166,6 +167,7 @@ void main() {
 
       final body = jsonDecode(request.body) as Map<String, Object?>;
       expect(request.url.path, '/v1/responses');
+      expect(request.headers['x-opencode-session'], 'task-conversation-1');
       expect(body['store'], false);
       expect(body.containsKey('reasoning'), isFalse);
       expect(body.containsKey('context_management'), isFalse);
@@ -754,6 +756,7 @@ void main() {
       baseUrl: 'https://provider.example/v1',
       apiKey: 'test-key',
       model: 'test-model',
+      sessionId: 'task-retry-1',
       retryPolicy: const AiRetryPolicy(
         requestMaxRetries: 0,
         streamMaxRetries: 1,
@@ -763,6 +766,7 @@ void main() {
       client: MockClient((request) async {
         requestCount++;
         expect(request.url.path, '/v1/responses');
+        expect(request.headers['x-opencode-session'], 'task-retry-1');
         if (requestCount == 1) {
           return http.Response.bytes(
             utf8.encode(
@@ -847,7 +851,7 @@ void main() {
     expect(response.content, '连接恢复');
     expect(retryEvents, hasLength(1));
     expect(retryEvents.single.unbounded, isTrue);
-    expect(retryEvents.single.maxRetries, 0);
+    expect(retryEvents.single.maxRetries, 5);
   });
 
   test('a response-header timeout uses the connection retry budget', () async {

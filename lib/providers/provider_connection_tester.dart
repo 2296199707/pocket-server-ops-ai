@@ -19,6 +19,7 @@ class ProviderConnectionTester {
       baseUrl: profile.baseUrl,
       apiKey: secret,
       model: profile.model,
+      sessionId: 'provider-test-${profile.id}',
       reasoningEffort: profile.reasoningEffort,
       inputModalities: profile.wireApi == 'responses'
           ? resolveProviderModelMetadata(

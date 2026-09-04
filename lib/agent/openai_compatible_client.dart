@@ -357,6 +357,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required String apiKey,
     required String model,
     String reasoningEffort = 'default',
+    String? sessionId,
     http.Client? client,
     // Match Codex's configurable five-minute stream idle timeout. This is an
     // inactivity limit for the provider transport, not a wall-clock limit for
@@ -373,6 +374,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       apiKey: apiKey,
       model: model,
       reasoningEffort: reasoningEffort,
+      sessionId: sessionId,
       timeout: timeout,
       client: client ?? http.Client(),
       maxResponseBytes: maxResponseBytes,
@@ -388,6 +390,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required this._apiKey,
     required this.model,
     required this.reasoningEffort,
+    required this.sessionId,
     required this.timeout,
     required this._client,
     required this.maxResponseBytes,
@@ -401,6 +404,8 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   final String _apiKey;
   final String model;
   final String reasoningEffort;
+  /// Stable conversation identifier sent as x-opencode-session.
+  final String? sessionId;
   final Duration timeout;
   final http.Client _client;
   final int? maxResponseBytes;
@@ -484,6 +489,9 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     request.headers['Content-Type'] = 'application/json';
     if (_apiKey.isNotEmpty) {
       request.headers['Authorization'] = 'Bearer $_apiKey';
+    }
+    if (sessionId != null && sessionId!.isNotEmpty) {
+      request.headers['x-opencode-session'] = sessionId!;
     }
     final requestBody = <String, Object?>{
       'model': model,

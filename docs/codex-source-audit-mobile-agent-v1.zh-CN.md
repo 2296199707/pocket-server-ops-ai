@@ -2140,3 +2140,17 @@ Responses 判断 Sub2API 的实际出站协议。
 - APK：`/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.5-beta.2-release.apk`。
 - 发布结果：已推送远端 `beta` 分支并创建 GitHub Pre-release `v1.0.5-beta.2`；Release 地址：
   `https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.2`。
+
+### 2026-09-04：OpenCode Go 会话请求头
+
+- OpenCode Go 要求客户端为同一对话发送稳定的 `x-opencode-session`。移动端的持久化
+  `Task.id` 就是对话标识，不在每次请求或重试时重新生成。
+- `OpenAiCompatibleClient` 和 `ChatCompletionsClient` 现在都接受可选 `sessionId`，并
+  将其写入 `x-opencode-session`；请求重试使用原请求头副本，因此重试不会丢失会话标识。
+- 正常对话、手动/自动压缩、自动审查和子代理均传入当前任务 ID；供应商连接测试使用
+  当前供应商的稳定测试标识。没有传入标识的独立客户端调用保持原行为，不强行生成会话。
+- 这只是请求头补齐，不改变 Responses/Chat Completions 的明确协议选择，也不把会话内容
+  交给 OpenCode 服务端保存；当前请求仍使用手机侧历史和 `store: false` 的 Responses
+  设计。
+- 已增加 Responses 和 Chat Completions 请求头回归断言，并校正两项此前未跟随现有代码
+  更新的基线断言（Chat 默认超时和连接重试上限）。定向静态分析与完整选定测试通过。

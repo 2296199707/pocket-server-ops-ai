@@ -2226,6 +2226,7 @@ class AppController extends ChangeNotifier {
         baseUrl: provider.baseUrl,
         apiKey: apiKey,
         model: model,
+        sessionId: task.id,
         reasoningEffort:
             task.reasoningEffortOverride ?? provider.reasoningEffort,
         inputModalities: modelMetadata?.inputModalities,
@@ -3222,6 +3223,7 @@ class AppController extends ChangeNotifier {
         baseUrl: activeProvider.baseUrl,
         apiKey: apiKey,
         model: model,
+        sessionId: task.id,
         reasoningEffort:
             task.reasoningEffortOverride ?? activeProvider.reasoningEffort,
         inputModalities: activeProvider.wireApi == 'responses'
@@ -6269,6 +6271,7 @@ class AppController extends ChangeNotifier {
         baseUrl: provider.baseUrl,
         apiKey: apiKey,
         model: model,
+        sessionId: task.id,
         reasoningEffort: provider.reasoningEffort,
         inputModalities: provider.wireApi == 'responses'
             ? resolveProviderModelMetadata(provider, model)?.inputModalities

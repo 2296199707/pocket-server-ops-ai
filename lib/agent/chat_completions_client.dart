@@ -50,6 +50,7 @@ class ChatCompletionsClient implements AiChatClient {
     required String apiKey,
     required String model,
     String reasoningEffort = 'default',
+    String? sessionId,
     bool? deepSeekThinking,
     bool stream = true,
     http.Client? client,
@@ -76,6 +77,7 @@ class ChatCompletionsClient implements AiChatClient {
       apiKey: apiKey,
       model: model,
       reasoningEffort: reasoningEffort,
+      sessionId: sessionId,
       deepSeekThinking: deepSeekThinking ?? _looksLikeDeepSeek(baseUrl, model),
       stream: stream,
       client: client ?? http.Client(),
@@ -91,6 +93,7 @@ class ChatCompletionsClient implements AiChatClient {
     required this._apiKey,
     required this.model,
     required this.reasoningEffort,
+    required this.sessionId,
     required this.deepSeekThinking,
     required this.stream,
     required this._client,
@@ -104,6 +107,8 @@ class ChatCompletionsClient implements AiChatClient {
   final String _apiKey;
   final String model;
   final String reasoningEffort;
+  /// Stable conversation identifier sent as x-opencode-session.
+  final String? sessionId;
   final bool deepSeekThinking;
   final bool stream;
   final Duration timeout;
@@ -131,6 +136,9 @@ class ChatCompletionsClient implements AiChatClient {
     request.headers['Content-Type'] = 'application/json';
     if (_apiKey.isNotEmpty) {
       request.headers['Authorization'] = 'Bearer $_apiKey';
+    }
+    if (sessionId != null && sessionId!.isNotEmpty) {
+      request.headers['x-opencode-session'] = sessionId!;
     }
 
     final requestBody = <String, Object?>{
