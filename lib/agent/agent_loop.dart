@@ -410,7 +410,23 @@ class AgentLoop {
       // Start explicitly declared independent reads together. Results are
       // still consumed below in model order, so the wire history is stable.
       final concurrentReads = <String, Future<Object?>>{};
-      for (final candidate in assistantForHistory.toolCalls) {
+      final readOnlyBatch =
+          !stop.isCancelled &&
+          maxToolCalls == null &&
+          assistantForHistory.toolCalls.every((candidate) {
+            final tool = _findTool(availableTools, candidate.name);
+            return tool != null &&
+                tool.canRunConcurrently &&
+                !tool.writesRemoteState &&
+                !tool.requiresConfirmation &&
+                !tool.requiresUserApproval &&
+                tool.userApprovalRequired == null &&
+                tool.callWithOperationStart == null;
+          });
+      for (final candidate
+          in readOnlyBatch
+              ? assistantForHistory.toolCalls
+              : const <AiToolCall>[]) {
         final candidateTool = _findTool(availableTools, candidate.name);
         if (candidateTool == null ||
             !candidateTool.canRunConcurrently ||
@@ -420,9 +436,15 @@ class AgentLoop {
         }
         try {
           final candidateArguments = decodeObject(candidate.arguments);
-          concurrentReads[toolResultId(candidate)] = candidateTool.call(
-            candidateArguments,
+          final pending = Future<Object?>.sync(
+            () => candidateTool.call(candidateArguments),
           );
+          // Observe early failures even while an earlier result is awaited.
+          // Keep the original future so the normal loop reports the error.
+          unawaited(
+            pending.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+          );
+          concurrentReads[toolResultId(candidate)] = pending;
         } catch (_) {
           // The normal loop below reports malformed arguments and tool errors.
         }

@@ -10,6 +10,42 @@ import 'package:mobile_agent/agent/remote_write_queue.dart';
 import 'package:mobile_agent/domain/models.dart';
 
 void main() {
+  test('mixed batch reads wait for the preceding write', () async {
+    var written = false;
+    final result = await AgentLoop(
+      client: _ConcurrentReadClient(),
+      tools: [
+        AgentTool(
+          definition: const AiToolDefinition(
+            name: 'read.one',
+            description: 'write',
+            parameters: {'type': 'object'},
+          ),
+          writesRemoteState: true,
+          call: (_) async {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+            written = true;
+            return 'written';
+          },
+        ),
+        AgentTool(
+          definition: const AiToolDefinition(
+            name: 'read.two',
+            description: 'read',
+            parameters: {'type': 'object'},
+          ),
+          requiresConfirmation: false,
+          canRunConcurrently: true,
+          call: (_) async => written ? 'fresh' : 'stale',
+        ),
+      ],
+    ).run(prompt: 'write then read', executionMode: 'auto');
+    expect(
+      result.messages.where((m) => m.role == 'tool').last.content,
+      contains('fresh'),
+    );
+  });
+
   test(
     'independent read tools overlap while results keep call order',
     () async {
