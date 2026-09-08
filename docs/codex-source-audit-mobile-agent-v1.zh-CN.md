@@ -2154,3 +2154,7 @@ Responses 判断 Sub2API 的实际出站协议。
   设计。
 - 已增加 Responses 和 Chat Completions 请求头回归断言，并校正两项此前未跟随现有代码
   更新的基线断言（Chat 默认超时和连接重试上限）。定向静态分析与完整选定测试通过。
+- 后续收窄策略：只有 `opencode.ai` 及其子域名发送 `x-opencode-session`；其他供应商只
+  发送 `x-pocket-server-ops-session` 和 `User-Agent: PocketServerOps/1.0 (mobile-agent)`。
+  因此第三方 OpenCode 网关不会被误判为官方 OpenCode，供应商看到的客户端名称为
+  `PocketServerOps/1.0 (mobile-agent)`。

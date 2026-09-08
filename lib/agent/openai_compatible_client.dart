@@ -358,6 +358,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required String model,
     String reasoningEffort = 'default',
     String? sessionId,
+    bool openCodeProvider = false,
     http.Client? client,
     // Match Codex's configurable five-minute stream idle timeout. This is an
     // inactivity limit for the provider transport, not a wall-clock limit for
@@ -375,6 +376,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       model: model,
       reasoningEffort: reasoningEffort,
       sessionId: sessionId,
+      openCodeProvider: openCodeProvider,
       timeout: timeout,
       client: client ?? http.Client(),
       maxResponseBytes: maxResponseBytes,
@@ -391,6 +393,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     required this.model,
     required this.reasoningEffort,
     required this.sessionId,
+    required this.openCodeProvider,
     required this.timeout,
     required this._client,
     required this.maxResponseBytes,
@@ -406,6 +409,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   final String reasoningEffort;
   /// Stable conversation identifier sent as x-opencode-session.
   final String? sessionId;
+  final bool openCodeProvider;
   final Duration timeout;
   final http.Client _client;
   final int? maxResponseBytes;
@@ -487,10 +491,14 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     final request = http.Request('POST', Uri.parse('$baseUrl/responses'));
     request.headers['Accept'] = 'text/event-stream, application/json';
     request.headers['Content-Type'] = 'application/json';
+    request.headers['User-Agent'] = 'PocketServerOps/1.0 (mobile-agent)';
+    if (sessionId != null && sessionId!.isNotEmpty) {
+      request.headers['x-pocket-server-ops-session'] = sessionId!;
+    }
     if (_apiKey.isNotEmpty) {
       request.headers['Authorization'] = 'Bearer $_apiKey';
     }
-    if (sessionId != null && sessionId!.isNotEmpty) {
+    if (openCodeProvider && sessionId != null && sessionId!.isNotEmpty) {
       request.headers['x-opencode-session'] = sessionId!;
     }
     final requestBody = <String, Object?>{

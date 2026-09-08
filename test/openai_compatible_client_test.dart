@@ -132,6 +132,7 @@ void main() {
         apiKey: 'test-key',
         model: 'gpt-5.6-luna',
         sessionId: 'task-conversation-1',
+        openCodeProvider: true,
         client: MockClient((incoming) async {
           request = incoming;
           return http.Response(
@@ -757,6 +758,7 @@ void main() {
       apiKey: 'test-key',
       model: 'test-model',
       sessionId: 'task-retry-1',
+      openCodeProvider: true,
       retryPolicy: const AiRetryPolicy(
         requestMaxRetries: 0,
         streamMaxRetries: 1,

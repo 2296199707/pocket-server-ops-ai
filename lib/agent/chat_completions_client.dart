@@ -51,6 +51,7 @@ class ChatCompletionsClient implements AiChatClient {
     required String model,
     String reasoningEffort = 'default',
     String? sessionId,
+    bool openCodeProvider = false,
     bool? deepSeekThinking,
     bool stream = true,
     http.Client? client,
@@ -78,6 +79,7 @@ class ChatCompletionsClient implements AiChatClient {
       model: model,
       reasoningEffort: reasoningEffort,
       sessionId: sessionId,
+      openCodeProvider: openCodeProvider,
       deepSeekThinking: deepSeekThinking ?? _looksLikeDeepSeek(baseUrl, model),
       stream: stream,
       client: client ?? http.Client(),
@@ -94,6 +96,7 @@ class ChatCompletionsClient implements AiChatClient {
     required this.model,
     required this.reasoningEffort,
     required this.sessionId,
+    required this.openCodeProvider,
     required this.deepSeekThinking,
     required this.stream,
     required this._client,
@@ -109,6 +112,7 @@ class ChatCompletionsClient implements AiChatClient {
   final String reasoningEffort;
   /// Stable conversation identifier sent as x-opencode-session.
   final String? sessionId;
+  final bool openCodeProvider;
   final bool deepSeekThinking;
   final bool stream;
   final Duration timeout;
@@ -134,10 +138,14 @@ class ChatCompletionsClient implements AiChatClient {
         ? 'text/event-stream, application/json'
         : 'application/json';
     request.headers['Content-Type'] = 'application/json';
+    request.headers['User-Agent'] = 'PocketServerOps/1.0 (mobile-agent)';
+    if (sessionId != null && sessionId!.isNotEmpty) {
+      request.headers['x-pocket-server-ops-session'] = sessionId!;
+    }
     if (_apiKey.isNotEmpty) {
       request.headers['Authorization'] = 'Bearer $_apiKey';
     }
-    if (sessionId != null && sessionId!.isNotEmpty) {
+    if (openCodeProvider && sessionId != null && sessionId!.isNotEmpty) {
       request.headers['x-opencode-session'] = sessionId!;
     }
 

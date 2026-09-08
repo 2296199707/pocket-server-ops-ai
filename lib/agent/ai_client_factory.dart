@@ -3,6 +3,11 @@ import 'package:http/http.dart' as http;
 import 'chat_completions_client.dart';
 import 'openai_compatible_client.dart';
 
+bool isOpenCodeProviderUrl(String baseUrl) {
+  final host = Uri.tryParse(baseUrl.trim())?.host.toLowerCase() ?? '';
+  return host == 'opencode.ai' || host.endsWith('.opencode.ai');
+}
+
 AiChatClient createAiClient({
   required String wireApi,
   required String baseUrl,
@@ -24,6 +29,7 @@ AiChatClient createAiClient({
         model: model,
         reasoningEffort: reasoningEffort,
         sessionId: sessionId,
+        openCodeProvider: isOpenCodeProviderUrl(baseUrl),
         inputModalities: inputModalities,
         autoCompactTokenLimit: autoCompactTokenLimit,
         client: client,
@@ -37,6 +43,7 @@ AiChatClient createAiClient({
         model: model,
         reasoningEffort: reasoningEffort,
         sessionId: sessionId,
+        openCodeProvider: isOpenCodeProviderUrl(baseUrl),
         client: client,
         retryPolicy: retryPolicy,
         onRetry: onRetry,

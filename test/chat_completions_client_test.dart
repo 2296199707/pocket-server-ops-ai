@@ -19,6 +19,7 @@ void main() {
         model: 'test-model',
         reasoningEffort: 'high',
         sessionId: 'task-conversation-1',
+        openCodeProvider: true,
         stream: false,
         client: MockClient((incoming) async {
           request = incoming;
@@ -184,6 +185,7 @@ void main() {
       apiKey: 'test-key',
       model: 'test-model',
       sessionId: 'task-retry-1',
+      openCodeProvider: true,
       retryPolicy: const AiRetryPolicy(
         requestMaxRetries: 0,
         streamMaxRetries: 1,
