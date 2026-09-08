@@ -6,7 +6,10 @@ import '../agent/ai_protocol.dart';
 import '../agent/ai_client_factory.dart';
 import '../domain/models.dart';
 
-const _codexModelCatalogClientVersion = '0.150.0';
+// Sub2API selects its Codex capability manifest when this query is present.
+// Keep this aligned with the current Codex client contract; it is not the
+// provider API version and is never used for the ordinary model list.
+const _codexModelCatalogClientVersion = '0.200.1';
 
 class ProviderConnectionTester {
   ProviderConnectionTester({this.client});
@@ -65,12 +68,14 @@ class ProviderConnectionTester {
     // filter out newer models on gateways, even when the request succeeds.
     // Keep version negotiation only for endpoints rejecting standard /models.
     final codexUri = standardUri.replace(
-      queryParameters: const {
+      queryParameters: {
+        ...standardUri.queryParameters,
         'client_version': _codexModelCatalogClientVersion,
       },
     );
     final requestClient = client ?? http.Client();
     try {
+      var usedCodexCatalogFallback = false;
       var response = await requestClient
           .get(
             standardUri,
@@ -81,6 +86,7 @@ class ProviderConnectionTester {
           )
           .timeout(const Duration(seconds: 10));
       if (_shouldRetryStandardModelCatalog(response.statusCode)) {
+        usedCodexCatalogFallback = true;
         response = await requestClient
             .get(
               codexUri,
@@ -100,27 +106,24 @@ class ProviderConnectionTester {
       }
       // OpenAI-compatible catalogs use `data`; the Codex model catalog uses
       // `models`. Both contain the same per-model metadata fields.
-      final rawModels = decoded['data'] ?? decoded['models'];
-      if (rawModels is! List) {
-        throw const FormatException('供应商模型列表格式无效');
-      }
-      final models = <ProviderModelMetadata>[];
-      for (final item in rawModels) {
-        final rawModel = item is Map
-            ? item['id'] is String
-                  ? item['id']
-                  : item['slug']
-            : null;
-        if (item is Map && rawModel is String && rawModel.isNotEmpty) {
-          final model = rawModel.trim();
-          if (model.isEmpty) continue;
-          models.add(
-            ProviderModelMetadata.fromMap({
-              ...Map<String, Object?>.from(item),
-              'model': model,
-              'source': 'api',
-            }),
-          );
+      var models = _parseModelMetadata(decoded, source: 'api');
+      if (!usedCodexCatalogFallback && _needsCodexCapabilityMetadata(models)) {
+        final capabilityModels = await _tryFetchCodexModelMetadata(
+          requestClient,
+          codexUri,
+          secret,
+        );
+        if (capabilityModels != null) {
+          final byModel = <String, ProviderModelMetadata>{
+            for (final model in capabilityModels) model.model: model,
+          };
+          models = [
+            for (final model in models)
+              if (byModel[model.model] case final capability?)
+                model.mergedWith(capability)
+              else
+                model,
+          ];
         }
       }
       return await _mergeOpenCodeCatalog(profile, models, requestClient);
@@ -128,6 +131,74 @@ class ProviderConnectionTester {
       throw ArgumentError('Base URL 无效');
     } finally {
       if (client == null) requestClient.close();
+    }
+  }
+
+  List<ProviderModelMetadata> _parseModelMetadata(
+    Map decoded, {
+    required String source,
+  }) {
+    // OpenAI-compatible catalogs use `data`; the Codex model catalog uses
+    // `models`. Both contain the same per-model capability fields.
+    final rawModels = decoded['data'] ?? decoded['models'];
+    if (rawModels is! List) {
+      throw const FormatException('供应商模型列表格式无效');
+    }
+    final models = <ProviderModelMetadata>[];
+    for (final item in rawModels) {
+      final rawModel = item is Map
+          ? item['id'] is String
+                ? item['id']
+                : item['slug']
+          : null;
+      if (item is Map && rawModel is String && rawModel.isNotEmpty) {
+        final model = rawModel.trim();
+        if (model.isEmpty) continue;
+        models.add(
+          ProviderModelMetadata.fromMap({
+            ...Map<String, Object?>.from(item),
+            'model': model,
+            'source': source,
+          }),
+        );
+      }
+    }
+    return models;
+  }
+
+  bool _needsCodexCapabilityMetadata(List<ProviderModelMetadata> models) {
+    return models.any(
+      (model) =>
+          model.defaultReasoningLevel == null &&
+          model.supportedReasoningLevels == null,
+    );
+  }
+
+  Future<List<ProviderModelMetadata>?> _tryFetchCodexModelMetadata(
+    http.Client requestClient,
+    Uri uri,
+    String secret,
+  ) async {
+    try {
+      final response = await requestClient
+          .get(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Authorization': 'Bearer $secret',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) return null;
+      return _parseModelMetadata(decoded, source: 'api-codex');
+    } on Object {
+      // Capability discovery is enrichment. A provider that only supports
+      // ordinary /models must remain usable with its already returned ids.
+      return null;
     }
   }
 

@@ -262,7 +262,74 @@ void main() {
       final models = await ProviderConnectionTester(client: client)
           .listModels(_profile('https://provider.example/v1'), 'secret');
       expect(models, contains('gpt-6-astra'));
-      expect(requests, 1);
+      expect(requests, 2);
+    },
+  );
+
+  test(
+    'merges Codex reasoning metadata without replacing the standard catalog',
+    () async {
+      final requests = <Uri>[];
+      final client = MockClient((request) async {
+        requests.add(request.url);
+        if (request.url.queryParameters.containsKey('client_version')) {
+          return Response(
+            jsonEncode({
+              'models': [
+                {
+                  'slug': 'gpt-5.6-luna',
+                  'default_reasoning_level': 'medium',
+                  'supported_reasoning_levels': [
+                    {'effort': 'low'},
+                    {'effort': 'medium'},
+                    {'effort': 'high'},
+                  ],
+                },
+                {
+                  'slug': 'gpt-6-astra',
+                  'default_reasoning_level': 'low',
+                  'supported_reasoning_levels': [
+                    {'effort': 'low'},
+                    {'effort': 'high'},
+                    {'effort': 'ultra'},
+                  ],
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        return Response(
+          jsonEncode({
+            'data': [
+              {'id': 'gpt-5.6-luna'},
+              {'id': 'gpt-6-astra'},
+              {'id': 'provider-new-model'},
+            ],
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
+
+      final models = await ProviderConnectionTester(client: client)
+          .listModelMetadata(_profile('https://provider.example/v1'), 'secret');
+
+      expect(requests, hasLength(2));
+      expect(requests.first.queryParameters, isEmpty);
+      expect(requests[1].queryParameters['client_version'], '0.200.1');
+      expect(models.map((model) => model.model), [
+        'gpt-5.6-luna',
+        'gpt-6-astra',
+        'provider-new-model',
+      ]);
+      expect(models[0].defaultReasoningLevel, 'medium');
+      expect(models[1].supportedReasoningLevels?.map((level) => level.effort), [
+        'low',
+        'high',
+        'ultra',
+      ]);
+      expect(models[2].supportedReasoningLevels, isNull);
     },
   );
 }
