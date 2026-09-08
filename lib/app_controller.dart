@@ -1937,12 +1937,10 @@ class AppController extends ChangeNotifier {
     final updatedTask = (updateTask?.call(task) ?? task).copyWith(
       updatedAt: event.timestamp,
     );
-    if (updateTask == null) {
-      await _database.saveEvent(event);
-      await _database.saveTask(updatedTask);
-    } else {
-      await _database.saveTaskAndEvent(updatedTask, event);
-    }
+    // Keep the event and its task snapshot in one transaction. This removes
+    // two separate SQLite round trips for the common event path while
+    // preserving the existing serialized task event queue.
+    await _database.saveTaskAndEvent(updatedTask, event);
     _events = {
       ..._events,
       taskId: List.unmodifiable([...eventsFor(taskId), event]),
