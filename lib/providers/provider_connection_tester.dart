@@ -61,9 +61,9 @@ class ProviderConnectionTester {
     }
 
     final standardUri = Uri.parse('$baseUrl/models');
-    // Codex-compatible gateways use this query to return model capabilities
-    // such as supported_reasoning_levels. Ordinary OpenAI-compatible servers
-    // usually ignore the query and still return their normal data list.
+    // Prefer the unversioned provider catalog. A Codex client_version can
+    // filter out newer models on gateways, even when the request succeeds.
+    // Keep version negotiation only for endpoints rejecting standard /models.
     final codexUri = standardUri.replace(
       queryParameters: const {
         'client_version': _codexModelCatalogClientVersion,
@@ -73,7 +73,7 @@ class ProviderConnectionTester {
     try {
       var response = await requestClient
           .get(
-            codexUri,
+            standardUri,
             headers: {
               'Accept': 'application/json',
               'Authorization': 'Bearer $secret',
@@ -83,7 +83,7 @@ class ProviderConnectionTester {
       if (_shouldRetryStandardModelCatalog(response.statusCode)) {
         response = await requestClient
             .get(
-              standardUri,
+              codexUri,
               headers: {
                 'Accept': 'application/json',
                 'Authorization': 'Bearer $secret',

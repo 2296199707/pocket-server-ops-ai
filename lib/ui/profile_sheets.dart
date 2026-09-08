@@ -1156,6 +1156,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
   final List<TextEditingController> _customReasoningInputs = [];
   final List<String> _customReasoningValues = [];
   String? _error;
+  String? _modelLoadMessage;
 
   @override
   void initState() {
@@ -1316,6 +1317,13 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
               decoration: const InputDecoration(labelText: '名称'),
               validator: _required,
             ),
+            if (_modelLoadMessage != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                _modelLoadMessage!,
+                style: TextStyle(color: Theme.of(context).colorScheme.primary),
+              ),
+            ],
             const SizedBox(height: 14),
             TextFormField(
               controller: _baseUrl,
@@ -1598,6 +1606,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
     setState(() {
       _loadingModels = true;
       _error = null;
+      _modelLoadMessage = null;
     });
     try {
       final metadata = await widget.controller.loadProviderModelMetadata(
@@ -1615,6 +1624,7 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
             for (final item in metadata)
               item.model: _modelMetadata[item.model]?.mergedWith(item) ?? item,
           };
+          _modelLoadMessage = '已获取 ${_models.length} 个模型';
         });
       }
     } catch (error) {

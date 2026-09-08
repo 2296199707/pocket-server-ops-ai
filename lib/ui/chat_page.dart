@@ -1418,7 +1418,11 @@ class ChatPageState extends State<ChatPage> {
                       ? item
                       : previous.mergedWith(item);
                 }
-                setSheetState(() => reasoningLoadFailed = false);
+                setSheetState(() {
+                  models = {...models, ...metadataByModel.keys}.toList()
+                    ..sort();
+                  reasoningLoadFailed = false;
+                });
               } catch (_) {
                 if (!mounted || !sheetContext.mounted) return;
                 setSheetState(() => reasoningLoadFailed = true);
@@ -1448,7 +1452,13 @@ class ChatPageState extends State<ChatPage> {
                         : previous.mergedWith(item);
                   }
                 }
-                setSheetState(() => subagentReasoningLoadFailed = false);
+                setSheetState(() {
+                  if (followsParentProvider) {
+                    models = {...models, ...metadataByModel.keys}.toList()
+                      ..sort();
+                  }
+                  subagentReasoningLoadFailed = false;
+                });
               } catch (_) {
                 if (!mounted || !sheetContext.mounted) return;
                 setSheetState(() => subagentReasoningLoadFailed = true);

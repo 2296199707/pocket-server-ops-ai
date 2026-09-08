@@ -47,7 +47,7 @@ void main() {
         .listModelMetadata(_profile('https://provider.example/v1'), 'secret');
 
     expect(request.url.path, '/v1/models');
-    expect(request.url.queryParameters['client_version'], '0.150.0');
+    expect(request.url.queryParameters.containsKey('client_version'), isFalse);
     expect(request.headers['authorization'], 'Bearer secret');
     expect(models.single.defaultReasoningLevel, 'high');
     expect(models.single.supportedReasoningLevels?.last.effort, 'high');
@@ -213,28 +213,56 @@ void main() {
     },
   );
 
-  test('falls back to the standard model list when catalog negotiation is rejected', () async {
-    var requests = 0;
-    final client = MockClient((request) async {
-      requests++;
-      if (request.url.queryParameters.containsKey('client_version')) {
-        return Response('{}', 404);
-      }
-      return Response(
-        jsonEncode({
-          'data': [
-            {'id': 'model-1'},
-          ],
-        }),
-        200,
-      );
-    });
-    addTearDown(client.close);
+  test(
+    'negotiates version only when standard model list is rejected',
+    () async {
+      var requests = 0;
+      final client = MockClient((request) async {
+        requests++;
+        if (!request.url.queryParameters.containsKey('client_version')) {
+          return Response('{}', 404);
+        }
+        return Response(
+          jsonEncode({
+            'data': [
+              {'id': 'model-1'},
+            ],
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
 
-    final models = await ProviderConnectionTester(client: client)
-        .listModelMetadata(_profile('https://provider.example/v1'), 'secret');
+      final models = await ProviderConnectionTester(client: client)
+          .listModelMetadata(_profile('https://provider.example/v1'), 'secret');
 
-    expect(requests, 2);
-    expect(models.single.model, 'model-1');
-  });
+      expect(requests, 2);
+      expect(models.single.model, 'model-1');
+    },
+  );
+
+  test(
+    'standard catalog retains new models hidden by version negotiation',
+    () async {
+      var requests = 0;
+      final client = MockClient((request) async {
+        requests++;
+        return Response(
+          jsonEncode({
+            'data': [
+              {'id': 'gpt-5.6-luna'},
+              if (!request.url.queryParameters.containsKey('client_version'))
+                {'id': 'gpt-6-astra'},
+            ],
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
+      final models = await ProviderConnectionTester(client: client)
+          .listModels(_profile('https://provider.example/v1'), 'secret');
+      expect(models, contains('gpt-6-astra'));
+      expect(requests, 1);
+    },
+  );
 }
