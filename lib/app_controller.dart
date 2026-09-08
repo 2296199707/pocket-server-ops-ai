@@ -188,6 +188,7 @@ class AppController extends ChangeNotifier {
   final RemoteWriteQueue _remoteWriteQueue = RemoteWriteQueue();
   final Map<String, Future<void>> _taskEventTails = {};
   final Map<String, int> _nextEventSequences = {};
+  Timer? _eventNotifyTimer;
   final Map<String, Future<void>> _taskStatusTails = {};
   final Map<String, Future<void>> _subagentStateTails = {};
   final Map<String, Future<void>> _eventLoads = {};
@@ -1951,8 +1952,16 @@ class AppController extends ChangeNotifier {
     ];
     final progress = _taskProgressForEvent(type, payload);
     if (progress != null) _publishTaskProgress(taskId, progress);
-    _notify();
+    _scheduleEventNotify();
     return event;
+  }
+
+  void _scheduleEventNotify() {
+    if (_disposed || _eventNotifyTimer != null) return;
+    _eventNotifyTimer = Timer(const Duration(milliseconds: 16), () {
+      _eventNotifyTimer = null;
+      _notify();
+    });
   }
 
   Future<int> _nextEventSequence(String taskId) async {
@@ -8252,6 +8261,8 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _eventNotifyTimer?.cancel();
+    _eventNotifyTimer = null;
     for (final timer in _streamingAssistantFlushes.values) {
       timer.cancel();
     }
