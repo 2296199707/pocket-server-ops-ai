@@ -248,12 +248,16 @@ class AgentLoop {
           cancellation: stop.whenCancelled,
         );
         await deltaEvents;
-        await _emit(onEvent, 'agent.timing', {
-          'phase': 'ai_request',
-          'elapsed_ms': DateTime.now()
-              .difference(aiRequestStartedAt)
-              .inMilliseconds,
-        });
+        // Timing is diagnostic only. Do not put it on the durable event path
+        // or it would add one database round trip to every model turn.
+        unawaited(
+          _emit(onEvent, 'agent.timing', {
+            'phase': 'ai_request',
+            'elapsed_ms': DateTime.now()
+                .difference(aiRequestStartedAt)
+                .inMilliseconds,
+          }),
+        );
       } catch (error) {
         if (stop.isCancelled) {
           final status = remoteOperationStarted ? 'unknown' : 'cancelled';

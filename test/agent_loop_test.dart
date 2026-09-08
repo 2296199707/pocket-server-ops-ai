@@ -10,6 +10,40 @@ import 'package:mobile_agent/agent/remote_write_queue.dart';
 import 'package:mobile_agent/domain/models.dart';
 
 void main() {
+  test(
+    'independent read tools overlap while results keep call order',
+    () async {
+      var active = 0;
+      var peak = 0;
+      final result = await AgentLoop(
+        client: _ConcurrentReadClient(),
+        tools: [
+          for (final name in ['read.one', 'read.two'])
+            AgentTool(
+              definition: AiToolDefinition(
+                name: name,
+                description: 'read',
+                parameters: const {'type': 'object'},
+              ),
+              call: (_) async {
+                active++;
+                if (active > peak) peak = active;
+                await Future<void>.delayed(const Duration(milliseconds: 10));
+                active--;
+                return name;
+              },
+              requiresConfirmation: false,
+              canRunConcurrently: true,
+            ),
+        ],
+      ).run(prompt: '读取', executionMode: 'auto');
+
+      expect(result.status, 'completed');
+      expect(peak, 2);
+      expect(result.messages.last.content, 'done');
+    },
+  );
+
   test('cancellation stops an in-flight AI request', () async {
     final cancellation = AgentCancellation();
     final events = <String>[];
@@ -988,6 +1022,39 @@ class _WaitingClient implements AiChatClient {
   }) async {
     await cancellation;
     throw const AiRequestCancelled();
+  }
+}
+
+class _ConcurrentReadClient implements AiChatClient {
+  var calls = 0;
+
+  @override
+  Future<AiMessage> complete({
+    required List<AiMessage> messages,
+    required List<AiToolDefinition> tools,
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    if (calls++ == 0) {
+      return const AiMessage(
+        role: 'assistant',
+        toolCalls: [
+          AiToolCall(
+            id: '1',
+            callId: 'call-1',
+            name: 'read.one',
+            arguments: '{}',
+          ),
+          AiToolCall(
+            id: '2',
+            callId: 'call-2',
+            name: 'read.two',
+            arguments: '{}',
+          ),
+        ],
+      );
+    }
+    return const AiMessage(role: 'assistant', content: 'done');
   }
 }
 
