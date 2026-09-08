@@ -403,6 +403,27 @@ class AgentLoop {
         );
       }
 
+      // Start explicitly declared independent reads together. Results are
+      // still consumed below in model order, so the wire history is stable.
+      final concurrentReads = <String, Future<Object?>>{};
+      for (final candidate in assistantForHistory.toolCalls) {
+        final candidateTool = _findTool(availableTools, candidate.name);
+        if (candidateTool == null ||
+            !candidateTool.canRunConcurrently ||
+            candidateTool.requiresConfirmation ||
+            candidateTool.requiresUserApproval) {
+          continue;
+        }
+        try {
+          final candidateArguments = decodeObject(candidate.arguments);
+          concurrentReads[toolResultId(candidate)] = candidateTool.call(
+            candidateArguments,
+          );
+        } catch (_) {
+          // The normal loop below reports malformed arguments and tool errors.
+        }
+      }
+
       for (final call in assistantForHistory.toolCalls) {
         if (stop.isCancelled) break;
         toolCallCount++;
@@ -578,7 +599,8 @@ class AgentLoop {
           final callWithOperationStart = tool.callWithOperationStart;
           if (callWithOperationStart == null) {
             markOperationStarted();
-            pendingTool = tool.call(arguments);
+            pendingTool =
+                concurrentReads[toolResultId(call)] ?? tool.call(arguments);
           } else {
             pendingTool = callWithOperationStart(
               arguments,
