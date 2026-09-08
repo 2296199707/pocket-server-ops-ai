@@ -187,6 +187,7 @@ class AppController extends ChangeNotifier {
   final Map<String, Future<List<ProjectFileEntry>>> _projectDirectoryLoads = {};
   final RemoteWriteQueue _remoteWriteQueue = RemoteWriteQueue();
   final Map<String, Future<void>> _taskEventTails = {};
+  final Map<String, int> _nextEventSequences = {};
   final Map<String, Future<void>> _taskStatusTails = {};
   final Map<String, Future<void>> _subagentStateTails = {};
   final Map<String, Future<void>> _eventLoads = {};
@@ -1928,7 +1929,7 @@ class AppController extends ChangeNotifier {
     final event = TaskEvent(
       eventId: _newId('event'),
       taskId: taskId,
-      sequence: await _database.nextEventSequence(taskId),
+      sequence: await _nextEventSequence(taskId),
       type: type,
       timestamp: DateTime.now().toUtc(),
       payload: _eventPayload(payload),
@@ -1952,6 +1953,17 @@ class AppController extends ChangeNotifier {
     if (progress != null) _publishTaskProgress(taskId, progress);
     _notify();
     return event;
+  }
+
+  Future<int> _nextEventSequence(String taskId) async {
+    final cached = _nextEventSequences[taskId];
+    if (cached != null) {
+      _nextEventSequences[taskId] = cached + 1;
+      return cached;
+    }
+    final next = await _database.nextEventSequence(taskId);
+    _nextEventSequences[taskId] = next + 1;
+    return next;
   }
 
   Future<void> deleteTask(Task task) async {
