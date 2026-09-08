@@ -2158,3 +2158,12 @@ Responses 判断 Sub2API 的实际出站协议。
   发送 `x-pocket-server-ops-session` 和 `User-Agent: PocketServerOps/1.0 (mobile-agent)`。
   因此第三方 OpenCode 网关不会被误判为官方 OpenCode，供应商看到的客户端名称为
   `PocketServerOps/1.0 (mobile-agent)`。
+
+### 2026-09-08：Agent 性能优化进度
+
+- 已确认流式增量主要更新内存显示，不是每个字符单独写数据库；当前主要瓶颈是工具
+  调用串行和多轮 AI 往返。
+- `AgentTool.canRunConcurrently` 已建立显式并发边界，`terminal.poll` 与 `file.read`
+  标记为只读并发候选，其余工具保持默认串行。
+- Agent Loop 已加入 `agent.timing` 事件，记录每次 AI 请求耗时；工具完成事件记录
+  `elapsed_ms`，用于对照并发改造前后的真实数据。

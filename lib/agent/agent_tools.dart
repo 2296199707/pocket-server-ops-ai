@@ -26,6 +26,7 @@ class AgentTool {
     this.requiresUserApproval = false,
     this.isRemote = false,
     this.writesRemoteState = false,
+    this.canRunConcurrently = false,
   });
 
   final AiToolDefinition definition;
@@ -64,6 +65,10 @@ class AgentTool {
   /// [writesRemoteState].
   final bool isRemote;
   final bool writesRemoteState;
+
+  /// Marks independent read-only operations that may be scheduled together
+  /// by the Agent loop. It is deliberately opt-in.
+  final bool canRunConcurrently;
 }
 
 class RemoteAgentTools {
@@ -267,6 +272,7 @@ class RemoteAgentTools {
       call: _poll,
       requiresConfirmation: false,
       isRemote: true,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -322,6 +328,7 @@ class RemoteAgentTools {
       call: _read,
       requiresConfirmation: false,
       isRemote: true,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(

@@ -236,6 +236,7 @@ class AgentLoop {
         if (maxContextCharacters != null) {
           _trimHistory(messages, maxContextCharacters);
         }
+        final aiRequestStartedAt = DateTime.now();
         assistant = await client.complete(
           messages: messages,
           tools: definitions,
@@ -247,6 +248,12 @@ class AgentLoop {
           cancellation: stop.whenCancelled,
         );
         await deltaEvents;
+        await _emit(onEvent, 'agent.timing', {
+          'phase': 'ai_request',
+          'elapsed_ms': DateTime.now()
+              .difference(aiRequestStartedAt)
+              .inMilliseconds,
+        });
       } catch (error) {
         if (stop.isCancelled) {
           final status = remoteOperationStarted ? 'unknown' : 'cancelled';
@@ -558,6 +565,7 @@ class AgentLoop {
 
         if (stop.isCancelled) break;
         var callOperationStarted = false;
+        final toolStartedAt = DateTime.now();
         void markOperationStarted() {
           if (callOperationStarted || !tool.writesRemoteState) return;
           callOperationStarted = true;
@@ -597,6 +605,9 @@ class AgentLoop {
             'call_id': toolResultId(call),
             'name': tool.definition.name,
             'result': eventResult,
+            'elapsed_ms': DateTime.now()
+                .difference(toolStartedAt)
+                .inMilliseconds,
           });
           addToolResult(call, _toolResultContent(serialized));
           recordToolOutcome(tool.definition.name, arguments, eventResult);
