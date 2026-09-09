@@ -76,6 +76,27 @@ void main() {
     },
   );
 
+  test(
+    'default byte chunk batch composes existing single-file reads',
+    () async {
+      final connection = _FakeConnection(fileContent: 'abcdef');
+      final chunks = await connection.readFileBytesChunks([
+        const SshFileBytesChunkRequest(remotePath: '/tmp/file', length: 2),
+        const SshFileBytesChunkRequest(
+          remotePath: '/tmp/file',
+          offset: 2,
+          length: 2,
+        ),
+      ]);
+
+      expect(chunks, hasLength(2));
+      expect(String.fromCharCodes(chunks[0].bytes), 'ab');
+      expect(String.fromCharCodes(chunks[1].bytes), 'cd');
+      expect(chunks[0].nextOffset, 2);
+      expect(chunks[1].nextOffset, 4);
+    },
+  );
+
   test('SSH output buffer uses raw UTF-8 byte offsets', () {
     final buffer = SshOutputBuffer(maxCharacters: 10);
     buffer.add('abc');
@@ -373,7 +394,7 @@ class _SessionHarness {
   void destroy() => controller.destroy();
 }
 
-class _FakeConnection implements SshConnection {
+class _FakeConnection extends SshConnection {
   _FakeConnection({this.fileContent = '', this.stream, this.fileBytes});
 
   final String fileContent;

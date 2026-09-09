@@ -30,6 +30,111 @@ void main() {
     await replacementController.close();
   });
 
+  test('poll skips unchanged output reads after the size probe', () async {
+    final home = await Directory.systemTemp.createTemp('remote-process-');
+    addTearDown(() => home.delete(recursive: true));
+    final connection = _LocalShellConnection(home);
+    final controller = RemoteProcessController(connection);
+    final started = await controller.start(
+      command: 'true',
+      workingDirectory: home.path,
+    );
+
+    final snapshot = await controller.poll(started.id, waitMs: 1000);
+
+    expect(snapshot.done, isTrue);
+    expect(snapshot.stdout, isEmpty);
+    expect(snapshot.stderr, isEmpty);
+    expect(snapshot.stdoutOffset, 0);
+    expect(snapshot.stderrOffset, 0);
+    expect(connection.readFileBytesChunkCalls, 0);
+    await controller.close();
+  });
+
+  test('startAndPoll gets the first status in the start request', () async {
+    final home = await Directory.systemTemp.createTemp('remote-process-');
+    addTearDown(() => home.delete(recursive: true));
+    final connection = _LocalShellConnection(home);
+    final controller = RemoteProcessController(connection);
+
+    final result = await controller.startAndPoll(
+      command: 'printf ready',
+      workingDirectory: home.path,
+      waitMs: 1000,
+    );
+
+    expect(result.snapshot.done, isTrue);
+    expect(result.snapshot.stdout, 'ready');
+    expect(connection.runCalls, 1);
+    await controller.close();
+  });
+
+  test(
+    'poll drains both streams by byte offsets before reporting done',
+    () async {
+      final home = await Directory.systemTemp.createTemp('remote-process-');
+      addTearDown(() => home.delete(recursive: true));
+      final connection = _LocalShellConnection(home);
+      final controller = RemoteProcessController(connection);
+      final started = await controller.start(
+        command: r"head -c 65537 /dev/zero | tr '\000' x; head -c 65537 /dev/zero | tr '\000' y >&2",
+        workingDirectory: home.path,
+      );
+
+      final first = await controller.poll(started.id, waitMs: 1000);
+      final second = await controller.poll(
+        started.id,
+        stdoutOffset: first.stdoutOffset,
+        stderrOffset: first.stderrOffset,
+      );
+
+      expect(first.done, isFalse);
+      expect(first.stdout.length, 64 * 1024);
+      expect(first.stderr.length, 64 * 1024);
+      expect(first.stdoutOffset, 64 * 1024);
+      expect(first.stderrOffset, 64 * 1024);
+      expect(first.stdoutTotalBytes, 65537);
+      expect(first.stderrTotalBytes, 65537);
+      expect(second.done, isTrue);
+      expect(second.stdout, 'x');
+      expect(second.stderr, 'y');
+      expect(second.stdoutOffset, 65537);
+      expect(second.stderrOffset, 65537);
+      await controller.close();
+    },
+  );
+
+  test(
+    'poll reconnects when the batched output read loses its connection',
+    () async {
+      final home = await Directory.systemTemp.createTemp('remote-process-');
+      addTearDown(() => home.delete(recursive: true));
+      final first = _LocalShellConnection(home);
+      final replacement = _LocalShellConnection(home);
+      var reconnectCalls = 0;
+      final controller = RemoteProcessController(
+        first,
+        reconnect: () async {
+          reconnectCalls++;
+          return replacement;
+        },
+      );
+      final started = await controller.start(
+        command: 'printf recovered; printf warning >&2',
+        workingDirectory: home.path,
+      );
+      first.closeAfterNextRun = true;
+
+      final snapshot = await controller.poll(started.id, waitMs: 1000);
+
+      expect(snapshot.done, isTrue);
+      expect(snapshot.stdout, 'recovered');
+      expect(snapshot.stderr, 'warning');
+      expect(reconnectCalls, 1);
+      await controller.close();
+    },
+  );
+
   test(
     'retrying the same process start does not run the command twice',
     () async {
@@ -215,6 +320,15 @@ void main() {
     final exec = group.tools.singleWhere(
       (tool) => tool.definition.name == 'terminal.exec',
     );
+    final pollTool = group.tools.singleWhere(
+      (tool) => tool.definition.name == 'terminal.poll',
+    );
+    final readTool = group.tools.singleWhere(
+      (tool) => tool.definition.name == 'file.read',
+    );
+    expect(pollTool.canRunConcurrently, isTrue);
+    expect(readTool.canRunConcurrently, isTrue);
+    expect(exec.canRunConcurrently, isFalse);
     final required = exec.definition.parameters['required'] as List;
     expect(required, contains('server_id'));
     expect(
@@ -286,12 +400,14 @@ void main() {
   );
 }
 
-class _LocalShellConnection implements SshConnection {
+class _LocalShellConnection extends SshConnection {
   _LocalShellConnection(this.home);
 
   final Directory home;
   bool closed = false;
   bool closeAfterNextRun = false;
+  var runCalls = 0;
+  var readFileBytesChunkCalls = 0;
 
   @override
   final hostKey = const SshHostKey(
@@ -324,6 +440,7 @@ class _LocalShellConnection implements SshConnection {
     Duration timeout = const Duration(minutes: 2),
   }) async {
     if (closed) throw StateError('connection closed');
+    runCalls++;
     final result = await Process.run(
       '/bin/sh',
       ['-c', command],
@@ -370,8 +487,10 @@ class _LocalShellConnection implements SshConnection {
   Future<String> readFile(String remotePath) => File(remotePath).readAsString();
 
   @override
-  Future<Uint8List> readFileBytes(String remotePath) =>
-      File(remotePath).readAsBytes();
+  Future<Uint8List> readFileBytes(String remotePath) {
+    if (closed) throw StateError('connection closed');
+    return File(remotePath).readAsBytes();
+  }
 
   @override
   Future<SshFileChunk> readFileChunk(
@@ -399,6 +518,7 @@ class _LocalShellConnection implements SshConnection {
     int offset = 0,
     int? length,
   }) async {
+    readFileBytesChunkCalls++;
     final bytes = await readFileBytes(remotePath);
     final start = offset.clamp(0, bytes.length).toInt();
     final end = (start + (length ?? bytes.length))
@@ -446,7 +566,7 @@ class _LocalShellConnection implements SshConnection {
   }
 }
 
-class _TransferConnection implements SshConnection {
+class _TransferConnection extends SshConnection {
   _TransferConnection({Map<String, List<int>>? files})
     : files = files ?? <String, List<int>>{};
 

@@ -229,6 +229,8 @@ class AgentLoop {
         );
       }
       AiMessage assistant;
+      final aiRequestTimer = Stopwatch();
+      int? firstTextDeltaMs;
       try {
         // Responses server-side compaction is the normal context policy. A
         // local character budget is retained only as an explicit caller
@@ -236,28 +238,27 @@ class AgentLoop {
         if (maxContextCharacters != null) {
           _trimHistory(messages, maxContextCharacters);
         }
-        final aiRequestStartedAt = DateTime.now();
+        aiRequestTimer.start();
         assistant = await client.complete(
           messages: messages,
           tools: definitions,
           onContentDelta: (delta) {
-            deltaEvents = deltaEvents.then(
-              (_) => _emit(onEvent, 'assistant.delta', {'text': delta}),
-            );
+            if (stop.isCancelled) return;
+            if (delta.isNotEmpty) {
+              firstTextDeltaMs ??= aiRequestTimer.elapsedMilliseconds;
+            }
+            // Invoke the draft update now, so queued callbacks cannot append
+            // a failed attempt's text after the retry handler clears it.
+            final update = _emit(onEvent, 'assistant.delta', {'text': delta});
+            // The callback itself is not awaited by the network reader. The
+            // small chain only preserves callback order before the terminal
+            // event is persisted.
+            deltaEvents = deltaEvents.then((_) => update);
           },
           cancellation: stop.whenCancelled,
         );
+        aiRequestTimer.stop();
         await deltaEvents;
-        // Timing is diagnostic only. Do not put it on the durable event path
-        // or it would add one database round trip to every model turn.
-        unawaited(
-          _emit(onEvent, 'agent.timing', {
-            'phase': 'ai_request',
-            'elapsed_ms': DateTime.now()
-                .difference(aiRequestStartedAt)
-                .inMilliseconds,
-          }),
-        );
       } catch (error) {
         if (stop.isCancelled) {
           final status = remoteOperationStarted ? 'unknown' : 'cancelled';
@@ -313,8 +314,15 @@ class AgentLoop {
           : assistant;
       messages.add(assistantForHistory);
       _dropHistoryBeforeLatestCompaction(messages);
+      final timing = <String, Object?>{
+        'ai_request_ms': aiRequestTimer.elapsedMilliseconds,
+      };
+      if (firstTextDeltaMs != null) {
+        timing['first_text_delta_ms'] = firstTextDeltaMs;
+      }
       await _emit(onEvent, 'assistant.completed', {
         'text': assistantForHistory.content ?? '',
+        'timing': timing,
         'wire_api': _wireApi(client),
         'model': _model(client),
         'tools': assistantForHistory.toolCalls
@@ -410,47 +418,62 @@ class AgentLoop {
       // Start explicitly declared independent reads together. Results are
       // still consumed below in model order, so the wire history is stable.
       final concurrentReads = <String, Future<Object?>>{};
-      final readOnlyBatch =
-          !stop.isCancelled &&
-          maxToolCalls == null &&
-          assistantForHistory.toolCalls.every((candidate) {
-            final tool = _findTool(availableTools, candidate.name);
-            return tool != null &&
-                tool.canRunConcurrently &&
-                !tool.writesRemoteState &&
-                !tool.requiresConfirmation &&
-                !tool.requiresUserApproval &&
-                tool.userApprovalRequired == null &&
-                tool.callWithOperationStart == null;
-          });
-      for (final candidate
-          in readOnlyBatch
-              ? assistantForHistory.toolCalls
-              : const <AiToolCall>[]) {
-        final candidateTool = _findTool(availableTools, candidate.name);
-        if (candidateTool == null ||
-            !candidateTool.canRunConcurrently ||
-            candidateTool.requiresConfirmation ||
-            candidateTool.requiresUserApproval) {
-          continue;
-        }
-        try {
-          final candidateArguments = decodeObject(candidate.arguments);
+      final concurrentReadTimers = <String, Stopwatch>{};
+      bool isConcurrentRead(AgentTool? tool) {
+        return tool != null &&
+            tool.canRunConcurrently &&
+            !tool.writesRemoteState &&
+            !tool.requiresConfirmation &&
+            !tool.requiresUserApproval &&
+            tool.userApprovalRequired == null &&
+            tool.callWithOperationStart == null;
+      }
+
+      void startConcurrentReadSegment(int startIndex) {
+        if (stop.isCancelled || maxToolCalls != null) return;
+        final first = assistantForHistory.toolCalls[startIndex];
+        if (concurrentReads.containsKey(toolResultId(first))) return;
+        for (
+          var index = startIndex;
+          index < assistantForHistory.toolCalls.length;
+          index++
+        ) {
+          final candidate = assistantForHistory.toolCalls[index];
+          final candidateTool = _findTool(availableTools, candidate.name);
+          if (!isConcurrentRead(candidateTool)) break;
+          Map<String, Object?> candidateArguments;
+          try {
+            candidateArguments = decodeObject(candidate.arguments);
+          } catch (_) {
+            // A malformed call is a sequence boundary. The normal loop will
+            // report it before a later segment can be started.
+            break;
+          }
+          final id = toolResultId(candidate);
+          if (concurrentReads.containsKey(id)) continue;
+          final timer = Stopwatch()..start();
           final pending = Future<Object?>.sync(
-            () => candidateTool.call(candidateArguments),
-          );
+            () => candidateTool!.call(candidateArguments),
+          ).whenComplete(timer.stop);
           // Observe early failures even while an earlier result is awaited.
           // Keep the original future so the normal loop reports the error.
           unawaited(
-            pending.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+            pending.then<void>(
+              (_) {},
+              onError: (Object error, StackTrace stack) {},
+            ),
           );
-          concurrentReads[toolResultId(candidate)] = pending;
-        } catch (_) {
-          // The normal loop below reports malformed arguments and tool errors.
+          concurrentReads[id] = pending;
+          concurrentReadTimers[id] = timer;
         }
       }
 
-      for (final call in assistantForHistory.toolCalls) {
+      for (
+        var callIndex = 0;
+        callIndex < assistantForHistory.toolCalls.length;
+        callIndex++
+      ) {
+        final call = assistantForHistory.toolCalls[callIndex];
         if (stop.isCancelled) break;
         toolCallCount++;
         if (maxToolCalls != null && toolCallCount > maxToolCalls) {
@@ -495,6 +518,11 @@ class AgentLoop {
           recordToolOutcome(tool.definition.name, call.arguments, message);
           continue;
         }
+
+        // Only the contiguous read segment beginning here is started early.
+        // A write, approval, unknown tool, or malformed call stops the scan;
+        // therefore a read after a write cannot observe state prematurely.
+        startConcurrentReadSegment(callIndex);
 
         await _emit(onEvent, 'tool.started', {
           'id': call.id,
@@ -612,7 +640,8 @@ class AgentLoop {
 
         if (stop.isCancelled) break;
         var callOperationStarted = false;
-        final toolStartedAt = DateTime.now();
+        final toolTimer =
+            concurrentReadTimers[toolResultId(call)] ?? (Stopwatch()..start());
         void markOperationStarted() {
           if (callOperationStarted || !tool.writesRemoteState) return;
           callOperationStarted = true;
@@ -643,6 +672,7 @@ class AgentLoop {
               );
             }),
           ]);
+          toolTimer.stop();
           final eventResult = _boundedToolResultValue(
             result,
             outputCharacterLimit,
@@ -653,9 +683,7 @@ class AgentLoop {
             'call_id': toolResultId(call),
             'name': tool.definition.name,
             'result': eventResult,
-            'elapsed_ms': DateTime.now()
-                .difference(toolStartedAt)
-                .inMilliseconds,
+            'elapsed_ms': toolTimer.elapsedMilliseconds,
           });
           addToolResult(call, _toolResultContent(serialized));
           recordToolOutcome(tool.definition.name, arguments, eventResult);
@@ -685,6 +713,7 @@ class AgentLoop {
             );
           }
         } catch (error) {
+          toolTimer.stop();
           if (stop.isCancelled && pendingTool != null) {
             final future = pendingTool;
             unawaited(

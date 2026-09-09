@@ -76,6 +76,7 @@ void main() {
       expect(request.headers['x-opencode-session'], 'task-conversation-1');
       final body = jsonDecode(request.body) as Map<String, Object?>;
       expect(body['stream'], false);
+      expect(body['parallel_tool_calls'], true);
       expect(body['reasoning_effort'], 'high');
       expect((body['messages'] as List)[1], {
         'role': 'tool',

@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.5-beta.14",
+      "title": "PocketServerOps AI v1.0.5-beta.14",
+      "notes": "优化 Agent 执行速度：可恢复 terminal.exec 将远程进程启动与首次状态探测合并为一次 SSH 命令请求；保留断线恢复、输出偏移、写操作顺序和本地完整历史请求，不启用供应商服务端会话续接。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.5-beta.14",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.5-beta.14/pocket-server-ops-ai-v1.0.5-beta.14-release.apk",
+      "prerelease": true,
+      "published_at": "2026-09-09T06:50:37Z"
+    },
+    {
       "version": "1.0.5-beta.13",
       "title": "PocketServerOps AI v1.0.5-beta.13",
       "notes": "修复模型刷新无法获取推理强度：普通 /models 继续保留全部模型，缺少能力字段时额外请求带 client_version 的 Codex 模型清单，并按精确模型 ID 合并推理参数；能力补充失败不影响普通模型刷新。",

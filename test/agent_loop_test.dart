@@ -46,6 +46,77 @@ void main() {
     );
   });
 
+  test('read segments overlap but stop at a write boundary', () async {
+    var activeReads = 0;
+    final peakReads = [0, 0];
+    var written = false;
+    var writeStartedBeforeReadsFinished = false;
+    var readAfterWriteStartedTooEarly = false;
+    final result = await AgentLoop(
+      client: _ReadWriteReadClient(),
+      tools: [
+        for (final name in ['read.one', 'read.two', 'read.three', 'read.four'])
+          AgentTool(
+            definition: AiToolDefinition(
+              name: name,
+              description: 'read',
+              parameters: const {'type': 'object'},
+            ),
+            requiresConfirmation: false,
+            canRunConcurrently: true,
+            call: (_) async {
+              final segment = name == 'read.one' || name == 'read.two' ? 0 : 1;
+              if (segment == 1 && !written) {
+                readAfterWriteStartedTooEarly = true;
+              }
+              activeReads++;
+              if (activeReads > peakReads[segment]) {
+                peakReads[segment] = activeReads;
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 10));
+              activeReads--;
+              return segment == 0 ? name : '$name:fresh';
+            },
+          ),
+        AgentTool(
+          definition: const AiToolDefinition(
+            name: 'write.one',
+            description: 'write',
+            parameters: {'type': 'object'},
+          ),
+          requiresConfirmation: false,
+          writesRemoteState: true,
+          call: (_) async {
+            writeStartedBeforeReadsFinished = activeReads != 0;
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+            written = true;
+            return 'written';
+          },
+        ),
+      ],
+    ).run(prompt: 'read write read', executionMode: 'auto');
+
+    expect(result.status, 'completed');
+    expect(peakReads, [2, 2]);
+    expect(writeStartedBeforeReadsFinished, isFalse);
+    expect(readAfterWriteStartedTooEarly, isFalse);
+    final outputs = result.messages.where((m) => m.role == 'tool').toList();
+    expect(outputs.map((m) => m.toolCallId), [
+      'call-1',
+      'call-2',
+      'call-3',
+      'call-4',
+      'call-5',
+    ]);
+    expect(outputs.map((m) => m.content), [
+      '"read.one"',
+      '"read.two"',
+      '"written"',
+      '"read.three:fresh"',
+      '"read.four:fresh"',
+    ]);
+  });
+
   test(
     'independent read tools overlap while results keep call order',
     () async {
@@ -101,18 +172,27 @@ void main() {
 
   test('forwards streamed assistant deltas as transient events', () async {
     final events = <String>[];
+    Map<String, Object?>? timing;
+    var standaloneTimings = 0;
     final result = await AgentLoop(client: _DeltaClient(), tools: const []).run(
       prompt: '回复',
       onEvent: (type, payload) {
         if (type == 'assistant.delta') {
           events.add(payload['text'] as String);
         }
+        if (type == 'assistant.completed') {
+          timing = payload['timing'] as Map<String, Object?>;
+        }
+        if (type == 'agent.timing') standaloneTimings++;
         return Future.value();
       },
     );
 
     expect(result.status, 'completed');
     expect(events, ['第一段', '第二段']);
+    expect(standaloneTimings, 0);
+    expect(timing!['ai_request_ms'], isNonNegative);
+    expect(timing!['first_text_delta_ms'], isNonNegative);
   });
 
   test(
@@ -1085,6 +1165,57 @@ class _ConcurrentReadClient implements AiChatClient {
             id: '2',
             callId: 'call-2',
             name: 'read.two',
+            arguments: '{}',
+          ),
+        ],
+      );
+    }
+    return const AiMessage(role: 'assistant', content: 'done');
+  }
+}
+
+class _ReadWriteReadClient implements AiChatClient {
+  var calls = 0;
+
+  @override
+  Future<AiMessage> complete({
+    required List<AiMessage> messages,
+    required List<AiToolDefinition> tools,
+    void Function(String delta)? onContentDelta,
+    Future<void>? cancellation,
+  }) async {
+    if (calls++ == 0) {
+      return const AiMessage(
+        role: 'assistant',
+        toolCalls: [
+          AiToolCall(
+            id: '1',
+            callId: 'call-1',
+            name: 'read.one',
+            arguments: '{}',
+          ),
+          AiToolCall(
+            id: '2',
+            callId: 'call-2',
+            name: 'read.two',
+            arguments: '{}',
+          ),
+          AiToolCall(
+            id: '3',
+            callId: 'call-3',
+            name: 'write.one',
+            arguments: '{}',
+          ),
+          AiToolCall(
+            id: '4',
+            callId: 'call-4',
+            name: 'read.three',
+            arguments: '{}',
+          ),
+          AiToolCall(
+            id: '5',
+            callId: 'call-5',
+            name: 'read.four',
             arguments: '{}',
           ),
         ],

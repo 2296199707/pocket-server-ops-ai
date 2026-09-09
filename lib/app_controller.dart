@@ -3145,27 +3145,29 @@ class AppController extends ChangeNotifier {
           workingDirectory: useServerTools ? workingDirectory : null,
         );
         if (useServerTools && remoteToolGroup != null) {
-          final documents = <String>[];
-          for (final entry in remoteToolGroup.runtimes.entries) {
-            final runtimeConnection = entry.value.connectionOrNull;
-            if (runtimeConnection == null || runtimeConnection.isClosed) {
-              continue;
-            }
-            try {
-              final instructions = await _remoteInstructions.load(
-                runtimeConnection,
-                entry.value.workingDirectory,
-              );
-              if (instructions != null) {
-                documents.add(
-                  '--- project-doc: ${entry.key} ---\n\n$instructions',
-                );
+          // Authentication is already finished. Independent instruction reads
+          // may overlap while Future.wait preserves the configured server order.
+          final documents = (await Future.wait<String?>(
+            remoteToolGroup.runtimes.entries.map((entry) async {
+              final runtimeConnection = entry.value.connectionOrNull;
+              if (runtimeConnection == null || runtimeConnection.isClosed) {
+                return null;
               }
-            } catch (_) {
-              // Project instructions are optional; a transient SSH read
-              // failure must be handled by the Agent's remote tools.
-            }
-          }
+              try {
+                final instructions = await _remoteInstructions.load(
+                  runtimeConnection,
+                  entry.value.workingDirectory,
+                );
+                return instructions == null
+                    ? null
+                    : '--- project-doc: ${entry.key} ---\n\n$instructions';
+              } catch (_) {
+                // Optional instructions must not turn a read error into a
+                // failed turn; remote tools can report connection failures.
+                return null;
+              }
+            }),
+          )).whereType<String>().toList(growable: false);
           if (documents.isNotEmpty) {
             systemPrompt = '$systemPrompt\n\n${documents.join('\n\n')}';
           }
@@ -6635,6 +6637,15 @@ class AppController extends ChangeNotifier {
                 'approval; in free execution mode, a destination inside that '
                 'project does not. Other execution modes keep their existing '
                 'approval flow.';
+      final commandRule =
+          serversForTask(task).any((server) => server.isWindowsComputer)
+          ? 'Use terminal.exec for short commands; use terminal.start and '
+                'terminal.poll for long-running Windows commands. '
+          : 'Prefer terminal.exec with yield_time_ms for commands, including '
+                'long-running work: it returns the first output or a running '
+                'process_id. Continue that process with terminal.poll using '
+                'the returned offsets and wait_ms. Use terminal.start only '
+                'when immediate return or a PTY is needed. ';
       scopes.add(
         'This conversation is bound to ${boundServerIds.length} server(s). '
         'The available servers are $boundServers. The active server is '
@@ -6643,9 +6654,8 @@ class AppController extends ChangeNotifier {
         'restriction. You may operate on any server bound to this conversation. '
         'For a multi-server conversation, every remote tool call must include '
         'the matching server_id; do not assume different servers share files. '
-        'The selected server working directory is $directory. Use '
-        'terminal.exec for short commands; use terminal.start, terminal.poll, '
-        'terminal.write, and terminal.stop for long-running commands. Use '
+        'The selected server working directory is $directory. $commandRule'
+        'Use terminal.write for input and terminal.stop to stop a process. Use '
         'file tools for UTF-8 server files. Use server.upload_from_project to '
         'send a phone project file to the server and server.download_to_project '
         'to bring a server file into the project; use '

@@ -407,6 +407,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   final String _apiKey;
   final String model;
   final String reasoningEffort;
+
   /// Stable conversation identifier sent as x-opencode-session.
   final String? sessionId;
   final bool openCodeProvider;
@@ -474,8 +475,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       tools: tools,
       onContentDelta: onContentDelta,
       cancellation: cancellation,
-      allowUnboundedConnectionRetries:
-          retryPolicy.unboundedConnectionRetries,
+      allowUnboundedConnectionRetries: retryPolicy.unboundedConnectionRetries,
     );
   }
 
@@ -522,6 +522,9 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     }
     if (tools.isNotEmpty) {
       requestBody['tools'] = _responsesTools(tools);
+      // Match Codex's Responses request. The Agent loop still applies the
+      // per-tool read/write boundary when dispatching the returned calls.
+      requestBody['parallel_tool_calls'] = true;
     }
     if (reasoningEffort != 'default') {
       requestBody['reasoning'] = {'effort': reasoningEffort};
@@ -577,13 +580,19 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     while (true) {
       final attemptRequest = requestSent ? _retryRequest(request) : request;
       requestSent = true;
+      var attemptActive = true;
       try {
         return await _sendOnce(
           attemptRequest,
-          onContentDelta: onContentDelta,
+          onContentDelta: onContentDelta == null
+              ? null
+              : (delta) {
+                  if (attemptActive) onContentDelta(delta);
+                },
           cancellation: cancellation,
         );
       } catch (error) {
+        attemptActive = false;
         if (allowUnboundedConnectionRetries &&
             retryPolicy.unboundedConnectionRetries &&
             isAiConnectionError(error)) {
@@ -640,6 +649,9 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
           // a task failure.
         }
         await waitForAiRetry(delay, cancellation);
+      } finally {
+        // A cancelled read can finish later; it must not update a new draft.
+        attemptActive = false;
       }
     }
   }
@@ -659,12 +671,8 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
   }) async {
-    // Do not publish deltas until this attempt has reached a terminal
-    // response. If the stream breaks after half a sentence, Codex retries the
-    // same logical turn from durable history; buffering the attempt prevents
-    // the failed half from being shown a second time after the retry.
-    final attemptDeltas = onContentDelta == null ? null : <String>[];
-    final attemptDelta = attemptDeltas?.add;
+    // Deltas are transient UI drafts. Only the terminal result becomes model
+    // history; the caller clears a failed draft through onRetry.
     late http.StreamedResponse response;
     try {
       response = await _awaitCancellation(
@@ -702,7 +710,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       late AiMessage result;
       try {
         result = await _awaitCancellation(
-          _readSse(response, attemptDelta),
+          _readSse(response, onContentDelta),
           cancellation,
         );
       } on AiRequestCancelled {
@@ -715,7 +723,6 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
         }
         rethrow;
       }
-      _publishAttemptDeltas(attemptDeltas, onContentDelta);
       return result;
     }
     late String body;
@@ -736,19 +743,7 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
       }
       rethrow;
     }
-    final result = _readResponsesJson(body, attemptDelta);
-    _publishAttemptDeltas(attemptDeltas, onContentDelta);
-    return result;
-  }
-
-  static void _publishAttemptDeltas(
-    List<String>? deltas,
-    void Function(String delta)? onContentDelta,
-  ) {
-    if (deltas == null || onContentDelta == null) return;
-    for (final delta in deltas) {
-      onContentDelta(delta);
-    }
+    return _readResponsesJson(body, onContentDelta);
   }
 
   static http.Request _retryRequest(http.Request request) {

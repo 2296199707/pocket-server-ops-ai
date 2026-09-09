@@ -167,6 +167,18 @@ class SshFileBytesChunk {
   final int? totalBytes;
 }
 
+class SshFileBytesChunkRequest {
+  const SshFileBytesChunkRequest({
+    required this.remotePath,
+    this.offset = 0,
+    this.length,
+  });
+
+  final String remotePath;
+  final int offset;
+  final int? length;
+}
+
 class SshCommandStream {
   SshCommandStream(this._session) {
     unawaited(
@@ -351,6 +363,25 @@ abstract class SshConnection {
       eof: end >= source.length,
       totalBytes: source.length,
     );
+  }
+
+  /// Read several byte ranges. The returned chunks keep the request order.
+  /// The default keeps test and lightweight connections compatible by
+  /// composing the existing single-file operation.
+  Future<List<SshFileBytesChunk>> readFileBytesChunks(
+    Iterable<SshFileBytesChunkRequest> requests,
+  ) async {
+    final chunks = <SshFileBytesChunk>[];
+    for (final request in requests) {
+      chunks.add(
+        await readFileBytesChunk(
+          request.remotePath,
+          offset: request.offset,
+          length: request.length,
+        ),
+      );
+    }
+    return chunks;
   }
 
   Future<SshFileUploadSession> prepareFileUpload(
@@ -735,37 +766,72 @@ class DartSshConnection implements SshConnection {
     if (requestedLength <= 0) {
       throw ArgumentError.value(length, 'length', 'must be positive');
     }
+    final request = SshFileBytesChunkRequest(
+      remotePath: remotePath,
+      offset: offset,
+      length: requestedLength,
+    );
     return _withSftp((sftp) async {
-      final file = await sftp.open(remotePath);
-      try {
-        final size = (await file.stat()).size;
-        if (size != null && offset >= size) {
-          return SshFileBytesChunk(
-            offset: offset,
-            nextOffset: offset,
-            bytes: Uint8List(0),
-            eof: true,
-            totalBytes: size,
-          );
-        }
-        final bytes = await file.readBytes(
-          length: requestedLength,
-          offset: offset,
-        );
-        final nextOffset = offset + bytes.length;
+      return _readFileBytesChunk(sftp, request);
+    }, timeout: _sftpChunkTimeout);
+  }
+
+  @override
+  Future<List<SshFileBytesChunk>> readFileBytesChunks(
+    Iterable<SshFileBytesChunkRequest> requests,
+  ) async {
+    final normalized = requests.toList();
+    for (final request in normalized) {
+      if (request.offset < 0) {
+        throw ArgumentError.value(request.offset, 'offset');
+      }
+      final requestedLength = request.length ?? _defaultFileDownloadChunkBytes;
+      if (requestedLength <= 0) {
+        throw ArgumentError.value(request.length, 'length', 'must be positive');
+      }
+    }
+    if (normalized.isEmpty) return const [];
+    return _withSftp((sftp) async {
+      final chunks = <SshFileBytesChunk>[];
+      for (final request in normalized) {
+        chunks.add(await _readFileBytesChunk(sftp, request));
+      }
+      return chunks;
+    }, timeout: _sftpChunkTimeout);
+  }
+
+  Future<SshFileBytesChunk> _readFileBytesChunk(
+    SftpClient sftp,
+    SshFileBytesChunkRequest request,
+  ) async {
+    final requestedLength = request.length ?? _defaultFileDownloadChunkBytes;
+    final file = await sftp.open(request.remotePath);
+    try {
+      final size = (await file.stat()).size;
+      if (size != null && request.offset >= size) {
         return SshFileBytesChunk(
-          offset: offset,
-          nextOffset: nextOffset,
-          bytes: bytes,
-          eof: size != null
-              ? nextOffset >= size
-              : bytes.length < requestedLength,
+          offset: request.offset,
+          nextOffset: request.offset,
+          bytes: Uint8List(0),
+          eof: true,
           totalBytes: size,
         );
-      } finally {
-        await file.close();
       }
-    }, timeout: _sftpChunkTimeout);
+      final bytes = await file.readBytes(
+        length: requestedLength,
+        offset: request.offset,
+      );
+      final nextOffset = request.offset + bytes.length;
+      return SshFileBytesChunk(
+        offset: request.offset,
+        nextOffset: nextOffset,
+        bytes: bytes,
+        eof: size != null ? nextOffset >= size : bytes.length < requestedLength,
+        totalBytes: size,
+      );
+    } finally {
+      await file.close();
+    }
   }
 
   @override

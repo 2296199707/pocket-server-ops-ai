@@ -42,6 +42,16 @@ class RemoteProcessSnapshot {
   final String? error;
 }
 
+class RemoteProcessStartResult {
+  const RemoteProcessStartResult({
+    required this.handle,
+    required this.snapshot,
+  });
+
+  final RemoteProcessHandle handle;
+  final RemoteProcessSnapshot snapshot;
+}
+
 /// Manages process records created by the server Agent.
 ///
 /// Start is idempotent for a supplied process id. Polling is safe to retry
@@ -87,6 +97,66 @@ class RemoteProcessController {
     String initialInput = '',
     String? processId,
   }) async {
+    return (await _startInternal(
+      command: command,
+      workingDirectory: workingDirectory,
+      pty: pty,
+      initialInput: initialInput,
+      processId: processId,
+    )).handle;
+  }
+
+  /// Starts a recoverable process and obtains its first status in the same
+  /// SSH command request. Output bytes are still read separately through SFTP
+  /// so arbitrary command output is not put into shell text or parsed as
+  /// control data.
+  Future<RemoteProcessStartResult> startAndPoll({
+    required String command,
+    String? workingDirectory,
+    bool pty = false,
+    String initialInput = '',
+    String? processId,
+    int waitMs = 0,
+  }) async {
+    if (waitMs < 0 || waitMs > maxPollWaitMilliseconds) {
+      throw ArgumentError.value(
+        waitMs,
+        'waitMs',
+        'must be between 0 and $maxPollWaitMilliseconds',
+      );
+    }
+    final started = await _startInternal(
+      command: command,
+      workingDirectory: workingDirectory,
+      pty: pty,
+      initialInput: initialInput,
+      processId: processId,
+      probeWaitMs: waitMs,
+    );
+    final values = started.probeValues;
+    final stdoutSize = int.tryParse(values['stdout_size'] ?? '');
+    final stderrSize = int.tryParse(values['stderr_size'] ?? '');
+    final outputs = await _readOutputs(
+      started.handle.directory!,
+      stdoutOffset: 0,
+      stderrOffset: 0,
+      stdoutSize: stdoutSize,
+      stderrSize: stderrSize,
+    );
+    return RemoteProcessStartResult(
+      handle: started.handle,
+      snapshot: _snapshotFromValues(started.handle, values, outputs),
+    );
+  }
+
+  Future<_StartedRemoteProcess> _startInternal({
+    required String command,
+    required String? workingDirectory,
+    required bool pty,
+    required String initialInput,
+    required String? processId,
+    int? probeWaitMs,
+  }) async {
     if (_closing) throw StateError('远程进程管理器正在关闭');
     _removeCompletedHandles();
     final id = processId ?? _newProcessId();
@@ -110,32 +180,39 @@ class RemoteProcessController {
     _starting++;
     final future = () async {
       try {
-        final directory = await _recoverable((connection) async {
-          final result = await connection.run(
+        final result = await _recoverable(
+          (connection) => connection.run(
             _startCommand(
               id: id,
               command: command,
               workingDirectory: workingDirectory,
               pty: pty,
               initialInput: initialInput,
+              probeWaitMs: probeWaitMs,
             ),
             workingDirectory: workingDirectory,
-            timeout: _controlTimeout,
+            timeout: probeWaitMs == null
+                ? _controlTimeout
+                : _pollTimeout(probeWaitMs),
+          ),
+        );
+        if (result.exitCode != 0) {
+          throw StateError(
+            '远程进程启动失败：${result.stderr.trim().isEmpty ? result.stdout.trim() : result.stderr.trim()}',
           );
-          if (result.exitCode != 0) {
-            throw StateError(
-              '远程进程启动失败：${result.stderr.trim().isEmpty ? result.stdout.trim() : result.stderr.trim()}',
-            );
-          }
-          return _valueFrom(result.stdout, 'process_dir') ??
-              (throw StateError('远程进程没有返回目录'));
-        });
+        }
+        final directory =
+            _valueFrom(result.stdout, 'process_dir') ??
+            (throw StateError('远程进程没有返回目录'));
         final handle = _handles[id] ??= RemoteProcessHandle(
           id,
           directory: directory,
         );
         handle.directory = directory;
-        return handle;
+        return _StartedRemoteProcess(
+          handle: handle,
+          probeValues: _parseValues(result.stdout),
+        );
       } finally {
         _starting--;
       }
@@ -183,23 +260,40 @@ class RemoteProcessController {
       );
     }
     final values = _parseValues(probe.stdout);
+    final outputs = await _readOutputs(
+      directory,
+      stdoutOffset: stdoutStart,
+      stderrOffset: stderrStart,
+      stdoutSize: int.tryParse(values['stdout_size'] ?? ''),
+      stderrSize: int.tryParse(values['stderr_size'] ?? ''),
+    );
+    return _snapshotFromValues(handle, values, outputs);
+  }
+
+  RemoteProcessSnapshot _snapshotFromValues(
+    RemoteProcessHandle handle,
+    Map<String, String> values,
+    _RemoteOutputPair outputs,
+  ) {
     final status = values['status'];
     if (status == null || status == 'missing') {
-      throw StateError('找不到远程进程 $processId');
+      throw StateError('找不到远程进程 ${handle.id}');
     }
-    final stdout = await _readOutput(directory, 'stdout', stdoutStart);
-    final stderr = await _readOutput(directory, 'stderr', stderrStart);
     final exitCode = int.tryParse(values['exit_code'] ?? '');
-    final done = status != 'running';
+    final terminal = status != 'running';
+    final done =
+        terminal &&
+        _outputComplete(outputs.stdout) &&
+        _outputComplete(outputs.stderr);
     final failed =
-        status == 'lost' || (done && (exitCode == null || exitCode != 0));
+        status == 'lost' || (terminal && (exitCode == null || exitCode != 0));
     final snapshot = RemoteProcessSnapshot(
-      stdout: stdout.content,
-      stderr: stderr.content,
-      stdoutOffset: stdout.nextOffset,
-      stderrOffset: stderr.nextOffset,
-      stdoutTotalBytes: stdout.totalBytes,
-      stderrTotalBytes: stderr.totalBytes,
+      stdout: outputs.stdout.content,
+      stderr: outputs.stderr.content,
+      stdoutOffset: outputs.stdout.nextOffset,
+      stderrOffset: outputs.stderr.nextOffset,
+      stdoutTotalBytes: outputs.stdout.totalBytes,
+      stderrTotalBytes: outputs.stderr.totalBytes,
       done: done,
       failed: failed,
       exitCode: exitCode,
@@ -232,10 +326,8 @@ class RemoteProcessController {
     final handle = _handle(processId);
     final directory = await _directory(handle);
     final result = await _recoverable(
-      (connection) => connection.run(
-        _stopCommand(directory),
-        timeout: _controlTimeout,
-      ),
+      (connection) =>
+          connection.run(_stopCommand(directory), timeout: _controlTimeout),
     );
     if (result.exitCode != 0) {
       throw StateError(
@@ -297,19 +389,92 @@ class RemoteProcessController {
     String directory,
     String name,
     int offset,
+    int? fallbackTotalBytes,
   ) async {
     final chunk = await _recoverable(
-      (connection) => connection.readFileBytesChunk(
-        '$directory/$name',
-        offset: offset,
-        length: _pollChunkBytes,
-      ).timeout(_controlTimeout),
+      (connection) => connection
+          .readFileBytesChunk(
+            '$directory/$name',
+            offset: offset,
+            length: _pollChunkBytes,
+          )
+          .timeout(_controlTimeout),
     );
     return _RemoteOutputChunk(
       content: utf8.decode(chunk.bytes, allowMalformed: true),
       nextOffset: chunk.nextOffset,
-      totalBytes: chunk.totalBytes,
+      totalBytes: chunk.totalBytes ?? fallbackTotalBytes,
     );
+  }
+
+  Future<_RemoteOutputPair> _readOutputs(
+    String directory, {
+    required int stdoutOffset,
+    required int stderrOffset,
+    required int? stdoutSize,
+    required int? stderrSize,
+  }) async {
+    final stdoutNeedsRead = _hasUnreadOutput(stdoutOffset, stdoutSize);
+    final stderrNeedsRead = _hasUnreadOutput(stderrOffset, stderrSize);
+    if (!stdoutNeedsRead && !stderrNeedsRead) {
+      return _RemoteOutputPair(
+        stdout: _emptyOutput(stdoutOffset, stdoutSize),
+        stderr: _emptyOutput(stderrOffset, stderrSize),
+      );
+    }
+    if (stdoutNeedsRead && stderrNeedsRead) {
+      final chunks = await _recoverable(
+        (connection) => connection
+            .readFileBytesChunks([
+              SshFileBytesChunkRequest(
+                remotePath: '$directory/stdout',
+                offset: stdoutOffset,
+                length: _pollChunkBytes,
+              ),
+              SshFileBytesChunkRequest(
+                remotePath: '$directory/stderr',
+                offset: stderrOffset,
+                length: _pollChunkBytes,
+              ),
+            ])
+            .timeout(_controlTimeout),
+      );
+      return _RemoteOutputPair(
+        stdout: _outputFromChunk(chunks[0], stdoutSize),
+        stderr: _outputFromChunk(chunks[1], stderrSize),
+      );
+    }
+    final stdout = stdoutNeedsRead
+        ? await _readOutput(directory, 'stdout', stdoutOffset, stdoutSize)
+        : _emptyOutput(stdoutOffset, stdoutSize);
+    final stderr = stderrNeedsRead
+        ? await _readOutput(directory, 'stderr', stderrOffset, stderrSize)
+        : _emptyOutput(stderrOffset, stderrSize);
+    return _RemoteOutputPair(stdout: stdout, stderr: stderr);
+  }
+
+  static bool _hasUnreadOutput(int offset, int? totalBytes) =>
+      totalBytes == null || totalBytes > offset;
+
+  static _RemoteOutputChunk _emptyOutput(int offset, int? totalBytes) =>
+      _RemoteOutputChunk(
+        content: '',
+        nextOffset: offset,
+        totalBytes: totalBytes,
+      );
+
+  static _RemoteOutputChunk _outputFromChunk(
+    SshFileBytesChunk chunk,
+    int? fallbackTotalBytes,
+  ) => _RemoteOutputChunk(
+    content: utf8.decode(chunk.bytes, allowMalformed: true),
+    nextOffset: chunk.nextOffset,
+    totalBytes: chunk.totalBytes ?? fallbackTotalBytes,
+  );
+
+  static bool _outputComplete(_RemoteOutputChunk output) {
+    final totalBytes = output.totalBytes;
+    return totalBytes == null || output.nextOffset >= totalBytes;
   }
 
   Future<SshConnection> _ensureConnection() async {
@@ -372,6 +537,7 @@ class RemoteProcessController {
     required String? workingDirectory,
     required bool pty,
     required String initialInput,
+    int? probeWaitMs,
   }) {
     final idLiteral = _shellQuote(id);
     final fingerprint = _fingerprint(
@@ -390,6 +556,7 @@ class RemoteProcessController {
       r'write_state exit_code "$code"',
       r'write_state status done',
     ].join('\n');
+    final emitResult = _emitResultCommand(probeWaitMs);
     return [
       'set -eu',
       'root="\${HOME:-/tmp}/$_stateDirectory"',
@@ -406,7 +573,7 @@ class RemoteProcessController {
       '  while [ ! -s "\$dir/pid" ] && [ "\$i" -lt 20 ]; do sleep 0.1; i=\$((i + 1)); done',
       '  [ -s "\$dir/pid" ] || { echo "process start is still in progress" >&2; exit 75; }',
       '  [ -f "\$dir/meta" ] || mv "\$dir/intent" "\$dir/meta"',
-      '  printf "process_id=%s\\nprocess_dir=%s\\n" "\$id" "\$dir"',
+      '  $emitResult',
       '  exit 0',
       'fi',
       'mkdir "\$dir" 2>/dev/null || { echo "process directory is busy" >&2; exit 75; }',
@@ -431,8 +598,38 @@ class RemoteProcessController {
       'printf "%s\\n" "\$pid" > "\$dir/pid"',
       'printf "%s\\n" "\$group" > "\$dir/group"',
       'mv "\$dir/intent" "\$dir/meta"',
-      'printf "process_id=%s\\nprocess_dir=%s\\n" "\$id" "\$dir"',
+      emitResult,
     ].join('\n');
+  }
+
+  static String _emitResultCommand(int? probeWaitMs) {
+    final result = <String>[
+      'printf "process_id=%s\\nprocess_dir=%s\\n" "\$id" "\$dir"',
+    ];
+    if (probeWaitMs == null) return result.single;
+    final loops = (probeWaitMs / 200).ceil();
+    result.addAll([
+      'set +e',
+      'i=0',
+      'while [ "\$i" -lt $loops ]; do',
+      '  status=\$(cat "\$dir/status" 2>/dev/null || printf missing)',
+      '  out=\$(wc -c < "\$dir/stdout" 2>/dev/null || printf 0)',
+      '  err=\$(wc -c < "\$dir/stderr" 2>/dev/null || printf 0)',
+      '  pid=\$(cat "\$dir/pid" 2>/dev/null || true)',
+      '  if [ "\$status" != running ] || [ "\$out" -gt 0 ] || [ "\$err" -gt 0 ]; then break; fi',
+      '  if [ -n "\$pid" ] && ! kill -0 "\$pid" 2>/dev/null; then break; fi',
+      '  sleep 0.2',
+      '  i=\$((i + 1))',
+      'done',
+      'status=\$(cat "\$dir/status" 2>/dev/null || printf missing)',
+      'pid=\$(cat "\$dir/pid" 2>/dev/null || true)',
+      'if [ "\$status" = running ] && [ -n "\$pid" ] && ! kill -0 "\$pid" 2>/dev/null; then status=lost; fi',
+      'printf "status=%s\\n" "\$status"',
+      'printf "exit_code=%s\\n" "\$(cat "\$dir/exit_code" 2>/dev/null || true)"',
+      'printf "stdout_size=%s\\n" "\$(wc -c < "\$dir/stdout" 2>/dev/null || printf 0)"',
+      'printf "stderr_size=%s\\n" "\$(wc -c < "\$dir/stderr" 2>/dev/null || printf 0)"',
+    ]);
+    return result.join('\n');
   }
 
   static String _directoryCommand(String id) {
@@ -551,7 +748,17 @@ class _StartingRemoteProcess {
   const _StartingRemoteProcess(this.fingerprint, this.future);
 
   final String fingerprint;
-  final Future<RemoteProcessHandle> future;
+  final Future<_StartedRemoteProcess> future;
+}
+
+class _StartedRemoteProcess {
+  const _StartedRemoteProcess({
+    required this.handle,
+    required this.probeValues,
+  });
+
+  final RemoteProcessHandle handle;
+  final Map<String, String> probeValues;
 }
 
 class _RemoteOutputChunk {
@@ -564,6 +771,13 @@ class _RemoteOutputChunk {
   final String content;
   final int nextOffset;
   final int? totalBytes;
+}
+
+class _RemoteOutputPair {
+  const _RemoteOutputPair({required this.stdout, required this.stderr});
+
+  final _RemoteOutputChunk stdout;
+  final _RemoteOutputChunk stderr;
 }
 
 const _controlTimeout = Duration(seconds: 15);

@@ -89,6 +89,7 @@ class ComputerAgentTools {
       call: _poll,
       requiresConfirmation: false,
       isRemote: true,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -141,6 +142,7 @@ class ComputerAgentTools {
       call: _read,
       requiresConfirmation: false,
       isRemote: true,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -351,6 +353,7 @@ class ComputerAgentToolsGroup {
           userApprovalRequired: null,
           isRemote: tool.isRemote,
           writesRemoteState: tool.writesRemoteState,
+          canRunConcurrently: tool.canRunConcurrently,
         ),
     ];
   }

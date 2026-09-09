@@ -35,6 +35,15 @@ void main() {
     expect(exec.definition.parameters['required'], contains('server_id'));
     expect(serverId['enum'], ['computer-a', 'computer-b']);
     expect(group.isClosed, isFalse);
+    expect(exec.canRunConcurrently, isFalse);
+    for (final name in ['terminal.poll', 'file.read']) {
+      expect(
+        group.tools
+            .firstWhere((tool) => tool.definition.name == name)
+            .canRunConcurrently,
+        isTrue,
+      );
+    }
 
     await group.close();
     expect(group.isClosed, isTrue);

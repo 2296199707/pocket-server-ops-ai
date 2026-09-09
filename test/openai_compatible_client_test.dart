@@ -170,6 +170,7 @@ void main() {
       expect(request.url.path, '/v1/responses');
       expect(request.headers['x-opencode-session'], 'task-conversation-1');
       expect(body['store'], false);
+      expect(body['parallel_tool_calls'], true);
       expect(body.containsKey('reasoning'), isFalse);
       expect(body.containsKey('context_management'), isFalse);
       expect((body['tools'] as List).single, {

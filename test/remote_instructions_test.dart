@@ -127,7 +127,7 @@ void main() {
   });
 }
 
-class _InstructionsConnection implements SshConnection {
+class _InstructionsConnection extends SshConnection {
   _InstructionsConnection({required this.directories, required this.files});
 
   final Map<String, List<SshDirectoryEntry>> directories;

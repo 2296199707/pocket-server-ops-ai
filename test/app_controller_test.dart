@@ -1327,6 +1327,14 @@ void main() {
       expect(sawStreamingText, isTrue);
       expect(blankBeforePersistence, isFalse);
       final events = controller.eventsFor(task.id);
+      expect(events.any((event) => event.type == 'agent.timing'), isFalse);
+      final firstAssistant = events.firstWhere(
+        (event) => event.type == 'assistant.completed',
+      );
+      expect(
+        (firstAssistant.payload['timing'] as Map)['ai_request_ms'],
+        isNonNegative,
+      );
       final preambleIndex = events.indexWhere(
         (event) =>
             event.type == 'assistant.completed' &&
@@ -3671,7 +3679,7 @@ class _FakeConnector implements SshConnector {
   }
 }
 
-class _FakeConnection implements SshConnection {
+class _FakeConnection extends SshConnection {
   _FakeConnection({
     required this.commands,
     required this.directoryCalls,

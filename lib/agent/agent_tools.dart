@@ -228,7 +228,9 @@ class RemoteAgentTools {
       definition: AiToolDefinition(
         name: 'terminal.start',
         description: remoteTaskRecoveryEnabled
-            ? 'Start a long-running shell command. Non-PTY jobs keep a remote '
+            ? 'Start a command when immediate return or a PTY is needed. '
+                  'Otherwise prefer terminal.exec to get the first output '
+                  'without a separate poll. Non-PTY jobs keep a remote '
                   'process record and can be polled after reconnecting.'
             : 'Start a long-running shell command on the current SSH '
                   'connection. The process cannot be recovered after a '
@@ -474,16 +476,15 @@ class RemoteAgentTools {
     }
     final connection = await ensureConnection();
     final processController = _processControllerFor(connection);
-    final process = await processController.start(
+    final started = await processController.startAndPoll(
       command: _requiredString(arguments, 'command'),
       workingDirectory:
           _optionalString(arguments, 'working_directory') ?? workingDirectory,
       initialInput: _optionalString(arguments, 'input') ?? '',
-    );
-    final snapshot = await processController.poll(
-      process.id,
       waitMs: _execYieldMilliseconds(arguments),
     );
+    final process = started.handle;
+    final snapshot = started.snapshot;
     if (snapshot.failed && snapshot.exitCode == null) {
       throw StateError(snapshot.error ?? '远程命令状态未知');
     }
@@ -1153,6 +1154,7 @@ class RemoteAgentToolsGroup {
             },
       isRemote: sample.isRemote,
       writesRemoteState: sample.writesRemoteState,
+      canRunConcurrently: sample.canRunConcurrently,
     );
   }
 
@@ -1479,6 +1481,7 @@ class ProjectAgentTools {
       ),
       call: _list,
       requiresConfirmation: false,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -1502,6 +1505,7 @@ class ProjectAgentTools {
       ),
       call: _read,
       requiresConfirmation: false,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -1874,6 +1878,7 @@ class LocalAgentTools {
       ),
       call: _list,
       requiresConfirmation: false,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(
@@ -1895,6 +1900,7 @@ class LocalAgentTools {
       ),
       call: _read,
       requiresConfirmation: false,
+      canRunConcurrently: true,
     ),
     AgentTool(
       definition: const AiToolDefinition(

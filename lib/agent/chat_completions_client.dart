@@ -110,6 +110,7 @@ class ChatCompletionsClient implements AiChatClient {
   final String _apiKey;
   final String model;
   final String reasoningEffort;
+
   /// Stable conversation identifier sent as x-opencode-session.
   final String? sessionId;
   final bool openCodeProvider;
@@ -168,6 +169,9 @@ class ChatCompletionsClient implements AiChatClient {
     }
     if (tools.isNotEmpty) {
       requestBody['tools'] = [for (final tool in tools) tool.toJson()];
+      // Allow the model to return independent tool calls in one turn. The
+      // Agent loop keeps writes and dependent calls in their declared order.
+      requestBody['parallel_tool_calls'] = true;
     }
     request.body = jsonEncode(requestBody);
 
@@ -190,13 +194,19 @@ class ChatCompletionsClient implements AiChatClient {
     while (true) {
       final attemptRequest = requestSent ? _retryRequest(request) : request;
       requestSent = true;
+      var attemptActive = true;
       try {
         return await _sendOnce(
           attemptRequest,
-          onContentDelta: onContentDelta,
+          onContentDelta: onContentDelta == null
+              ? null
+              : (delta) {
+                  if (attemptActive) onContentDelta(delta);
+                },
           cancellation: cancellation,
         );
       } catch (error) {
+        attemptActive = false;
         if (retryPolicy.unboundedConnectionRetries &&
             isAiConnectionError(error)) {
           final maxConnectionRetries =
@@ -250,6 +260,8 @@ class ChatCompletionsClient implements AiChatClient {
           // Retry telemetry is best effort and must not change task behavior.
         }
         await waitForAiRetry(delay, cancellation);
+      } finally {
+        attemptActive = false;
       }
     }
   }
@@ -259,11 +271,8 @@ class ChatCompletionsClient implements AiChatClient {
     void Function(String delta)? onContentDelta,
     Future<void>? cancellation,
   }) async {
-    // Keep each retry attempt transactional. A disconnected SSE stream may
-    // already contain text, but that partial output is not durable history
-    // and must not be emitted again when the same turn is retried.
-    final attemptDeltas = onContentDelta == null ? null : <String>[];
-    final attemptDelta = attemptDeltas?.add;
+    // Show transient text immediately; onRetry clears a failed attempt's
+    // draft, while only a terminal response is returned as model history.
     late http.StreamedResponse response;
     try {
       response = await _awaitCancellation(
@@ -307,7 +316,7 @@ class ChatCompletionsClient implements AiChatClient {
       late AiMessage result;
       try {
         result = await _awaitCancellation(
-          _readSse(response, attemptDelta),
+          _readSse(response, onContentDelta),
           cancellation,
         );
       } on AiRequestCancelled {
@@ -320,7 +329,6 @@ class ChatCompletionsClient implements AiChatClient {
         }
         rethrow;
       }
-      _publishAttemptDeltas(attemptDeltas, onContentDelta);
       return result;
     }
     late String body;
@@ -341,19 +349,7 @@ class ChatCompletionsClient implements AiChatClient {
       }
       rethrow;
     }
-    final result = _readJson(body, attemptDelta);
-    _publishAttemptDeltas(attemptDeltas, onContentDelta);
-    return result;
-  }
-
-  static void _publishAttemptDeltas(
-    List<String>? deltas,
-    void Function(String delta)? onContentDelta,
-  ) {
-    if (deltas == null || onContentDelta == null) return;
-    for (final delta in deltas) {
-      onContentDelta(delta);
-    }
+    return _readJson(body, onContentDelta);
   }
 
   static http.Request _retryRequest(http.Request request) {
