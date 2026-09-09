@@ -1248,7 +1248,9 @@ class _ProviderEditorSheetState extends State<_ProviderEditorSheet> {
 
   String get _reasoningHelperText {
     final levels = _selectedModelMetadata?.supportedReasoningLevels;
-    if (levels == null) return '供应商未返回能力列表，提供 Default / Low / High / Max';
+    if (levels == null) {
+      return '供应商未返回能力列表，提供 Default / Low / Medium / High / Extra High / Max / Ultra';
+    }
     if (levels.isEmpty) return '供应商声明当前模型没有可调推理强度';
     return '按当前模型返回的 supported_reasoning_levels 显示';
   }

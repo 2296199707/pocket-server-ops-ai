@@ -48,3 +48,62 @@
 
 测试覆盖：普通目录包含而旧 Codex 版本目录隐藏的新模型仍保留；能力目录返回的推理字段
 按精确 ID 合并；未知供应商模型不被自动添加或猜测。
+
+## 2026-09-09：beta.14 刷新失败复查（仅诊断，尚未修复）
+
+### 发布包含性
+
+- 上次修复提交为 `39c77b89fabcba3eeee0eac398d9415e834a9707`。
+- `v1.0.5-beta.14` 的发布提交为
+  `49ef077cd0c6b9efe51617cd04a9bddf785bdf4a`，已验证前者是后者的祖先。
+- 从上次修复到该发布提交，`lib/providers/provider_connection_tester.dart`
+  没有差异，因此不是漏合并或修复被覆盖。
+- GitHub Release 已包含 `pocket-server-ops-ai-v1.0.5-beta.14-release.apk`。
+  本地同名 APK 的实际包信息为 `versionName=1.0.5-beta.14`、`versionCode=58`。
+  这不能代替确认用户手机当前安装的版本。
+
+### 已复现的请求流程缺口
+
+1. `provider_connection_tester.dart:169` 的补充条件要求同一条目同时缺少默认推理值
+   和可选列表。如果目录条目都有默认值、但没有可选列表，就完全跳过能力请求。
+   MockClient 复现：普通目录只返回 `default_reasoning_level=high`，能力端点准备返回
+   `low/high`；实际仅发送一次请求，最终列表仍为 `null`。
+2. `provider_connection_tester.dart:177` 的能力请求限时 10 秒；非 2xx、解析异常和
+   超时均被捕获并返回 `null`。上层只得到普通模型目录，没有能力请求失败的诊断信息。
+   MockClient 分别模拟 HTTP 502 和超时，均复现方法正常返回、推理列表仍为 `null`。
+   保留普通模型结果本身有用，但不应把它等同于推理能力刷新成功。
+
+验证：既有 `test/provider_connection_tester_test.dart` 的 8 项测试和 2 项临时诊断测试
+全部通过。诊断测试确认上述缺口仍存在，不代表已修好。临时测试位于数据盘
+`/www/mobile-agent-tooling/tmp/reasoning-audit-hg4rdE/reasoning_audit_test.dart`，未加入
+应用测试目录；使用 `flutter test --no-pub --concurrency=1`，没有构建 APK 或请求真实 API。
+
+### 抽屉与缓存链路
+
+- `chat_page.dart:1366` 的模型刷新、`:1405` 的当前对话推理刷新、`:1436` 的子代理
+  推理刷新都调用 `AppController.loadProviderModelMetadata`，并非仍在使用旧请求代码。
+- `app_controller.dart:6173` 调用本次核对的 tester，并按精确模型 ID 合并到已保存
+  供应商的 `modelMetadata`，写入数据库。抽屉在刷新返回后更新界面；只打开抽屉不请求网络。
+- 由于 tester 的能力请求失败不抛出错误，对话推理刷新仍会设置
+  `reasoningLoadFailed = false`；界面无法区分“能力请求失败”和“没有能力字段”。
+- 获取元数据不等于修改已选择的推理强度。顶部按钮显示用户已保存的推理选择；
+  目录的 `defaultReasoningLevel` 在抽屉中作为默认值说明，不自动覆盖用户设置。
+
+### 尚未确认
+
+尚未得到本次手机上的供应商地址、模型、实际版本和刷新入口，不能据以上模拟场景认定
+用户遇到的是其中某一种失败，也不能据此归因供应商不支持。特别是先前实测的
+`ai-pixel.online` 普通目录只含 ID，不会触发上述“默认值存在却跳过”的条件。
+原始接口返回记录见本文件前文，不再重复查询 Sub2API/Codex 源码。
+
+## 2026-09-09：补齐无元数据时的通用预设
+
+根据用户提供的模型抽屉截图，已将供应商只返回模型 ID、没有返回
+`supported_reasoning_levels` 时的通用预设从
+`Default / Low / High / Max` 补齐为
+`Default / Low / Medium / High / Extra High / Max / Ultra`。
+
+这只影响未知能力时的选择器兜底；供应商明确返回能力列表时，仍严格显示返回值，
+不会把通用档位混入供应商的精确列表。`xhigh` 在界面显示为 `Extra High`，`ultra`
+显示为 `Ultra`。相关实现为 `lib/domain/models.dart`，聊天页和供应商设置页的提示文本
+也已同步更新。

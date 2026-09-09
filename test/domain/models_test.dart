@@ -247,8 +247,11 @@ void main() {
     expect(reasoningEffortValuesForModel(provider, 'unknown-model'), [
       'default',
       'low',
+      'medium',
       'high',
+      'xhigh',
       'max',
+      'ultra',
     ]);
 
     const unadvertisedProvider = ProviderProfile(
@@ -261,7 +264,7 @@ void main() {
     );
     expect(
       reasoningEffortValuesForModel(unadvertisedProvider, 'model-unadvertised'),
-      ['default', 'low', 'high', 'max'],
+      ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     );
 
     const noReasoningProvider = ProviderProfile(

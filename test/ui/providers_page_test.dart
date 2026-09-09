@@ -101,7 +101,9 @@ void main() {
     await tester.tap(find.text('保存').last);
     await tester.pumpAndSettle();
 
-    expect(modelRequests, 1);
+    // The refresh first reads the ordinary model list, then enriches it with
+    // the Codex capability catalog when reasoning metadata is absent.
+    expect(modelRequests, 2);
     expect(controller.providers.single.modelMetadata, contains('saved-model'));
     expect(controller.providers.single.modelMetadata, contains('image-model'));
     expect(controller.providers.single.customReasoningEfforts, ['medium']);
@@ -118,43 +120,44 @@ void main() {
     );
   });
 
-  testWidgets('editing an older explicit reasoning value keeps the picker valid', (
-    tester,
-  ) async {
-    final controller = AppController(
-      database: MemoryAppDatabase(),
-      credentials: MemoryCredentialStore(),
-    );
-    addTearDown(controller.dispose);
-    await controller.load();
-    await controller.saveProvider(
-      name: '旧版供应商',
-      baseUrl: 'https://provider.example/v1',
-      model: 'model-a',
-      reasoningEffort: 'medium',
-      secret: 'test-key',
-      isDefault: true,
-      modelMetadata: {
-        'model-a': const ProviderModelMetadata(
-          model: 'model-a',
-          supportedReasoningLevels: [
-            ProviderReasoningLevel(effort: 'low'),
-            ProviderReasoningLevel(effort: 'high'),
-          ],
-        ),
-      },
-    );
+  testWidgets(
+    'editing an older explicit reasoning value keeps the picker valid',
+    (tester) async {
+      final controller = AppController(
+        database: MemoryAppDatabase(),
+        credentials: MemoryCredentialStore(),
+      );
+      addTearDown(controller.dispose);
+      await controller.load();
+      await controller.saveProvider(
+        name: '旧版供应商',
+        baseUrl: 'https://provider.example/v1',
+        model: 'model-a',
+        reasoningEffort: 'medium',
+        secret: 'test-key',
+        isDefault: true,
+        modelMetadata: {
+          'model-a': const ProviderModelMetadata(
+            model: 'model-a',
+            supportedReasoningLevels: [
+              ProviderReasoningLevel(effort: 'low'),
+              ProviderReasoningLevel(effort: 'high'),
+            ],
+          ),
+        },
+      );
 
-    await tester.pumpWidget(
-      MaterialApp(home: ProvidersPage(controller: controller)),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('供应商操作'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('编辑'));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        MaterialApp(home: ProvidersPage(controller: controller)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('供应商操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('编辑'));
+      await tester.pumpAndSettle();
 
-    expect(tester.takeException(), isNull);
-    expect(find.textContaining('中'), findsWidgets);
-  });
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('中'), findsWidgets);
+    },
+  );
 }

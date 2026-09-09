@@ -5,7 +5,17 @@ import 'dart:convert';
 // selected model's provider metadata when available; a small compatibility
 // fallback is shown when the provider exposes no reasoning metadata.
 const defaultReasoningEffort = 'default';
-const genericReasoningEffortValues = <String>['low', 'high', 'max'];
+// Used only when a provider exposes model ids without reasoning metadata.
+// Keep this aligned with the common Codex-style picker presets; an advertised
+// provider list still takes precedence in reasoningEffortValuesForModel.
+const genericReasoningEffortValues = <String>[
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra',
+];
 
 String normalizeReasoningEffort(String? value) {
   final normalized = value?.trim() ?? '';

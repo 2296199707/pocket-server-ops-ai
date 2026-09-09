@@ -1157,7 +1157,7 @@
   若供应商拒绝该查询，再读取普通 `/models` 清单。`ProviderModelMetadata` 同时解析
   `supported_reasoning_levels` 和 sub2api 使用的 `reasoningEfforts`，并保存描述与默认值。
   聊天模型抽屉默认折叠，推理强度默认展开；有供应商列表时只显示该模型明确返回的值，
-  没有列表时显示 `Default / Low / High / Max` 这套最小兜底值。供应商设置中配置的自定义
+  没有列表时显示 `Default / Low / Medium / High / Extra High / Max / Ultra` 这套通用兜底值。供应商设置中配置的自定义
   值会追加到当前模型选项；旧版本已经保存但目录没有声明的显式值仍保留为当前选项，并标记
   为目录未确认，不会被静默删除。
 - 供应商设置页采用同一规则；保存供应商仍只在保存流程请求一次模型目录，聊天抽屉的刷新
@@ -1433,7 +1433,7 @@ Mobile 实现：<path>:<symbol 或行号>
   `reasoning_options` 时，Mobile 只显示该模型声明的值；明确返回空列表仍表示该模型没有
   可调推理档位。
 - 供应商只返回模型 ID、没有返回推理能力字段时，模型选择和子代理模型选择统一显示
-  `Default / Low / High / Max`。这些是可用性兜底，不会写入模型能力目录；用户选择后才按
+  `Default / Low / Medium / High / Extra High / Max / Ultra`。这些是可用性兜底，不会写入模型能力目录；用户选择后才按
   当前协议发送，旧的显式值仍保留并标记为未确认。
 - DeepSeek 官方文档（`https://api-docs.deepseek.com/guides/thinking_mode`）说明 Chat
   Completions 格式把思考开关和档位分开：`thinking.type` 控制启用，`reasoning_effort`
@@ -1550,7 +1550,7 @@ Mobile 实现：<path>:<symbol 或行号>
 
 - Codex 模型目录仍以模型级 `default_reasoning_level` 和
   `supported_reasoning_levels` 为能力来源；Mobile 不把 `medium`、`xhigh` 等固定值强加给
-  所有模型。供应商只返回模型 ID 时使用最小 `Default / Low / High / Max` 兜底；目录明确
+  所有模型。供应商只返回模型 ID 时使用通用 `Default / Low / Medium / High / Extra High / Max / Ultra` 兜底；目录明确
   返回空列表时只保留 `Default`。
 - 供应商设置增加 `customReasoningEfforts` 列表。设置页用 `+` 增加一行、用 `-` 删除单行，
   保存时去除空值、两端空格、重复值和 `default` 哨兵。该列表存入 SQLite providers 表，
@@ -1566,7 +1566,7 @@ Mobile 实现：<path>:<symbol 或行号>
   协议。OpenCode Zen 在官方地址 `opencode.ai/zen/...` 下额外读取公开的
   `https://models.opencode.ai/api.json` 能力目录，仅补全已由认证模型列表返回的模型；目录
   不可用时仍使用已保存模型。DeepSeek 没有可依赖的通用动态推理强度接口，继续使用目录值、
-  `Default / Low / High / Max` 兜底和供应商手动自定义值。
+  `Default / Low / Medium / High / Extra High / Max / Ultra` 兜底和供应商手动自定义值。
 - OpenAI 预设已改为官方 `https://api.openai.com/v1`、Responses 协议和官方文档示例模型
   `gpt-5.6`；不再把第三方地址放进官方预设。DeepSeek 使用
   `https://api.deepseek.com/v1` 的 Chat Completions；OpenCode 使用

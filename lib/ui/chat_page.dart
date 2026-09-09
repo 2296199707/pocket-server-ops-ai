@@ -1328,7 +1328,7 @@ class ChatPageState extends State<ChatPage> {
               if (effort == defaultReasoningEffort) {
                 final defaultLevel = selectedMetadata?.defaultReasoningLevel;
                 return defaultLevel == null
-                    ? '未返回能力列表，提供 Low / High / Max'
+                    ? '未返回能力列表，提供 Low / Medium / High / Extra High / Max / Ultra'
                     : '供应商目录默认：${_reasoningMenuLabel(defaultLevel)}';
               }
               for (final level in advertisedReasoningLevels ?? const []) {
@@ -1357,7 +1357,7 @@ class ChatPageState extends State<ChatPage> {
                         selectedSubagentSettings.model.trim().isEmpty
                     ? '继承父代理当前推理设置'
                     : defaultLevel == null
-                    ? '未返回能力列表，提供 Low / High / Max'
+                    ? '未返回能力列表，提供 Low / Medium / High / Extra High / Max / Ultra'
                     : '子代理模型默认：${_reasoningMenuLabel(defaultLevel)}';
               }
               return '子代理专用推理设置';
@@ -1746,7 +1746,7 @@ class ChatPageState extends State<ChatPage> {
                                 if (advertisedReasoningLevels == null) ...[
                                   const SizedBox(height: 4),
                                   Text(
-                                    '供应商未返回能力列表，提供 Low / High / Max。',
+                                    '供应商未返回能力列表，提供 Low / Medium / High / Extra High / Max / Ultra。',
                                     style: Theme.of(context)
                                         .textTheme
                                         .labelSmall
@@ -3448,6 +3448,8 @@ String _reasoningMenuLabel(String value) {
       return 'Extra High';
     case 'max':
       return 'Max';
+    case 'ultra':
+      return 'Ultra';
     default:
       return value;
   }
