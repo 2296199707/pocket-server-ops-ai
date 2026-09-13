@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_agent/domain/models.dart';
@@ -36,6 +37,67 @@ ServerPortTraffic parse(String before, String after) =>
     })!;
 
 void main() {
+  Map<String, String> realProbe() => {
+    for (final line in File(
+      'test/fixtures/nft-1.0.6-traffic-probe.txt',
+    ).readAsLinesSync())
+      if (line.contains('='))
+        line.substring(0, line.indexOf('=')): line.substring(
+          line.indexOf('=') + 1,
+        ),
+  };
+
+  test(
+    'actual nft 1.0.6 JSON without comment reads text metadata and caches',
+    () {
+      final values = realProbe();
+      final legacyValues = Map<String, String>.of(values)
+        ..remove('traffic_meta_before')
+        ..remove('traffic_meta_after');
+      expect(ServerPortTraffic.fromProbe(legacyValues)!.status, 'unavailable');
+      final traffic = ServerPortTraffic.fromProbe(values)!;
+      expect(traffic.status, 'ready');
+      expect(traffic.sshPorts, '2222');
+      expect(traffic.suggestedSshPorts, '22,2222');
+      expect(traffic.suggestedHy2Ports, '443');
+      expect(traffic.hy2Ports, '443,35043,41061,41619,43633,48820,55584');
+      expect(traffic.total!.totalBytes, 2096683694);
+      expect(traffic.total!.receiveBytesPerSecond, isNotNull);
+      final restored = ServerDashboard.fromJson(
+        jsonEncode({'portTraffic': traffic.toMap()}),
+      );
+      expect(restored.portTraffic!.toMap(), traffic.toMap());
+    },
+  );
+
+  test('separate metadata cannot be paired with another table snapshot', () {
+    final values = realProbe();
+    values['traffic_meta_after'] = values['traffic_meta_after']!.replaceFirst(
+      '5|',
+      '6|',
+    );
+    expect(ServerPortTraffic.fromProbe(values)!.total, isNull);
+    values['traffic_meta_after'] = '';
+    expect(ServerPortTraffic.fromProbe(values)!.total, isNull);
+  });
+
+  test('table replaced between samples retains totals without false rates', () {
+    final values = realProbe();
+    final before = jsonDecode(values['traffic_before']!) as Map;
+    for (final item in before['nftables'] as List) {
+      if (item['table'] is Map) item['table']['handle'] = 4;
+    }
+    values['traffic_before'] = jsonEncode(before);
+    values['traffic_meta_before'] = values['traffic_meta_before']!.replaceFirst(
+      '5|',
+      '4|',
+    );
+    final traffic = ServerPortTraffic.fromProbe(values)!;
+    expect(traffic.status, 'ready');
+    expect(traffic.total!.totalBytes, 2096683694);
+    expect(traffic.total!.receiveBytesPerSecond, isNull);
+  });
+
   test('same-basis service totals, rates and dashboard cache round trip', () {
     final traffic = parse(
       sample([100, 200, 300, 400]),

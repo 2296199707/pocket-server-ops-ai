@@ -6,6 +6,52 @@ import 'package:mobile_agent/domain/server_port_traffic.dart';
 import 'package:mobile_agent/server_traffic_script.dart';
 
 void main() {
+  test('port suggestions use server config, not outgoing UDP sockets', () async {
+    final temp = await Directory.systemTemp.createTemp('pso-traffic-hints-');
+    Process? server;
+    try {
+      final config = File('${temp.path}/config.yaml');
+      await config.writeAsString('listen: ":443" # server entry\n');
+      server = await Process.start('sh', [
+        '-c',
+        'read -r unused',
+        'server',
+        '--config',
+        config.path,
+      ]);
+      final scripts = {
+        'pgrep': '#!/bin/sh\nprintf "%s\\n" ${server.pid}\n',
+        'ss':
+            '#!/bin/sh\nprintf "%s\\n" '
+            "'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))' "
+            "'LISTEN 0 128 [::]:22 [::]:* users:((\"sshd\",pid=1,fd=4))' "
+            "'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"sshd\",pid=1,fd=5))' "
+            "'UNCONN 0 0 *:443 *:* users:((\"hysteria\",pid=2,fd=3))' "
+            "'UNCONN 0 0 *:55584 *:* users:((\"hysteria\",pid=2,fd=4))'\n",
+        'nft': '#!/bin/sh\nexit 1\n',
+      };
+      for (final entry in scripts.entries) {
+        final file = File('${temp.path}/${entry.key}');
+        await file.writeAsString(entry.value);
+        final result = await Process.run('chmod', ['700', file.path]);
+        expect(result.exitCode, 0);
+      }
+      final result = await Process.run(
+        'sh',
+        ['-c', serverTrafficProbeCommand],
+        environment: {'PATH': '${temp.path}:/usr/bin:/bin'},
+      );
+      expect(result.exitCode, 0, reason: result.stderr.toString());
+      expect(result.stdout, contains('traffic_ssh_hint=22,2222\n'));
+      expect(result.stdout, contains('traffic_hy2_hint=443\n'));
+      expect(result.stdout, isNot(contains('55584')));
+    } finally {
+      server?.kill();
+      if (server != null) await server.exitCode;
+      await temp.delete(recursive: true);
+    }
+  }, skip: !Platform.isLinux);
+
   test('port input rejects command injection and invalid ports', () {
     expect(normalizeTrafficPorts('2222, 22,22'), '22,2222');
     for (final value in ['', '0', '65536', '22; reboot', '22,', '-1']) {

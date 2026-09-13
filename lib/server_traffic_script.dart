@@ -83,12 +83,54 @@ fi
 // Run as a subshell after the existing dashboard probe, on the same SSH call.
 // Failure of this optional metric must not hide CPU/memory/disk information.
 const serverTrafficProbeCommand = r'''(
-printf 'traffic_ssh_hint=%s\n' "$(printf '%s\n' "$SSH_CONNECTION" | awk '{print $4}')"
-printf 'traffic_hy2_hint=%s\n' "$(ss -Hlunp 2>/dev/null | awk '/hysteria/ {address=$4; sub(/^.*:/, "", address); if (address ~ /^[0-9]+$/) {if (ports != "") ports=ports ","; ports=ports address}} END {print ports}')"
+traffic_ssh_ports=$(ss -Hltnp 2>/dev/null | awk '/"sshd"/ {address=$4; sub(/^.*:/, "", address); if (address ~ /^[0-9]+$/) print address}' | sort -nu | paste -sd, -)
+[ -n "$traffic_ssh_ports" ] || traffic_ssh_ports=$(printf '%s\n' "$SSH_CONNECTION" | awk '{print $4}')
+printf 'traffic_ssh_hint=%s\n' "$traffic_ssh_ports"
+# A Hysteria process also owns outbound UDP sockets. Only suggest a server's
+# configured listen port, never every UDP socket seen in ss.
+traffic_hy2_ports=$(
+  for traffic_pid in $(pgrep -x hysteria 2>/dev/null); do
+    traffic_config=$(tr '\000' '\n' < "/proc/$traffic_pid/cmdline" 2>/dev/null | awk '
+      want {config=$0; want=0; next}
+      $0 == "server" {server=1}
+      $0 == "-c" || $0 == "--config" {want=1}
+      /^--config=/ {config=substr($0, 10)}
+      END {if (server) print config}
+    ')
+    [ -n "$traffic_config" ] || continue
+    case "$traffic_config" in
+      /*) ;;
+      *) traffic_config="/proc/$traffic_pid/cwd/$traffic_config" ;;
+    esac
+    [ -r "$traffic_config" ] || continue
+    awk '/^listen:[[:space:]]*/ {
+      sub(/^listen:[[:space:]]*/, "")
+      sub(/[[:space:]]+#.*$/, "")
+      sub(/[[:space:]]+$/, "")
+      quote=sprintf("%c", 39)
+      if ((substr($0,1,1) == "\"" && substr($0,length,1) == "\"") ||
+          (substr($0,1,1) == quote && substr($0,length,1) == quote))
+        $0=substr($0,2,length-2)
+      sub(/^.*:/, "")
+      if ($0 ~ /^[0-9]+$/ && $0+0 > 0 && $0+0 <= 65535) print $0+0
+      exit
+    }' "$traffic_config"
+  done
+)
+printf 'traffic_hy2_hint=%s\n' "$(printf '%s\n' "$traffic_hy2_ports" | sort -nu | paste -sd, -)"
 if ! command -v nft >/dev/null 2>&1; then
   printf 'traffic_status=unsupported\n'
   exit 0
 fi
+# nft 1.0.6 omits table comments from JSON. Read the text metadata with a
+# table handle, so the phone can verify it belongs to the same JSON snapshot.
+traffic_table_metadata() {
+  nft -a -s list table inet pocket_server_ops_traffic 2>/dev/null | awk '
+    NR == 1 {for (i=1; i<NF; i++) if ($i == "handle") handle=$(i+1)}
+    $1 == "comment" {gsub(/^"|"$/, "", $2); print handle "|" $2; exit}
+  '
+}
+traffic_meta_before=$(traffic_table_metadata)
 traffic_before=$(nft -j list table inet pocket_server_ops_traffic 2>/dev/null)
 if [ "$?" != 0 ]; then
   if nft list tables >/dev/null 2>&1; then
@@ -100,6 +142,7 @@ if [ "$?" != 0 ]; then
 fi
 traffic_time_before=$(awk '{print $1}' /proc/uptime)
 sleep 0.2
+traffic_meta_after=$(traffic_table_metadata)
 traffic_after=$(nft -j list table inet pocket_server_ops_traffic 2>/dev/null)
 if [ "$?" != 0 ]; then
   printf 'traffic_status=unavailable\n'
@@ -107,6 +150,8 @@ if [ "$?" != 0 ]; then
 fi
 traffic_time_after=$(awk '{print $1}' /proc/uptime)
 printf 'traffic_status=ready\n'
+printf 'traffic_meta_before=%s\n' "$traffic_meta_before"
+printf 'traffic_meta_after=%s\n' "$traffic_meta_after"
 printf 'traffic_time_before=%s\n' "$traffic_time_before"
 printf 'traffic_time_after=%s\n' "$traffic_time_after"
 printf 'traffic_before=%s\n' "$(printf '%s' "$traffic_before" | tr '\r\n' '  ')"

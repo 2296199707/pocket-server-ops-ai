@@ -71,3 +71,64 @@ GET /traffic、GET /online；不调用清零接口。
 - APK：/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.7-beta.1-release.apk。
 - SHA-256：b9932bc4f60014b3fca20dbf16d0a871489af8b05efccd0692fada1bf53e9d8a。
 - 同步应用内更新清单，并补回已发布正式版 1.0.6 条目。
+
+## 2026-09-13：真实服务器“精品线路c”只读诊断
+
+- 持久 SSH 插件修复后已成功连接，执行用户为 root，nftables 版本为 1.0.6。
+- 自有统计表和四个命名计数器都存在且有累计字节。首次读到 SSH 收/发为
+  5740 / 7280 字节，HY2 收/发为 110834715 / 43292703 字节。
+- 确认 APP 误报根因：该服务器的 nft -j 输出中 table 对象只有 family、name、handle，
+  没有 comment；同一张表的 nft -s 文本输出却保留完整 pso-traffic-v1 标记。
+  当前 _CounterSample.read 必须从 JSON table.comment 匹配端口和代次，缺字段便返回 null，
+  上层因此显示“端口计数器数据无效”，并把端口显示为“未配置”。并非计数器无效或没有权限。
+- 先前真实内核测试环境为 nftables 1.0.9，未覆盖这台 1.0.6 的输出差异。
+  下一次修复必须增加此真实输出形态的回归，不可仅在原测试环境重跑后宣称解决。
+- HY2 运行进程明确使用 /etc/hysteria/config.yaml，服务为 hysteria.service。
+  配置监听 :443，没有 trafficStats 键，进程也没有 TCP 统计监听，因此上方
+  “HY2 流量统计接口未接入”是独立且准确的提示。端口计数不依赖该 API。
+- SSH 实际监听 TCP 22、2222，当前规则仅配置 2222，会漏掉 22 的流量。
+- HY2 当前配置和实时监听均为 UDP 443；规则另外包含 35043、41061、41619、43633、
+  48820、55584。这些不是当前配置的服务监听端口。APP 现有建议值直接枚举所有
+  hysteria UDP socket，无法保证每个都是服务入口；需避免把临时 UDP socket 当作服务端口。
+- 建议最小修复：通过文本接口显式读取配置/代次标记，JSON 继续读取实际计数；
+  保留重置检测，使用现有规则和累计值，不通过清空表或升级服务器绕过 APP 问题。
+  端口建议应识别实际服务监听配置，并继续允许用户手动调整。
+- 本次仅诊断并记录文档；未修改 APP 实现、远端规则或 HY2 配置，未重启/安装服务器软件。
+
+## 2026-09-13：nftables 1.0.6 读取修复已完成，待打包
+
+- 采集脚本在每个 JSON 样本前通过 nft -a -s 读取表 handle 和配置 comment，
+  分别输出 traffic_meta_before / traffic_meta_after；字节计数仍来自 JSON 命名计数器。
+  不新增依赖、不替换规则、不升级远端 nftables。
+- APP 核对文本标记的 handle 与同次 JSON table.handle，一致才使用该配置。
+  两个速率样本还同时比较 handle 和配置代次；表在读取间被重建时，不拼接两张表的数据，
+  重建前后均有效时保留新累计值但不计算跨代次速率。
+- SSH 端口建议改为汇总实际 sshd TCP 监听、排序去重，无可见监听信息时才使用
+  SSH_CONNECTION 的本机端口。HY2 建议读取运行中 hysteria server 显式 -c/--config
+  指定的顶层 listen 配置（支持 --config=、绝对/相对路径、常见 YAML 引号及行尾注释）；
+  无明确可读配置时留空供手动填写，不扫描所有 UDP socket 猜测服务入口。
+- 在“精品线路c”运行新探针进行只读验证，建议正确返回 SSH 22,2222 与 HY2 443；
+  读取并保留现有表 handle 5 和原代次，未清零。完整原始结果保存为
+  test/fixtures/nft-1.0.6-traffic-probe.txt，不含账号凭据/配置密钥。
+- 该样本在旧读取方式下复现 unavailable；修复后为 ready，合计 2096683694 字节，
+  四项累计与服务器真实输出一致，采样速率可用，仪表盘缓存往返一致。
+- 新增回归覆盖：旧 nft JSON 缺少 comment、文本/JSON 表身份不一致、跨样本重建，
+  以及临时 UDP socket 不进入端口建议。两份定向测试共 9 项通过（含真实隔离内核测试），
+  四个变更代码/测试文件静态检查通过。
+- 远程插件前两次普通输出没有完整返回 JSON 且 exitCode 缺失；本次只读诊断将相同输出
+  gzip+base64 传回后完整取得结果并本地解码验证。没有因此修改 APP SSH 传输策略，
+  不据此把传输现象归因于 APP 解析 bug。
+- 服务器原规则仍为 SSH 2222 与原 HY2 七个端口；更正统计范围会重新计数，未自动修改。
+  HY2 trafficStats 仍未开启，这与端口计数解析修复无关；未改远端配置或重启服务。
+- 修复在手机携带的探针/解析逻辑内，需新 APK 生效，无需重装服务器统计规则。
+  本批次尚未构建、推送或发布。
+
+## 2026-09-13：beta.2 打包记录
+
+- 用户要求更新试用，版本递增为 1.0.7-beta.2（versionCode 61），同步 beta 更新清单。
+- release APK 构建成功，用时 212 秒，大小 80,809,217 字节。
+- 包名与原版本一致，签名 SHA-256 仍为
+  757ed46c6382c776aa238592fb386587f90f8bba70eaac1f693c3fa237504d19，可覆盖安装。
+- 产物：/www/mobile-agent-build/app/outputs/flutter-apk/pocket-server-ops-ai-v1.0.7-beta.2-release.apk。
+- 文件 SHA-256：11fde959465d74bee67c32aa97b6578f5ed46977c944ba1bef8e000a81b72f14。
+- 使用数据盘缓存、单 worker、1536MiB Gradle 堆；不重跑已通过的功能测试、不启动第二份构建。

@@ -117,9 +117,15 @@ class ServerPortTraffic {
         _ => '无法读取端口计数器，请检查 nftables 权限或规则状态',
       });
     }
-    final after = _CounterSample.read(values['traffic_after']);
+    final after = _CounterSample.read(
+      values['traffic_after'],
+      tableMetadata: values['traffic_meta_after'],
+    );
     if (after == null) return unavailable('unavailable', '端口计数器数据无效');
-    final before = _CounterSample.read(values['traffic_before']);
+    final before = _CounterSample.read(
+      values['traffic_before'],
+      tableMetadata: values['traffic_meta_before'],
+    );
     final seconds =
         (double.tryParse(values['traffic_time_after'] ?? '') ?? 0) -
         (double.tryParse(values['traffic_time_before'] ?? '') ?? 0);
@@ -170,12 +176,14 @@ class _CounterSample {
   final String hy2Ports;
   final Map<String, int> bytes;
 
-  static _CounterSample? read(String? text) {
+  static _CounterSample? read(String? text, {String? tableMetadata}) {
     if (text == null || text.isEmpty) return null;
     try {
       final decoded = jsonDecode(text);
       if (decoded is! Map || decoded['nftables'] is! List) return null;
       String? comment;
+      int? tableHandle;
+      var foundTable = false;
       final bytes = <String, int>{};
       for (final item in decoded['nftables'] as List) {
         if (item is! Map) continue;
@@ -183,6 +191,8 @@ class _CounterSample {
         if (table is Map &&
             table['family'] == 'inet' &&
             table['name'] == 'pocket_server_ops_traffic') {
+          foundTable = true;
+          tableHandle = table['handle'] as int?;
           comment = table['comment'] as String?;
         }
         final counter = item['counter'];
@@ -194,11 +204,29 @@ class _CounterSample {
           if (name is String && value is int && value >= 0) bytes[name] = value;
         }
       }
+      if (!foundTable) return null;
+      if (tableMetadata != null) {
+        final separator = tableMetadata.indexOf('|');
+        if (separator < 1 ||
+            tableHandle == null ||
+            int.tryParse(tableMetadata.substring(0, separator)) !=
+                tableHandle) {
+          return null; // Table was replaced between the text and JSON reads.
+        }
+        final textComment = tableMetadata.substring(separator + 1);
+        if (comment != null && comment != textComment) return null;
+        comment = textComment;
+      }
       final metadata = RegExp(
         r'^pso-traffic-v1\|ssh=([0-9,]+)\|hy2=([0-9,]+)\|id=([a-zA-Z0-9-]+)$',
       ).firstMatch(comment ?? '');
       if (metadata == null) return null;
-      return _CounterSample(comment!, metadata[1]!, metadata[2]!, bytes);
+      return _CounterSample(
+        '$tableHandle|$comment',
+        metadata[1]!,
+        metadata[2]!,
+        bytes,
+      );
     } on FormatException {
       return null;
     }

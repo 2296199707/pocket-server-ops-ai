@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.7-beta.2",
+      "title": "PocketServerOps AI v1.0.7-beta.2",
+      "notes": "修复 nftables 1.0.6 下仪表盘误报端口计数器数据无效；修正 SSH 多监听端口建议，HY2 从运行服务配置识别入口，排除临时 UDP 端口。保留手动端口配置和已有累计，无需重装服务器规则。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.7-beta.2",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.7-beta.2/pocket-server-ops-ai-v1.0.7-beta.2-release.apk",
+      "prerelease": true,
+      "published_at": "2026-09-13T12:12:05Z"
+    },
+    {
       "version": "1.0.7-beta.1",
       "title": "PocketServerOps AI v1.0.7-beta.1",
       "notes": "完善流量机仪表盘：新增 HY2 状态与业务统计；增加 SSH/TCP、HY2/UDP 端口收发统计、采样速率和两者合计，支持端口配置、停用与每服务器缓存。端口统计从开启时起算，服务器重启或修改端口后重新计数。",
