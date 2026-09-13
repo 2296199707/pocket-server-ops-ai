@@ -2359,3 +2359,25 @@ Responses 判断 Sub2API 的实际出站协议。
   test/openai_compatible_client_test.dart test/chat_completions_client_test.dart` 通过，
   共 88 项；新增测试确认 `startAndPoll` 只执行一次 SSH 命令请求。未构建 APK、未调用
   真实供应商和真实服务器。
+
+### 2026-09-09：轻量流量机仪表盘与 Hysteria 2
+
+- 服务器仪表盘继续使用同一页面，但把 HY2 代理状态与系统资源分区显示；HY2 不可用时
+  不影响原有 CPU、内存、磁盘和网卡状态。
+- 状态脚本版本升级为 `4`。在已有 SSH 读取中按需识别 `hysteria` 进程、读取进程内存和
+  UDP 监听地址；如果发现本机 Hysteria 配置中的 `trafficStats`，仅访问本机地址，读取
+  `/online` 和 `/traffic` 的聚合结果。脚本不自动改配置、开放端口或重启服务。
+- `/online` 和 `/traffic` 是 Hysteria 官方 Traffic Stats API 的接口；业务流量与整机
+  网卡累计流量分开显示。详细 `/dump/streams` 暂不加入默认刷新，避免在 1 核 1GB 机器上
+  频繁获取连接明细。
+- 尚未实现实时速率、月度账单统计、Clash Verge 客户端内部状态和多网卡选择；这些需要
+  明确采样/历史口径后再单独加入。
+
+#### 2026-09-13：补充 SSH 与 HY2 端口流量及合计
+
+- 已补充统一 IP 字节口径的 SSH/TCP 与 HY2/UDP 计数及两者接收、发送、双向总量。
+  另有刷新时采样速率；不把 HY2 业务 API 字节或整机网卡量重复加入合计。
+- 内核计数器按需开启，不新增守护进程；UI、每服务器缓存、定向测试已完成。
+- 实现路径、测试证据、启用方法和重启清零等边界记录在
+  [dashboard-port-traffic.zh-CN.md](dashboard-port-traffic.zh-CN.md)，后续继续从此文档接续。
+- 月度账单历史、自动高频刷新、容器转发链统计、多网卡选择仍不在本次范围。

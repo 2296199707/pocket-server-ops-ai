@@ -2,6 +2,24 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.7-beta.1",
+      "title": "PocketServerOps AI v1.0.7-beta.1",
+      "notes": "完善流量机仪表盘：新增 HY2 状态与业务统计；增加 SSH/TCP、HY2/UDP 端口收发统计、采样速率和两者合计，支持端口配置、停用与每服务器缓存。端口统计从开启时起算，服务器重启或修改端口后重新计数。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.7-beta.1",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.7-beta.1/pocket-server-ops-ai-v1.0.7-beta.1-release.apk",
+      "prerelease": true,
+      "published_at": "2026-09-13T10:06:48Z"
+    },
+    {
+      "version": "1.0.6",
+      "title": "PocketServerOps AI v1.0.6",
+      "notes": "正式版：补齐通用推理预设 Low、Medium、High、Extra High、Max、Ultra，保留供应商明确返回的推理能力优先级。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.6",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.6/pocket-server-ops-ai-v1.0.6-release.apk",
+      "prerelease": false,
+      "published_at": "2026-09-09T07:58:48Z"
+    },
+    {
       "version": "1.0.5-beta.14",
       "title": "PocketServerOps AI v1.0.5-beta.14",
       "notes": "优化 Agent 执行速度：可恢复 terminal.exec 将远程进程启动与首次状态探测合并为一次 SSH 命令请求；保留断线恢复、输出偏移、写操作顺序和本地完整历史请求，不启用供应商服务端会话续接。",

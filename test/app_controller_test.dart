@@ -3520,6 +3520,20 @@ void main() {
 
     expect(dashboard.hostname, 'test-server');
     expect(dashboard.cpuUsage, 5);
+    expect(dashboard.hy2?.status, 'running');
+    expect(dashboard.hy2?.onlineClients, 3);
+    expect(dashboard.hy2?.receivedBytes, 300);
+    expect(dashboard.hy2?.transmittedBytes, 100);
+    expect(dashboard.portTraffic?.total?.receivedBytes, 400);
+    expect(dashboard.portTraffic?.total?.transmittedBytes, 600);
+    expect(dashboard.portTraffic?.total?.totalBytes, 1000);
+    expect(
+      ServerDashboard.fromJson(dashboard.toJson())
+          .portTraffic
+          ?.total
+          ?.totalBytes,
+      1000,
+    );
     expect(
       dashboard.cpuCores.map((core) => '${core.name}:${core.usage}').toList(),
       ['cpu0:3', 'cpu1:7'],
@@ -3768,7 +3782,21 @@ class _FakeConnection extends SshConnection {
           'cpu_usage=5\n'
           'cpu_core_usage=cpu0:3,cpu1:7\n'
           'memory=20%\n'
-          'disk=2G / 10G (20%)\n',
+          'disk=2G / 10G (20%)\n'
+          'hy2_detected=1\n'
+          'hy2_status=running\n'
+          'hy2_pid=123\n'
+          'hy2_memory=18 MiB\n'
+          'hy2_listen=0.0.0.0:443\n'
+          'hy2_online_json={"alice":2,"bob":1}\n'
+          'hy2_traffic_json={"alice":{"rx":100,"tx":40},"bob":{"rx":200,"tx":60}}\n'
+          'traffic_status=ready\n'
+          'traffic_after={"nftables":['
+          '{"table":{"family":"inet","name":"pocket_server_ops_traffic","comment":"pso-traffic-v1|ssh=22|hy2=443|id=test"}},'
+          '{"counter":{"family":"inet","table":"pocket_server_ops_traffic","name":"ssh_rx","bytes":100}},'
+          '{"counter":{"family":"inet","table":"pocket_server_ops_traffic","name":"ssh_tx","bytes":200}},'
+          '{"counter":{"family":"inet","table":"pocket_server_ops_traffic","name":"hy2_rx","bytes":300}},'
+          '{"counter":{"family":"inet","table":"pocket_server_ops_traffic","name":"hy2_tx","bytes":400}}]}\n',
       stderr: '',
       exitCode: 0,
     );

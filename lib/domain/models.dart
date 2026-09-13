@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'server_port_traffic.dart';
+
 // `default` is an app-only sentinel: omitting reasoning.effort lets the
 // selected model use its documented default. Explicit values come from the
 // selected model's provider metadata when available; a small compatibility
@@ -1801,6 +1803,54 @@ class ServerNetwork {
   );
 }
 
+class ServerHy2Status {
+  const ServerHy2Status({
+    required this.detected,
+    required this.status,
+    this.pid,
+    this.memory,
+    this.listen,
+    this.onlineClients,
+    this.receivedBytes,
+    this.transmittedBytes,
+    this.trafficApiAvailable = false,
+  });
+
+  final bool detected;
+  final String status;
+  final String? pid;
+  final String? memory;
+  final String? listen;
+  final int? onlineClients;
+  final int? receivedBytes;
+  final int? transmittedBytes;
+  final bool trafficApiAvailable;
+
+  Map<String, Object?> toMap() => {
+    'detected': detected,
+    'status': status,
+    'pid': pid,
+    'memory': memory,
+    'listen': listen,
+    'onlineClients': onlineClients,
+    'receivedBytes': receivedBytes,
+    'transmittedBytes': transmittedBytes,
+    'trafficApiAvailable': trafficApiAvailable,
+  };
+
+  factory ServerHy2Status.fromMap(Map<String, Object?> map) => ServerHy2Status(
+    detected: map['detected'] == true,
+    status: map['status'] as String? ?? 'unknown',
+    pid: map['pid'] as String?,
+    memory: map['memory'] as String?,
+    listen: map['listen'] as String?,
+    onlineClients: _readOptionalInt(map['onlineClients']),
+    receivedBytes: _readOptionalInt(map['receivedBytes']),
+    transmittedBytes: _readOptionalInt(map['transmittedBytes']),
+    trafficApiAvailable: map['trafficApiAvailable'] == true,
+  );
+}
+
 class ServerCpuCore {
   const ServerCpuCore({required this.name, required this.usage});
 
@@ -1830,6 +1880,8 @@ class ServerDashboard {
     this.cpuCores = const [],
     this.disks = const [],
     this.network,
+    this.hy2,
+    this.portTraffic,
     this.processCount,
   });
 
@@ -1846,6 +1898,8 @@ class ServerDashboard {
   final bool statusScriptInstalled;
   final List<ServerDisk> disks;
   final ServerNetwork? network;
+  final ServerHy2Status? hy2;
+  final ServerPortTraffic? portTraffic;
   final int? processCount;
 
   factory ServerDashboard.fromJson(String value) {
@@ -1855,6 +1909,8 @@ class ServerDashboard {
     final rawCpuCores = map['cpuCores'];
     final rawDisks = map['disks'];
     final rawNetwork = map['network'];
+    final rawHy2 = map['hy2'];
+    final rawPortTraffic = map['portTraffic'];
     return ServerDashboard(
       hostname: map['hostname'] as String? ?? 'unknown',
       os: map['os'] as String? ?? 'unknown',
@@ -1883,6 +1939,12 @@ class ServerDashboard {
       network: rawNetwork is Map
           ? ServerNetwork.fromMap(Map<String, Object?>.from(rawNetwork))
           : null,
+      hy2: rawHy2 is Map
+          ? ServerHy2Status.fromMap(Map<String, Object?>.from(rawHy2))
+          : null,
+      portTraffic: rawPortTraffic is Map
+          ? ServerPortTraffic.fromMap(Map<String, Object?>.from(rawPortTraffic))
+          : null,
       processCount: _readOptionalInt(map['processCount']),
     );
   }
@@ -1901,6 +1963,8 @@ class ServerDashboard {
     'statusScriptInstalled': statusScriptInstalled,
     'disks': [for (final item in disks) item.toMap()],
     'network': network?.toMap(),
+    'hy2': hy2?.toMap(),
+    'portTraffic': portTraffic?.toMap(),
     'processCount': processCount,
   });
 }

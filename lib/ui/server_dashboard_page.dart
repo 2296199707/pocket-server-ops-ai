@@ -6,6 +6,7 @@ import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
 import 'file_manager_page.dart';
+import 'server_traffic_card.dart';
 import 'terminal_page.dart';
 
 class ServerDashboardPage extends StatefulWidget {
@@ -29,6 +30,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   ServerDashboard? _dashboard;
   bool _loading = false;
   bool _installing = false;
+  bool _configuringTraffic = false;
   String? _error;
   int _loadRequest = 0;
 
@@ -139,6 +141,29 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 28),
           children: [
             _ServerHeader(server: _server, dashboard: dashboard),
+            if (dashboard != null && !_server.isWindowsComputer) ...[
+              const SizedBox(height: 12),
+              _Hy2Card(status: dashboard.hy2),
+              const SizedBox(height: 12),
+              ServerTrafficCard(
+                traffic: dashboard.portTraffic,
+                busy: _loading || _installing || _configuringTraffic,
+                onConfigure: (sshPorts, hy2Ports) => _changeTraffic(
+                  (server) => widget.controller.configureServerTraffic(
+                    server,
+                    sshPorts: sshPorts,
+                    hy2Ports: hy2Ports,
+                    onFirstHostKey: _confirmHostKey,
+                  ),
+                ),
+                onDisable: () => _changeTraffic(
+                  (server) => widget.controller.disableServerTraffic(
+                    server,
+                    onFirstHostKey: _confirmHostKey,
+                  ),
+                ),
+              ),
+            ],
             if (_error != null) ...[
               const SizedBox(height: 12),
               _ErrorNotice(text: _error!),
@@ -178,7 +203,7 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   }
 
   void _switchServer(String id) {
-    if (id == _server.id || _installing) return;
+    if (id == _server.id || _installing || _configuringTraffic) return;
     final selected = _availableServers.firstWhere((server) => server.id == id);
     setState(() {
       _server = selected;
@@ -244,6 +269,26 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
       if (mounted) setState(() => _error = '安装状态脚本失败：$error');
     } finally {
       if (mounted) setState(() => _installing = false);
+    }
+  }
+
+  Future<void> _changeTraffic(
+    Future<void> Function(ServerProfile server) change,
+  ) async {
+    final server = _server;
+    setState(() {
+      _configuringTraffic = true;
+      _error = null;
+    });
+    try {
+      await change(server);
+      if (mounted && _server.id == server.id) await _load();
+    } catch (error) {
+      if (mounted && _server.id == server.id) {
+        setState(() => _error = '$error');
+      }
+    } finally {
+      if (mounted) setState(() => _configuringTraffic = false);
     }
   }
 
@@ -377,6 +422,78 @@ class _SystemOverviewCard extends StatelessWidget {
             label: '进程数',
             value: dashboard.processCount?.toString() ?? '暂无数据',
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Hy2Card extends StatelessWidget {
+  const _Hy2Card({required this.status});
+
+  final ServerHy2Status? status;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = status;
+    if (value == null) {
+      return _DashboardCard(
+        title: 'HY2 代理',
+        icon: Icons.vpn_lock_outlined,
+        child: const Text('更新状态脚本后读取 Hysteria 2 状态'),
+      );
+    }
+    final running = value.status == 'running';
+    final statusText = switch (value.status) {
+      'running' => '运行中',
+      'not_running' => '未运行',
+      _ => '未发现',
+    };
+    final statusColor = running
+        ? Colors.green
+        : value.detected
+        ? Theme.of(context).colorScheme.error
+        : Theme.of(context).colorScheme.onSurfaceVariant;
+    return _DashboardCard(
+      title: 'HY2 代理',
+      icon: Icons.vpn_lock_outlined,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.circle, size: 10, color: statusColor),
+          const SizedBox(width: 5),
+          Text(statusText),
+        ],
+      ),
+      child: Column(
+        children: [
+          _ValueRow(label: '监听 UDP', value: value.listen ?? '暂无数据'),
+          _ValueRow(label: '进程内存', value: value.memory ?? '暂无数据'),
+          if (value.trafficApiAvailable) ...[
+            _ValueRow(
+              label: '在线客户端',
+              value: value.onlineClients?.toString() ?? '暂无数据',
+            ),
+            _ValueRow(
+              label: '业务接收（API）',
+              value: value.receivedBytes == null
+                  ? '暂无数据'
+                  : _formatBytes(value.receivedBytes!),
+            ),
+            _ValueRow(
+              label: '业务发送（API）',
+              value: value.transmittedBytes == null
+                  ? '暂无数据'
+                  : _formatBytes(value.transmittedBytes!),
+            ),
+          ] else
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'HY2 流量统计接口未接入；网卡流量见下方网络区域。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
         ],
       ),
     );

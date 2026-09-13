@@ -24,6 +24,7 @@ import 'agent/subagents.dart';
 import 'agent/tool_display.dart';
 import 'credentials/credential_store.dart';
 import 'domain/models.dart';
+import 'domain/server_port_traffic.dart';
 import 'local/local_preview.dart';
 import 'local/project_files.dart';
 import 'local/local_file_access.dart';
@@ -35,6 +36,7 @@ import 'providers/image_generation_client.dart';
 import 'providers/provider_usage_client.dart';
 import 'relay/computer_relay_client.dart';
 import 'server_status_script.dart';
+import 'server_traffic_script.dart';
 import 'ssh/resumable_file_download.dart';
 import 'ssh/resumable_file_upload.dart';
 import 'ssh/ssh_connection.dart';
@@ -5724,7 +5726,9 @@ class AppController extends ChangeNotifier {
       }
     }
     final dashboard = await _withServerConnection(profile, (connection) async {
-      final result = await connection.run(statusProbeCommand);
+      final result = await connection.run(
+        '($statusProbeCommand) || exit \$?\n$serverTrafficProbeCommand',
+      );
       if (result.exitCode != 0) {
         throw StateError('服务器状态脚本执行失败');
       }
@@ -5750,6 +5754,44 @@ class AppController extends ChangeNotifier {
         final result = await connection.run(statusScriptInstallCommand);
         if (result.exitCode != 0) {
           throw StateError('状态脚本安装失败：${result.stderr}');
+        }
+      }, onFirstHostKey: onFirstHostKey),
+      cancellation: AgentCancellation(),
+    );
+  }
+
+  Future<void> configureServerTraffic(
+    ServerProfile profile, {
+    required String sshPorts,
+    required String hy2Ports,
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) => _runServerTrafficConfiguration(
+    profile,
+    serverTrafficConfigureCommand(sshPorts: sshPorts, hy2Ports: hy2Ports),
+    onFirstHostKey: onFirstHostKey,
+  );
+
+  Future<void> disableServerTraffic(
+    ServerProfile profile, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) => _runServerTrafficConfiguration(
+    profile,
+    serverTrafficDisableCommand,
+    onFirstHostKey: onFirstHostKey,
+  );
+
+  Future<void> _runServerTrafficConfiguration(
+    ServerProfile profile,
+    String command, {
+    FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
+  }) async {
+    if (previewMode) return;
+    await _remoteWriteQueue.run<void>(
+      profile.id,
+      () => _withServerConnection(profile, (connection) async {
+        final result = await connection.run(command);
+        if (result.exitCode != 0) {
+          throw StateError('端口统计配置失败：${result.stderr.trim()}');
         }
       }, onFirstHostKey: onFirstHostKey),
       cancellation: AgentCancellation(),
@@ -8083,6 +8125,8 @@ class AppController extends ChangeNotifier {
           (int.tryParse(values['script_version'] ?? '') ?? 0) >= 1,
       disks: _parseDisks(values['disk_details']),
       network: _parseNetwork(values['network']),
+      hy2: _parseHy2(values),
+      portTraffic: ServerPortTraffic.fromProbe(values),
       processCount: int.tryParse(values['processes'] ?? ''),
     );
   }
@@ -8249,6 +8293,54 @@ class AppController extends ChangeNotifier {
       interfaceName: parts[0],
       receivedBytes: receivedBytes,
       transmittedBytes: transmittedBytes,
+    );
+  }
+
+  static ServerHy2Status? _parseHy2(Map<String, String> values) {
+    final status = values['hy2_status'];
+    if (status == null || status.isEmpty) return null;
+    Map? object(String? value) {
+      if (value == null || value.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(value);
+        return decoded is Map ? decoded : null;
+      } on FormatException {
+        return null;
+      }
+    }
+
+    final online = object(values['hy2_online_json']);
+    final traffic = object(values['hy2_traffic_json']);
+    int? sum(Iterable<Object?>? items) {
+      if (items == null) return null;
+      var total = 0;
+      for (final item in items) {
+        if (item is! int || item < 0) return null;
+        total += item;
+      }
+      return total;
+    }
+
+    final onlineClients = sum(online?.values);
+    final receivedBytes = sum(
+      traffic?.values.map((item) => item is Map ? item['rx'] : null),
+    );
+    final transmittedBytes = sum(
+      traffic?.values.map((item) => item is Map ? item['tx'] : null),
+    );
+    return ServerHy2Status(
+      detected: values['hy2_detected'] == '1',
+      status: status,
+      pid: values['hy2_pid'],
+      memory: values['hy2_memory'],
+      listen: values['hy2_listen'],
+      onlineClients: onlineClients,
+      receivedBytes: receivedBytes,
+      transmittedBytes: transmittedBytes,
+      trafficApiAvailable:
+          onlineClients != null ||
+          receivedBytes != null ||
+          transmittedBytes != null,
     );
   }
 

@@ -84,6 +84,37 @@ load_value=$(awk '{print $1 " " $2 " " $3}' /proc/loadavg 2>/dev/null)
 disk_details_value=$(df -P -h 2>/dev/null | awk 'NR > 1 && $6 ~ /^\// {gsub("%", "", $5); printf "%s|%s|%s|%s|%s;", $6, $2, $3, $4, $5}')
 network_value=$(awk 'NR > 2 {name=$1; sub(/:/, "", name); if (name != "lo") {iface=name; rx += $2; tx += $10}} END {if (iface != "") printf "%s|%.0f|%.0f", iface, rx, tx}' /proc/net/dev 2>/dev/null)
 process_value=$(ps -e 2>/dev/null | awk 'NR > 1 {count++} END {print count + 0}')
+hy2_detected=0
+hy2_status=not_detected
+hy2_pid=$(pgrep -xo hysteria 2>/dev/null)
+if [ -n "$hy2_pid" ]; then
+  hy2_detected=1
+  hy2_status=running
+fi
+hy2_memory=''
+[ -n "$hy2_pid" ] && hy2_memory=$(ps -o rss= -p "$hy2_pid" 2>/dev/null | awk '{print $1 " KiB"}')
+hy2_listen=$(ss -Hlunp 2>/dev/null | awk '/hysteria/ {print $4; exit}')
+hy2_api=0
+hy2_online_json=''
+hy2_traffic_json=''
+hy2_config=''
+for candidate in "$HOME/.hysteria/config.yaml" "$HOME/.hysteria/config.yml" /etc/hysteria/config.yaml /etc/hysteria/config.yml /etc/hysteria.yaml /etc/hysteria.yml /usr/local/etc/hysteria/config.yaml; do
+  if [ -r "$candidate" ]; then hy2_config=$candidate; break; fi
+done
+if [ -n "$hy2_config" ] && [ "$hy2_detected" = 0 ]; then
+  hy2_detected=1
+  hy2_status=not_running
+fi
+if [ -n "$hy2_config" ] && command -v curl >/dev/null 2>&1; then
+  hy2_stats_listen=$(awk '/^[[:space:]]*trafficStats:[[:space:]]*$/ {block=1; next} block && /^[^[:space:]]/ {block=0} block && /^[[:space:]]+listen:/ {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' "$hy2_config" 2>/dev/null)
+  hy2_stats_secret=$(awk '/^[[:space:]]*trafficStats:[[:space:]]*$/ {block=1; next} block && /^[^[:space:]]/ {block=0} block && /^[[:space:]]+secret:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit}' "$hy2_config" 2>/dev/null)
+  hy2_stats_port=$(printf '%s' "$hy2_stats_listen" | awk -F: '{print $NF}' | tr -cd '0-9')
+  if [ -n "$hy2_stats_port" ] && [ -n "$hy2_stats_secret" ]; then
+    hy2_online_json=$(curl -fsS --max-time 1 -H "Authorization: $hy2_stats_secret" "http://127.0.0.1:$hy2_stats_port/online" 2>/dev/null)
+    hy2_traffic_json=$(curl -fsS --max-time 1 -H "Authorization: $hy2_stats_secret" "http://127.0.0.1:$hy2_stats_port/traffic" 2>/dev/null)
+    if [ -n "$hy2_online_json" ] || [ -n "$hy2_traffic_json" ]; then hy2_api=1; fi
+  fi
+fi
 cpu_snapshot() {
   awk '$1 == "cpu" || $1 ~ /^cpu[0-9]+$/ {
     total = $2+$3+$4+$5+$6+$7+$8+$9+$10
@@ -125,7 +156,7 @@ cpu_metrics=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
   print "cpu_core_usage=" core_usage
 }')
 
-printf 'script_version=3\n'
+printf 'script_version=4\n'
 printf 'hostname=%s\n' "$(clean_value "$hostname_value")"
 printf 'os=%s\n' "$(clean_value "$os_value")"
 printf 'kernel=%s\n' "$(clean_value "$kernel_value")"
@@ -138,6 +169,14 @@ printf 'disk=%s\n' "$(clean_value "$disk_value")"
 printf 'disk_details=%s\n' "$(clean_value "$disk_details_value")"
 printf 'network=%s\n' "$(clean_value "$network_value")"
 printf 'processes=%s\n' "$(clean_value "$process_value")"
+printf 'hy2_detected=%s\n' "$(clean_value "$hy2_detected")"
+printf 'hy2_status=%s\n' "$(clean_value "$hy2_status")"
+printf 'hy2_pid=%s\n' "$(clean_value "$hy2_pid")"
+printf 'hy2_memory=%s\n' "$(clean_value "$hy2_memory")"
+printf 'hy2_listen=%s\n' "$(clean_value "$hy2_listen")"
+printf 'hy2_online_json=%s\n' "$(clean_value "$hy2_online_json")"
+printf 'hy2_traffic_json=%s\n' "$(clean_value "$hy2_traffic_json")"
+printf 'hy2_traffic_api=%s\n' "$(clean_value "$hy2_api")"
 ''';
 
 const statusProbeCommand = r'''cpu_snapshot() {
