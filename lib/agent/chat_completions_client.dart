@@ -571,7 +571,32 @@ class ChatCompletionsClient implements AiChatClient {
   }
 
   static List<Map<String, Object?>> _messages(List<AiMessage> messages) {
-    return [for (final message in messages) _message(message)];
+    final result = <Map<String, Object?>>[];
+    final images = <Map<String, Object?>>[];
+    void flushImages() {
+      if (images.isEmpty) return;
+      result.add({'role': 'user', 'content': List.of(images)});
+      images.clear();
+    }
+
+    for (final message in messages) {
+      // Chat tool messages allow text only. Supply images after all results
+      // in the batch, so no synthetic visual input splits a call/result pair.
+      if (message.role != 'tool') flushImages();
+      result.add(_message(message));
+      if (message.role == 'tool' && message.attachments.isNotEmpty) {
+        images.add({
+          'type': 'text',
+          'text': 'Images returned by tool call ${message.toolCallId}:',
+        });
+        images.addAll(
+          _requestContent(AiMessage.user('', attachments: message.attachments))
+              as List<Map<String, Object?>>,
+        );
+      }
+    }
+    flushImages();
+    return result;
   }
 
   static Map<String, Object?> _message(AiMessage message) {

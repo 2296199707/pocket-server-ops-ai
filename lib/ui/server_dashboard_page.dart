@@ -33,13 +33,25 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   bool _configuringTraffic = false;
   String? _error;
   int _loadRequest = 0;
+  late bool _trafficEnabled;
 
   @override
   void initState() {
     super.initState();
     _server = widget.server;
+    _trafficEnabled = widget.controller.dashboardTrafficEnabled;
+    widget.controller.addListener(_handleControllerChanged);
     _dashboard = widget.controller.cachedServerDashboard(_server);
     unawaited(_initialize());
+  }
+
+  void _handleControllerChanged() {
+    final enabled = widget.controller.dashboardTrafficEnabled;
+    if (enabled == _trafficEnabled) return;
+    _trafficEnabled = enabled;
+    if (!mounted) return;
+    setState(() {});
+    unawaited(_load());
   }
 
   Task? get _boundTask {
@@ -73,11 +85,26 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
   @override
   void didUpdateWidget(covariant ServerDashboardPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    var reload = false;
+    if (!identical(widget.controller, oldWidget.controller)) {
+      oldWidget.controller.removeListener(_handleControllerChanged);
+      widget.controller.addListener(_handleControllerChanged);
+      _trafficEnabled = widget.controller.dashboardTrafficEnabled;
+      _dashboard = widget.controller.cachedServerDashboard(_server);
+      reload = true;
+    }
     if (widget.server.id != oldWidget.server.id) {
       _server = widget.server;
       _dashboard = widget.controller.cachedServerDashboard(_server);
-      unawaited(_initialize());
+      reload = true;
     }
+    if (reload) unawaited(_initialize());
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_handleControllerChanged);
+    super.dispose();
   }
 
   @override
@@ -141,7 +168,9 @@ class _ServerDashboardPageState extends State<ServerDashboardPage> {
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 28),
           children: [
             _ServerHeader(server: _server, dashboard: dashboard),
-            if (dashboard != null && !_server.isWindowsComputer) ...[
+            if (_trafficEnabled &&
+                dashboard != null &&
+                !_server.isWindowsComputer) ...[
               const SizedBox(height: 12),
               _Hy2Card(status: dashboard.hy2),
               const SizedBox(height: 12),

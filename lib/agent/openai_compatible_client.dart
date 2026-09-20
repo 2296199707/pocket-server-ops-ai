@@ -1130,7 +1130,20 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
         {
           'type': 'function_call_output',
           'call_id': callId,
-          'output': message.content ?? '',
+          'output': message.attachments.isEmpty
+              ? message.content ?? ''
+              : [
+                  {'type': 'input_text', 'text': message.content ?? ''},
+                  for (final attachment in message.attachments)
+                    if (attachment.isImage && supportsImages)
+                      {'type': 'input_image', 'image_url': attachment.dataUrl}
+                    else
+                      {
+                        'type': 'input_text',
+                        'text':
+                            'Image not supplied: the selected model does not support this attachment (${attachment.name}).',
+                      },
+                ],
         },
       ];
     }

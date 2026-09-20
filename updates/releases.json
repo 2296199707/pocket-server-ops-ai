@@ -2,6 +2,15 @@
   "schema_version": 1,
   "releases": [
     {
+      "version": "1.0.7-beta.3",
+      "title": "PocketServerOps AI v1.0.7-beta.3",
+      "notes": "补齐 Agent 查看手机与服务器图片、生图回看及本地网页截图能力，图片附件随历史恢复。新增设置→仪表盘设置→流量监控，默认关闭；开启后按服务器配置 HY2/SSH 统计，关闭隐藏流量并停止相关采集，保留已有规则和累计值。",
+      "release_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/tag/v1.0.7-beta.3",
+      "apk_url": "https://github.com/2296199707/pocket-server-ops-ai/releases/download/v1.0.7-beta.3/pocket-server-ops-ai-v1.0.7-beta.3-release.apk",
+      "prerelease": true,
+      "published_at": "2026-09-20T03:01:41Z"
+    },
+    {
       "version": "1.0.7-beta.2",
       "title": "PocketServerOps AI v1.0.7-beta.2",
       "notes": "修复 nftables 1.0.6 下仪表盘误报端口计数器数据无效；修正 SSH 多监听端口建议，HY2 从运行服务配置识别入口，排除临时 UDP 端口。保留手动端口配置和已有累计，无需重装服务器规则。",

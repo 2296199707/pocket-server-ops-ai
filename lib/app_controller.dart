@@ -18,6 +18,7 @@ import 'agent/computer_tools.dart';
 import 'agent/auto_review.dart';
 import 'agent/mcp_client.dart';
 import 'agent/openai_compatible_client.dart';
+import 'agent/phone_image_tools.dart';
 import 'agent/remote_instructions.dart';
 import 'agent/remote_write_queue.dart';
 import 'agent/subagents.dart';
@@ -29,6 +30,7 @@ import 'local/local_preview.dart';
 import 'local/project_files.dart';
 import 'local/local_file_access.dart';
 import 'platform/android_task_service.dart';
+import 'platform/android_preview_capture.dart';
 import 'platform/android_storage_access.dart';
 import 'platform/app_update_installer.dart';
 import 'providers/provider_connection_tester.dart';
@@ -230,6 +232,7 @@ class AppController extends ChangeNotifier {
   double _floatingCapsuleScale = 1.0;
   double _floatingCapsuleLengthScale = 1.0;
   bool _documentModuleEnabled = true;
+  bool _dashboardTrafficEnabled = false;
   bool _remoteTaskRecoveryEnabled = true;
   SubagentSettings _subagentSettings = const SubagentSettings();
   String? _imageProviderId;
@@ -256,6 +259,7 @@ class AppController extends ChangeNotifier {
   double get floatingCapsuleScale => _floatingCapsuleScale;
   double get floatingCapsuleLengthScale => _floatingCapsuleLengthScale;
   bool get documentModuleEnabled => _documentModuleEnabled;
+  bool get dashboardTrafficEnabled => _dashboardTrafficEnabled;
   bool get remoteTaskRecoveryEnabled => _remoteTaskRecoveryEnabled;
   SubagentSettings get subagentSettings => _subagentSettings;
   String? get computerRelayServerId => _computerRelayServerId;
@@ -793,6 +797,8 @@ class AppController extends ChangeNotifier {
             .toDouble();
     _documentModuleEnabled =
         (await _database.readSetting(_documentModuleSetting)) != 'false';
+    _dashboardTrafficEnabled =
+        (await _database.readSetting(_dashboardTrafficSetting)) == 'true';
     _remoteTaskRecoveryEnabled =
         (await _database.readSetting(_remoteTaskRecoverySetting)) != 'false';
     _sidebarExpanded['other'] = await _readSidebarExpandedSetting('other');
@@ -1320,6 +1326,15 @@ class AppController extends ChangeNotifier {
       enabled ? 'true' : 'false',
     );
     _documentModuleEnabled = enabled;
+    _notify();
+  }
+
+  Future<void> setDashboardTrafficEnabled(bool enabled) async {
+    await _database.writeSetting(
+      _dashboardTrafficSetting,
+      enabled ? 'true' : 'false',
+    );
+    _dashboardTrafficEnabled = enabled;
     _notify();
   }
 
@@ -2200,7 +2215,7 @@ class AppController extends ChangeNotifier {
           }
           tools.addAll(
             _serializeRemoteWrites(
-              remoteTools.tools,
+              _configureRemoteImageTools(remoteTools, task, provider, server),
               _remoteWriteLeaseKey(task, server.id, workingDirectory),
               cancellation: cancellation,
             ),
@@ -2227,6 +2242,7 @@ class AppController extends ChangeNotifier {
         if (tools.isEmpty) throw StateError('Agent 没有可用的项目或服务器工具');
       }
 
+      tools.addAll(_phoneImageTools(task, provider, taskProject, localAccess));
       final imageProvider = imageProviderFor(task);
       if (imageProvider != null &&
           imageModelFor(imageProvider.id).trim().isNotEmpty) {
@@ -3041,6 +3057,11 @@ class AppController extends ChangeNotifier {
               );
               runtime.setRemoteTaskRecoveryEnabled(_remoteTaskRecoveryEnabled);
             }
+            runtime.imageViewer = _remoteImageViewer(
+              task,
+              activeProvider,
+              server,
+            );
             group.setRuntime(id, server.name, runtime, connectionKey: poolKey);
             if (id == serverId) {
               connection = connected;
@@ -3135,7 +3156,12 @@ class AppController extends ChangeNotifier {
           }
           tools.addAll(
             _serializeRemoteWrites(
-              remoteTools.tools,
+              _configureRemoteImageTools(
+                remoteTools,
+                task,
+                activeProvider,
+                server,
+              ),
               _remoteWriteLeaseKey(task, server.id, workingDirectory),
               cancellation: cancellation,
             ),
@@ -3226,6 +3252,9 @@ class AppController extends ChangeNotifier {
         }
       }
 
+      tools.addAll(
+        _phoneImageTools(task, activeProvider, taskProject, localAccess),
+      );
       final imageProvider = imageProviderFor(task);
       if (imageProvider != null &&
           imageModelFor(imageProvider.id).trim().isNotEmpty) {
@@ -5630,11 +5659,13 @@ class AppController extends ChangeNotifier {
     ServerProfile profile, {
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
   }) async {
-    final cacheKey = _dashboardCacheKey(profile);
+    final trafficEnabled = _dashboardTrafficEnabled;
+    final cacheKey = '${_dashboardCacheKey(profile)}\u0000$trafficEnabled';
     final pending = _dashboardLoads[cacheKey];
     if (pending != null) return pending;
     final request = _loadServerDashboard(
       profile,
+      trafficEnabled: trafficEnabled,
       onFirstHostKey: onFirstHostKey,
     );
     _dashboardLoads[cacheKey] = request;
@@ -5649,6 +5680,7 @@ class AppController extends ChangeNotifier {
 
   Future<ServerDashboard> _loadServerDashboard(
     ServerProfile profile, {
+    required bool trafficEnabled,
     FutureOr<bool> Function(SshHostKey key)? onFirstHostKey,
   }) async {
     if (previewMode) {
@@ -5727,19 +5759,26 @@ class AppController extends ChangeNotifier {
     }
     final dashboard = await _withServerConnection(profile, (connection) async {
       final result = await connection.run(
-        '($statusProbeCommand) || exit \$?\n$serverTrafficProbeCommand',
+        'export PSO_TRAFFIC_MONITORING=${trafficEnabled ? 1 : 0}\n'
+        '($statusProbeCommand) || exit \$?\n'
+        '${trafficEnabled ? serverTrafficProbeCommand : ''}',
       );
       if (result.exitCode != 0) {
         throw StateError('服务器状态脚本执行失败');
       }
-      return _parseDashboard(result.stdout);
+      return _parseDashboard(result.stdout, includeTraffic: trafficEnabled);
     }, onFirstHostKey: onFirstHostKey);
-    _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
-    unawaited(
-      _database
-          .writeSetting(_dashboardCacheSettingKey(profile), dashboard.toJson())
-          .catchError((_) {}),
-    );
+    if (trafficEnabled == _dashboardTrafficEnabled) {
+      _dashboardCache[_dashboardCacheKey(profile)] = dashboard;
+      unawaited(
+        _database
+            .writeSetting(
+              _dashboardCacheSettingKey(profile),
+              dashboard.toJson(),
+            )
+            .catchError((_) {}),
+      );
+    }
     return dashboard;
   }
 
@@ -6643,7 +6682,10 @@ class AppController extends ChangeNotifier {
         'project root. For web projects, use local.test_web to check local '
         'HTML/CSS/media references, preview.start to open a loopback-only '
         'preview, preview.status to inspect it, and preview.logs to read '
-        'console or JavaScript errors. A preview is only for web assets; it '
+        'console or JavaScript errors. Use image.view for actual image pixels '
+        'and preview.screenshot for a fresh web viewport. Generated images '
+        'are also returned as tool attachments for inspection. '
+        'A preview is only for web assets; it '
         'does not run Node, Python, Flutter, or other phone runtimes.',
       );
       if (_documentModuleEnabled) {
@@ -6712,6 +6754,17 @@ class AppController extends ChangeNotifier {
         'file.read, project.write, or local.write to '
         'copy a binary file.',
       );
+      if (serversForTask(task).any((server) => !server.isWindowsComputer)) {
+        scopes.add(
+          'Use server.view_image to inspect actual pixels of an image on an '
+          'SSH server, including screenshots produced by terminal.exec. '
+          'It reads into this conversation attachment storage and does not '
+          'require a phone project. For web screenshots, use an available '
+          'browser on the server, installing its environment only as needed '
+          'for the task. Supply server_id when multiple servers are bound; '
+          'never read binary image contents through the text file.read tool.',
+        );
+      }
       if (serversForTask(task).any((server) => server.isWindowsComputer)) {
         scopes.add(
           'The selected remote target is a Windows computer reached through a '
@@ -7040,6 +7093,9 @@ class AppController extends ChangeNotifier {
             AiMessage.tool(
               toolCallId: resolvedCallId,
               content: _toolResultContent(content),
+              attachments: event.type == 'tool.completed'
+                  ? _readAttachments(event.payload['attachments'])
+                  : const [],
             ),
           );
           activeToolCallIds.remove(id);
@@ -7801,6 +7857,96 @@ class AppController extends ChangeNotifier {
     await _awaitCleanup(_sshPool.close());
   }
 
+  List<AgentTool> _configureRemoteImageTools(
+    RemoteAgentTools runtime,
+    Task task,
+    ProviderProfile provider,
+    ServerProfile server,
+  ) {
+    runtime.imageViewer = _remoteImageViewer(task, provider, server);
+    return runtime.tools;
+  }
+
+  RemoteImageViewer _remoteImageViewer(
+    Task task,
+    ProviderProfile provider,
+    ServerProfile server,
+  ) {
+    final modalities = resolveProviderModelMetadata(
+      provider,
+      task.modelOverride ?? provider.model,
+    )?.inputModalities;
+    return (remotePath, readBytes) async {
+      if (modalities != null &&
+          modalities.isNotEmpty &&
+          !modalities.contains('image')) {
+        throw StateError('当前对话模型明确不支持图片输入，请切换视觉模型后查看图片');
+      }
+      return persistToolImageResult(
+        path_util.posix.basename(remotePath),
+        await readBytes(),
+        {
+          'source': 'server',
+          'remote_path': remotePath,
+          'server_id': server.id,
+          'server_name': server.name,
+        },
+        persist: (name, mimeType, bytes) => _persistAttachmentBytes(
+          task.id,
+          name: name,
+          mimeType: mimeType,
+          bytes: bytes,
+        ),
+      );
+    };
+  }
+
+  List<AgentTool> _phoneImageTools(
+    Task task,
+    ProviderProfile provider,
+    Project? project,
+    LocalFileAccessStore? access,
+  ) {
+    final modalities = resolveProviderModelMetadata(
+      provider,
+      task.modelOverride ?? provider.model,
+    )?.inputModalities;
+    return PhoneImageTools(
+      project: project,
+      access: access,
+      allowLocalFiles:
+          task.mode == 'agent' && workModeUsesLocal(task.effectiveWorkMode),
+      supportsImages:
+          modalities == null ||
+          modalities.isEmpty ||
+          modalities.contains('image'),
+      preview: _localPreview,
+      persist: (name, mimeType, bytes) => _persistAttachmentBytes(
+        task.id,
+        name: name,
+        mimeType: mimeType,
+        bytes: bytes,
+      ),
+      readAttachment: (id) async {
+        final record = await _loadAttachmentForTask(task.id, id);
+        return _resolveAttachment(
+          task.id,
+          AiAttachment(
+            id: id,
+            name: record.name,
+            mimeType: record.mimeType,
+            byteLength: record.byteLength,
+          ),
+        );
+      },
+      capture: (url, width, height) => AndroidPreviewCapture().capture(
+        url: url,
+        width: width,
+        height: height,
+      ),
+    ).tools;
+  }
+
   AgentTool _imageGenerationTool(
     ProviderProfile provider,
     Project? project,
@@ -7892,6 +8038,9 @@ class AppController extends ChangeNotifier {
         throw const ImageGenerationInvalidResponseException('图片供应商没有返回图片');
       }
 
+      final inspected = await inspectToolImage(bytes);
+      bytes = inspected.bytes;
+      mimeType = inspected.mimeType;
       final relativePath = _generatedImagePath(arguments['filename'], mimeType);
       final attachment = await _persistAttachmentBytes(
         taskId,
@@ -7903,16 +8052,27 @@ class AppController extends ChangeNotifier {
         await _projectFiles.writeBytes(project, relativePath, bytes);
         _invalidateProjectDirectoryCache(project.id);
       }
-      return {
-        'generated': true,
-        'attachment_id': attachment.id,
-        'name': attachment.name,
-        'mime_type': mimeType,
-        'bytes': bytes.length,
-        if (project != null) 'project_path': relativePath,
-        if (generated.revisedPrompt != null)
-          'revised_prompt': generated.revisedPrompt,
-      };
+      return AiToolResult(
+        result: {
+          'generated': true,
+          'attachment_id': attachment.id,
+          'name': attachment.name,
+          'mime_type': mimeType,
+          'bytes': bytes.length,
+          if (project != null) 'project_path': relativePath,
+          if (generated.revisedPrompt != null)
+            'revised_prompt': generated.revisedPrompt,
+        },
+        attachments: [
+          AiAttachment(
+            id: attachment.id,
+            name: attachment.name,
+            mimeType: mimeType,
+            byteLength: bytes.length,
+            base64Data: base64Encode(bytes),
+          ),
+        ],
+      );
     } finally {
       client.close();
     }
@@ -8103,7 +8263,10 @@ class AppController extends ChangeNotifier {
   static String _dashboardCacheSettingKey(ServerProfile profile) =>
       'dashboard_cache:${_dashboardCacheKey(profile)}';
 
-  static ServerDashboard _parseDashboard(String output) {
+  static ServerDashboard _parseDashboard(
+    String output, {
+    required bool includeTraffic,
+  }) {
     final values = <String, String>{};
     for (final line in output.split('\n')) {
       final separator = line.indexOf('=');
@@ -8125,8 +8288,8 @@ class AppController extends ChangeNotifier {
           (int.tryParse(values['script_version'] ?? '') ?? 0) >= 1,
       disks: _parseDisks(values['disk_details']),
       network: _parseNetwork(values['network']),
-      hy2: _parseHy2(values),
-      portTraffic: ServerPortTraffic.fromProbe(values),
+      hy2: includeTraffic ? _parseHy2(values) : null,
+      portTraffic: includeTraffic ? ServerPortTraffic.fromProbe(values) : null,
       processCount: int.tryParse(values['processes'] ?? ''),
     );
   }
@@ -8426,6 +8589,7 @@ const _floatingCapsuleSetting = 'floating_capsule_enabled';
 const _floatingCapsuleScaleSetting = 'floating_capsule_scale';
 const _floatingCapsuleLengthScaleSetting = 'floating_capsule_length_scale';
 const _documentModuleSetting = 'document_module_enabled';
+const _dashboardTrafficSetting = 'dashboard_traffic_enabled';
 const _remoteTaskRecoverySetting = 'remote_task_recovery_enabled';
 const _mcpServersSetting = 'mcp_servers';
 const _fontScaleSetting = 'font_scale';

@@ -2500,6 +2500,30 @@ void main() {
         await controller.loadAttachmentBytes(attachment.id!, taskId: task.id),
         utf8.encode('image'),
       );
+      await controller.appendTaskEvent(
+        taskId: task.id,
+        type: 'assistant.completed',
+        payload: {
+          'text': '',
+          'tool_calls': [
+            const AiToolCall(
+              id: 'vision-call',
+              callId: 'vision-call',
+              name: 'image.view',
+              arguments: '{}',
+            ).toEventJson(),
+          ],
+        },
+      );
+      await controller.appendTaskEvent(
+        taskId: task.id,
+        type: 'tool.completed',
+        payload: {
+          'id': 'vision-call',
+          'result': {'viewed': true},
+          'attachments': [attachment.toJson()],
+        },
+      );
       controller.dispose();
 
       final restored = AppController(
@@ -2514,6 +2538,15 @@ void main() {
         prompt: '继续',
       );
       expect(result.status, 'completed');
+      expect(
+        result.messages
+            .where((message) => message.role == 'tool')
+            .single
+            .attachments
+            .single
+            .base64Data,
+        'aW1hZ2U=',
+      );
       restored.dispose();
     },
   );
@@ -3476,9 +3509,23 @@ void main() {
     );
     await controller.load();
 
+    expect(controller.dashboardTrafficEnabled, isFalse);
+    final basicDashboard = await controller.loadServerDashboard(
+      controller.servers.single,
+    );
+    expect(basicDashboard.hy2, isNull);
+    expect(basicDashboard.portTraffic, isNull);
+    expect(connector.commands.last, contains('PSO_TRAFFIC_MONITORING=0'));
+    expect(connector.commands.last, isNot(contains('nft -j')));
+    final callsBeforeSetting = connector.commands.length;
+    await controller.setDashboardTrafficEnabled(true);
+    expect(connector.commands.length, callsBeforeSetting);
+
     final dashboard = await controller.loadServerDashboard(
       controller.servers.single,
     );
+    expect(connector.commands.last, contains('PSO_TRAFFIC_MONITORING=1'));
+    expect(connector.commands.last, contains('nft -j'));
     final entries = await controller.listServerDirectory(
       controller.servers.single,
       '/srv/app',
@@ -3566,6 +3613,14 @@ void main() {
       ),
       isTrue,
     );
+    await controller.setDashboardTrafficEnabled(false);
+    final disabledDashboard = await controller.loadServerDashboard(
+      controller.servers.single,
+    );
+    expect(disabledDashboard.hy2, isNull);
+    expect(disabledDashboard.portTraffic, isNull);
+    expect(disabledDashboard.cpuUsage, 5);
+    expect(connector.commands.last, isNot(contains('nft -j')));
     controller.dispose();
   });
 }

@@ -17,6 +17,16 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity : FlutterActivity() {
+    private var previewCapture: PreviewScreenshotCapture? = null
+    private var previewChannel: MethodChannel? = null
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        previewChannel?.setMethodCallHandler(null)
+        previewChannel = null
+        previewCapture?.dispose()
+        previewCapture = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
     private val channelName = "mobile_agent/foreground"
     private val storageChannelName = "mobile_agent/storage"
     private val fileChannelName = "mobile_agent/file"
@@ -38,6 +48,13 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        previewCapture = PreviewScreenshotCapture(this)
+        previewChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "mobile_agent/preview_capture").also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                if (call.method == "capture") previewCapture!!.capture(call, result)
+                else result.notImplemented()
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

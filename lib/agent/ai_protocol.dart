@@ -102,6 +102,14 @@ class AiAttachment {
   }
 }
 
+/// Image bytes are transient; events persist only attachment references.
+class AiToolResult {
+  const AiToolResult({required this.result, this.attachments = const []});
+
+  final Object? result;
+  final List<AiAttachment> attachments;
+}
+
 class AiMessage {
   const AiMessage({
     required this.role,
@@ -158,8 +166,14 @@ class AiMessage {
   factory AiMessage.tool({
     required String toolCallId,
     required String content,
+    List<AiAttachment> attachments = const [],
   }) {
-    return AiMessage(role: 'tool', content: content, toolCallId: toolCallId);
+    return AiMessage(
+      role: 'tool',
+      content: content,
+      toolCallId: toolCallId,
+      attachments: List.unmodifiable(attachments),
+    );
   }
 
   Map<String, Object?> toJson() {

@@ -71,6 +71,11 @@ class AgentTool {
   final bool canRunConcurrently;
 }
 
+typedef RemoteImageViewer = Future<AiToolResult> Function(
+  String remotePath,
+  Future<Uint8List> Function() readBytes,
+);
+
 class RemoteAgentTools {
   RemoteAgentTools(
     SshConnection? connection, {
@@ -78,6 +83,7 @@ class RemoteAgentTools {
     this.project,
     this.projectFiles,
     this.localAccess,
+    this.imageViewer,
     this.connectionFactory,
     this.reconnect,
     this.remoteTaskRecoveryEnabled = true,
@@ -93,6 +99,7 @@ class RemoteAgentTools {
   Project? project;
   ProjectFileStore? projectFiles;
   LocalFileAccessStore? localAccess;
+  RemoteImageViewer? imageViewer;
   final RemoteConnectionReconnector? connectionFactory;
   final RemoteConnectionReconnector? reconnect;
   bool remoteTaskRecoveryEnabled;
@@ -367,6 +374,32 @@ class RemoteAgentTools {
       isRemote: true,
       writesRemoteState: true,
     ),
+    if (imageViewer != null)
+      AgentTool(
+        definition: const AiToolDefinition(
+          name: 'server.view_image',
+          description:
+              'View actual pixels of an existing image on the selected SSH '
+              'server. Reads binary image data into a conversation attachment; '
+              'no phone project or local path is needed. PNG/JPEG/WebP and the '
+              'first GIF frame are supported. Relative paths use the server '
+              'working directory. To inspect a web page, first create a '
+              'screenshot with terminal.exec using available browser tools, '
+              'then pass its remote_path here. This tool does not install or '
+              'start a browser.',
+          parameters: {
+            'type': 'object',
+            'required': ['remote_path'],
+            'properties': {
+              'remote_path': {'type': 'string'},
+            },
+          },
+        ),
+        call: _viewImage,
+        isRemote: true,
+        requiresConfirmation: false,
+        canRunConcurrently: true,
+      ),
     if (project != null && projectFiles != null)
       AgentTool(
         definition: const AiToolDefinition(
@@ -773,6 +806,18 @@ class RemoteAgentTools {
       _requiredText(arguments, 'new'),
     );
     return {'path': path, 'replaced': true};
+  }
+
+  Future<Object?> _viewImage(Map<String, Object?> arguments) async {
+    final remotePath = _resolveRemotePath(
+      _requiredString(arguments, 'remote_path'),
+    );
+    final viewer = imageViewer;
+    if (viewer == null) throw StateError('当前对话未启用服务器图片查看');
+    return viewer(remotePath, () async {
+      final connection = await ensureConnection();
+      return connection.readFileBytes(remotePath);
+    });
   }
 
   Future<Object?> _downloadToProject(Map<String, Object?> arguments) async {
@@ -1281,6 +1326,12 @@ class RemoteAgentToolsGroup {
       name == 'terminal.stop';
 
   Object? _decorateResult(Object? result, String name, String serverId) {
+    if (result is AiToolResult) {
+      return AiToolResult(
+        result: _decorateResult(result.result, name, serverId),
+        attachments: result.attachments,
+      );
+    }
     if (result is! Map) return result;
     final value = <String, Object?>{...Map<String, Object?>.from(result)};
     final processId = value['process_id'];

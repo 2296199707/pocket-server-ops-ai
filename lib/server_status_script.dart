@@ -84,6 +84,7 @@ load_value=$(awk '{print $1 " " $2 " " $3}' /proc/loadavg 2>/dev/null)
 disk_details_value=$(df -P -h 2>/dev/null | awk 'NR > 1 && $6 ~ /^\// {gsub("%", "", $5); printf "%s|%s|%s|%s|%s;", $6, $2, $3, $4, $5}')
 network_value=$(awk 'NR > 2 {name=$1; sub(/:/, "", name); if (name != "lo") {iface=name; rx += $2; tx += $10}} END {if (iface != "") printf "%s|%.0f|%.0f", iface, rx, tx}' /proc/net/dev 2>/dev/null)
 process_value=$(ps -e 2>/dev/null | awk 'NR > 1 {count++} END {print count + 0}')
+if [ "${PSO_TRAFFIC_MONITORING:-0}" = 1 ]; then
 hy2_detected=0
 hy2_status=not_detected
 hy2_pid=$(pgrep -xo hysteria 2>/dev/null)
@@ -114,6 +115,7 @@ if [ -n "$hy2_config" ] && command -v curl >/dev/null 2>&1; then
     hy2_traffic_json=$(curl -fsS --max-time 1 -H "Authorization: $hy2_stats_secret" "http://127.0.0.1:$hy2_stats_port/traffic" 2>/dev/null)
     if [ -n "$hy2_online_json" ] || [ -n "$hy2_traffic_json" ]; then hy2_api=1; fi
   fi
+fi
 fi
 cpu_snapshot() {
   awk '$1 == "cpu" || $1 ~ /^cpu[0-9]+$/ {
@@ -156,7 +158,7 @@ cpu_metrics=$(awk -v first="$cpu_before" -v second="$cpu_after" 'BEGIN {
   print "cpu_core_usage=" core_usage
 }')
 
-printf 'script_version=4\n'
+printf 'script_version=5\n'
 printf 'hostname=%s\n' "$(clean_value "$hostname_value")"
 printf 'os=%s\n' "$(clean_value "$os_value")"
 printf 'kernel=%s\n' "$(clean_value "$kernel_value")"
@@ -169,6 +171,7 @@ printf 'disk=%s\n' "$(clean_value "$disk_value")"
 printf 'disk_details=%s\n' "$(clean_value "$disk_details_value")"
 printf 'network=%s\n' "$(clean_value "$network_value")"
 printf 'processes=%s\n' "$(clean_value "$process_value")"
+if [ "${PSO_TRAFFIC_MONITORING:-0}" = 1 ]; then
 printf 'hy2_detected=%s\n' "$(clean_value "$hy2_detected")"
 printf 'hy2_status=%s\n' "$(clean_value "$hy2_status")"
 printf 'hy2_pid=%s\n' "$(clean_value "$hy2_pid")"
@@ -177,6 +180,7 @@ printf 'hy2_listen=%s\n' "$(clean_value "$hy2_listen")"
 printf 'hy2_online_json=%s\n' "$(clean_value "$hy2_online_json")"
 printf 'hy2_traffic_json=%s\n' "$(clean_value "$hy2_traffic_json")"
 printf 'hy2_traffic_api=%s\n' "$(clean_value "$hy2_api")"
+fi
 ''';
 
 const statusProbeCommand = r'''cpu_snapshot() {
@@ -226,7 +230,9 @@ metric_line() {
   printf '%s\n' "$metric_output" | awk -v name="$metric_name" 'index($0, name "=") == 1 {print; exit}'
 }
 
-if [ -x "$HOME/.local/bin/mobile-agent-status" ]; then
+# Old installed scripts probe HY2 unconditionally. Use the basic metrics
+# below while disabled so no script upgrade is required to stop that probe.
+if [ "${PSO_TRAFFIC_MONITORING:-0}" = 1 ] && [ -x "$HOME/.local/bin/mobile-agent-status" ]; then
   status_output=$("$HOME/.local/bin/mobile-agent-status")
   printf '%s\n' "$status_output"
   case "$status_output" in
@@ -248,7 +254,11 @@ if [ -x "$HOME/.local/bin/mobile-agent-status" ]; then
       ;;
   esac
 else
-  printf 'script_version=0\n'
+  if [ -x "$HOME/.local/bin/mobile-agent-status" ]; then
+    printf 'script_version=1\n'
+  else
+    printf 'script_version=0\n'
+  fi
   printf 'hostname=%s\n' "$(hostname 2>/dev/null | head -n 1)"
   printf 'os=%s\n' "$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')"
   printf 'kernel=%s\n' "$(uname -sr 2>/dev/null)"

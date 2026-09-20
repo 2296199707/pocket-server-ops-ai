@@ -194,9 +194,19 @@ class AgentLoop {
       return _wireApi(client) == 'responses' ? call.effectiveCallId : call.id;
     }
 
-    void addToolResult(AiToolCall call, String content) {
+    void addToolResult(
+      AiToolCall call,
+      String content, {
+      List<AiAttachment> attachments = const [],
+    }) {
       final callId = toolResultId(call);
-      messages.add(AiMessage.tool(toolCallId: callId, content: content));
+      messages.add(
+        AiMessage.tool(
+          toolCallId: callId,
+          content: content,
+          attachments: attachments,
+        ),
+      );
       handledToolCallIds.add(callId);
     }
 
@@ -674,18 +684,29 @@ class AgentLoop {
           ]);
           toolTimer.stop();
           final eventResult = _boundedToolResultValue(
-            result,
+            result is AiToolResult ? result.result : result,
             outputCharacterLimit,
           );
           final serialized = jsonEncode(eventResult);
+          final resultAttachments = result is AiToolResult
+              ? result.attachments
+              : const <AiAttachment>[];
           await _emit(onEvent, 'tool.completed', {
             'id': call.id,
             'call_id': toolResultId(call),
             'name': tool.definition.name,
             'result': eventResult,
+            if (resultAttachments.isNotEmpty)
+              'attachments': [
+                for (final item in resultAttachments) item.toJson(),
+              ],
             'elapsed_ms': toolTimer.elapsedMilliseconds,
           });
-          addToolResult(call, _toolResultContent(serialized));
+          addToolResult(
+            call,
+            _toolResultContent(serialized),
+            attachments: resultAttachments,
+          );
           recordToolOutcome(tool.definition.name, arguments, eventResult);
           if (stop.isCancelled) {
             final isUnknown = remoteOperationStarted;

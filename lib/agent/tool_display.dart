@@ -26,6 +26,9 @@ String toolArgumentSummary(Object? name, Object? arguments) {
     }
     return _compactLine(remote ?? project);
   }
+  if (toolName == 'server.view_image') {
+    return _compactLine(value('remote_path'));
+  }
   if (toolName == 'server.download_to_phone') {
     final remote = value('remote_path');
     final local = value('local_path');
@@ -72,6 +75,8 @@ String toolActionSummary(Object? name, Object? arguments) {
     return '执行 ${_compactLine(command ?? '命令', 40)}';
   }
   if (toolName == 'image.generate') return '生成图片';
+  if (toolName == 'image.view') return '查看图片';
+  if (toolName == 'preview.screenshot') return '预览截图';
   if (toolName == 'local.test_web') return '测试页面';
   if (toolName.startsWith('preview.')) return '预览页面';
   if (toolName == 'local.request_access') return '申请文件权限';
@@ -86,6 +91,7 @@ String toolActionSummary(Object? name, Object? arguments) {
       value('remote_path') ??
       value('entrypoint');
   final target = path == null ? '文件' : _lastPathPart(path);
+  if (toolName == 'server.view_image') return '查看图片 $target';
   if (toolName == 'server.download_to_project') return '下载 $target';
   if (toolName == 'server.download_to_phone') return '下载到手机 $target';
   if (toolName == 'server.upload_from_project') return '上传 $target';

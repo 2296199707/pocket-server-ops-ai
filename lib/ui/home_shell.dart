@@ -12,6 +12,7 @@ import '../app_controller.dart';
 import '../domain/models.dart';
 import '../ssh/ssh_connection.dart';
 import 'chat_page.dart';
+import 'dashboard_settings_page.dart';
 import 'file_manager_page.dart';
 import 'mcp_page.dart';
 import 'profile_sheets.dart';
@@ -1804,7 +1805,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 11,
+              itemCount: 12,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1869,7 +1870,10 @@ class SettingsPage extends StatelessWidget {
                 if (index == 9) {
                   return _DeveloperSettingsTile(controller: controller);
                 }
-                return _McpSettingsTile(controller: controller);
+                if (index == 10) {
+                  return _McpSettingsTile(controller: controller);
+                }
+                return _DashboardSettingsTile(controller: controller);
               },
             ),
     );
@@ -1902,6 +1906,35 @@ class _McpSettingsTile extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _DashboardSettingsTile extends StatelessWidget {
+  const _DashboardSettingsTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) => ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+        leading: const CircleAvatar(child: Icon(Icons.dashboard_outlined)),
+        title: const Text('仪表盘设置'),
+        subtitle: Text(
+          controller.dashboardTrafficEnabled ? '流量监控已开启' : '流量监控已关闭',
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => DashboardSettingsPage(controller: controller),
+            ),
+          );
+        },
+      ),
     );
   }
 }
