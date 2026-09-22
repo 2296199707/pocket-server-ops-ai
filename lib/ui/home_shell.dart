@@ -1805,7 +1805,7 @@ class SettingsPage extends StatelessWidget {
           ? const Center(child: CircularProgressIndicator())
           : ListView.separated(
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 88),
-              itemCount: 12,
+              itemCount: 13,
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 if (index == 0) {
@@ -1873,7 +1873,22 @@ class SettingsPage extends StatelessWidget {
                 if (index == 10) {
                   return _McpSettingsTile(controller: controller);
                 }
-                return _DashboardSettingsTile(controller: controller);
+                if (index == 11) {
+                  return _DashboardSettingsTile(controller: controller);
+                }
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  leading: const CircleAvatar(
+                    child: Icon(Icons.description_outlined),
+                  ),
+                  title: const Text('开源许可'),
+                  subtitle: const Text('项目许可、Codex 来源及第三方声明'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => showLicensePage(
+                    context: context,
+                    applicationName: 'PocketServerOps AI',
+                  ),
+                );
               },
             ),
     );

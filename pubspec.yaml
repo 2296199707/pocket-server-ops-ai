@@ -66,6 +66,11 @@ flutter:
   uses-material-design: true
   assets:
     - assets/relay/computer-relay-package.tar.gz
+    - LICENSE
+    - THIRD_PARTY_NOTICES.md
+    - assets/licenses/codex/LICENSE
+    - assets/licenses/codex/NOTICE
+    - assets/fonts/OFL.txt
   fonts:
     - family: NotoSansSC
       fonts:

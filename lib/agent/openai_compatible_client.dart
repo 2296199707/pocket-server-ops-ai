@@ -1505,8 +1505,14 @@ class OpenAiCompatibleClient implements AiChatClient, AiCompactionClient {
   void close() => _client.close();
 }
 
-// Kept in sync with the fixed Codex source snapshot used by the project
-// audit: codex-rs/prompts/templates/compact/{prompt,summary_prefix}.md.
+// The following two prompt constants are derived from OpenAI Codex:
+// codex-rs/prompts/templates/compact/{prompt,summary_prefix}.md
+// Verified at commit 6478a751fde8884b2fdc76486fe23175a8e795d4.
+// Copyright 2025 OpenAI. Licensed under the Apache License, Version 2.0.
+// Changes: embedded Markdown as Dart strings with escaped newlines and no
+// trailing newline, for the mobile compaction flow. Prompt wording is retained.
+// See assets/licenses/codex/LICENSE, assets/licenses/codex/NOTICE and
+// THIRD_PARTY_NOTICES.md. This attribution applies to the two constants below.
 const _codexSummarizationPrompt =
     'You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff '
     'summary for another LLM that will resume the task.\n\n'

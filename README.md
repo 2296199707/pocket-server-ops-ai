@@ -80,4 +80,6 @@ python3 -m http.server 4173 -d build/web
 
 ## 许可证
 
-本项目使用 [MIT License](LICENSE)。字体资源 Noto Sans SC 使用 SIL Open Font License 1.1，详见 [assets/fonts/OFL.txt](assets/fonts/OFL.txt)。
+本项目原创部分使用 [MIT License](LICENSE)，第三方内容保留各自许可证。
+Agent 实现参考了 [OpenAI Codex](https://github.com/openai/codex)，其中复用的上下文压缩提示词采用 Apache License 2.0；来源、修改说明及随附许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+字体资源 Noto Sans SC 使用 SIL Open Font License 1.1，详见 [assets/fonts/OFL.txt](assets/fonts/OFL.txt)。

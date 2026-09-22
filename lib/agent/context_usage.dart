@@ -168,6 +168,10 @@ class TaskContextUsage {
     );
   }
 
+  // Adapted from OpenAI Codex TokenUsage.percent_of_context_window_remaining
+  // in codex-rs/protocol/src/protocol.rs (Copyright 2025 OpenAI, Apache-2.0).
+  // Changes: nullable Dart usage fields and app metadata; baseline/formula kept.
+  // See assets/licenses/codex/LICENSE and NOTICE; THIRD_PARTY_NOTICES.md.
   int? get remainingPercent {
     final window = effectiveContextWindow;
     final used = last?.totalTokens;

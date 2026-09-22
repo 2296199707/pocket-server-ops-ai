@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'app_controller.dart';
 import 'credentials/credential_store.dart';
@@ -13,6 +15,25 @@ const _previewMode = bool.fromEnvironment('PREVIEW_MODE');
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(
+      ['PocketServerOps AI'],
+      await rootBundle.loadString('LICENSE'),
+    );
+    yield LicenseEntryWithLineBreaks(
+      ['PocketServerOps AI — Third-party notices'],
+      await rootBundle.loadString('THIRD_PARTY_NOTICES.md'),
+    );
+    yield LicenseEntryWithLineBreaks(
+      ['OpenAI Codex'],
+      '${await rootBundle.loadString('assets/licenses/codex/NOTICE')}\n'
+          '${await rootBundle.loadString('assets/licenses/codex/LICENSE')}',
+    );
+    yield LicenseEntryWithLineBreaks(
+      ['Noto Sans SC'],
+      await rootBundle.loadString('assets/fonts/OFL.txt'),
+    );
+  });
   runApp(const MyApp());
 }
 

@@ -17,6 +17,7 @@
 
 ### 2.1 Codex 源码
 
+- 来源许可与复用归属见 [Codex 归属审查](codex-attribution-audit.zh-CN.md)（2026-09-21 补充）；后续引入新内容同步更新，避免重复调查许可证。
 - 当前主快照：`/www/mobile-agent-tooling/openai-codex-source`；
 - 当前子代理专项固定 commit：`6478a751fde8884b2fdc76486fe23175a8e795d4`；历史条目保留各自
   已封存的 commit，不因更新主快照而重做调查；

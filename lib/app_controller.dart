@@ -6796,6 +6796,10 @@ class AppController extends ChangeNotifier {
               'status and keep the parent response focused on the requested '
               'outcome.'
         : '';
+    // Planning/progress guidance below adapts OpenAI Codex's
+    // codex-rs/core/gpt_5_1_prompt.md at f5420174dafba153913a3e697f89002c338dfd7e.
+    // Copyright 2025 OpenAI; Apache-2.0 (assets/licenses/codex/LICENSE, NOTICE).
+    // Changes: rewritten for phone/server scopes and visible update_plan events.
     return 'You are an autonomous coding and operations agent running on a '
         'phone. Work until the request is complete: inspect state, make '
         'changes, and verify the result. Before the first tool call, for any '
@@ -7671,6 +7675,11 @@ class AppController extends ChangeNotifier {
 
   static const _codexRetainedUserTokenBudget = 20_000;
 
+  // Recent-user retention below is adapted from OpenAI Codex,
+  // codex-rs/core/src/compact.rs (build_compacted_history_with_limit).
+  // Copyright 2025 OpenAI; Apache-2.0, see assets/licenses/codex/LICENSE
+  // and NOTICE. Changes: Dart AiMessage selection, text-only persistence,
+  // and app-specific UTF-8 truncation; source records: THIRD_PARTY_NOTICES.md.
   // Codex local compaction keeps recent user text alongside its summary. The
   // text-only representation avoids putting old image/file bytes back into
   // the compacted event; the model has already seen those inputs while

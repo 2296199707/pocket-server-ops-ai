@@ -2,16 +2,18 @@
 
 审查日期：2026-08-25
 
+许可声明补充：2026-09-21（Codex 来源及分发声明；下方依赖版本表保留原审查日期，本轮未重新审查全部依赖）。
+
 ## 结论
 
-本审查针对 `apps/mobile-agent-v1` 当前的 Flutter/Dart 依赖和随项目分发的字体资源。版本以 `pubspec.lock` 和 `.dart_tool/package_graph.json` 为准，许可证以本地 Pub 缓存中对应版本的 `LICENSE`/`NOTICE` 文件为准。
+原审查针对 `apps/mobile-agent-v1` 的 Flutter/Dart 依赖和随项目分发的字体资源。版本以 `pubspec.lock` 和 `.dart_tool/package_graph.json` 为准，许可证以本地 Pub 缓存中对应版本的 `LICENSE`/`NOTICE` 文件为准。Codex 源码和提示词的补充审查见 [codex-attribution-audit.zh-CN.md](codex-attribution-audit.zh-CN.md)。
 
 - 没有发现 GPL、LGPL 或 AGPL 依赖。
 - 直接依赖使用 MIT、BSD-2-Clause、BSD-3-Clause 等宽松许可证。
 - `file_picker` 的跨平台依赖链包含 `dbus`，其许可证是 MPL-2.0；当前 Android 构建通常不会使用 Linux 的这部分代码，但发布第三方清单时仍应保留该依赖的许可证和来源。
 - `pointycastle` 使用 Bouncy Castle 的 MIT 风格许可证，必须保留版权和许可声明。
 - `assets/fonts/NotoSansSC-Variable.ttf` 是 Noto Sans SC，项目已随附 SIL Open Font License 1.1 文本 `assets/fonts/OFL.txt`。
-- 项目根目录当前没有 `LICENSE`。因此代码本身尚未声明项目许可证，上传 GitHub 前仍需由项目所有者选择并添加 MIT、Apache-2.0 或其他明确许可证；依赖许可证不会替代项目自身许可证。
+- 项目根目录已有 MIT `LICENSE`（Copyright 2026 kaka229），适用于本项目原创部分。Codex 复用内容保留 Apache-2.0 归属，许可证和上游 NOTICE 随附于 `assets/licenses/codex/`；各第三方许可证不会被项目 MIT 替代。
 
 这是一份工程层面的依赖清单，不构成法律意见。
 
@@ -63,8 +65,8 @@ Flutter SDK 和其 engine 自带的第三方组件另受 Flutter SDK 的许可�
 
 ## 发布前需要做的事
 
-1. 选择并添加项目根目录的主许可证；在没有选择前不要把项目标记成“已授权他人修改和再分发”。
-2. 生成 `THIRD_PARTY_NOTICES.md` 或应用内第三方许可页面，至少包含上表依赖的版权、许可证全文或官方许可证链接；特别保留 `dbus` 的 MPL-2.0 声明、Bouncy Castle 声明和字体的 OFL 文本。
+1. 已有项目根目录 MIT `LICENSE`；发布时保留第三方内容的独立许可归属。
+2. 已有 `THIRD_PARTY_NOTICES.md`，本轮补入 Codex 来源与改编说明；“设置 → 开源许可”展示项目许可、Codex LICENSE/NOTICE 和 Flutter 注册的依赖许可。发布时继续保留 `dbus` 的 MPL-2.0 声明、Bouncy Castle 声明和字体 OFL 文本。
 3. 每次升级 `pubspec.lock` 后重新检查依赖图和许可证，避免新依赖悄悄引入强 copyleft 条款。
 4. 对外发布 APK 时保留本项目的 `assets/fonts/OFL.txt`，并记录字体来源版本。
 
